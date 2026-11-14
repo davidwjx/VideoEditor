@@ -18,7 +18,10 @@ PreviewController::PreviewController(QObject *parent)
     connect(m_worker, &DecoderWorker::opened, this, &PreviewController::onOpened);
     connect(m_worker, &DecoderWorker::frameReady, this,
             &PreviewController::onFrameReady);
-    connect(m_worker, &DecoderWorker::error, this, &PreviewController::error);
+    connect(m_worker, &DecoderWorker::error, this,
+            &PreviewController::onError);
+    connect(m_worker, &DecoderWorker::finished, this,
+            &PreviewController::onFinished);
     m_thread.start();
 
     m_frameTimer.setSingleShot(false);
@@ -44,6 +47,11 @@ void PreviewController::setItem(VideoPreviewItem *item)
         connect(m_item, &VideoPreviewItem::framePresented,
                 this, &PreviewController::framePresented,
                 Qt::QueuedConnection);
+        connect(m_item, &VideoPreviewItem::framePresented,
+                this, &PreviewController::onFramePresented,
+                Qt::QueuedConnection);
+        connect(m_item, &VideoPreviewItem::errorOccurred,
+                this, &PreviewController::onError, Qt::QueuedConnection);
     }
     emit itemChanged();
 }
@@ -59,6 +67,7 @@ void PreviewController::openMedia(const QString &path, const QString &proxyPath)
     m_mediaName = QFileInfo(path).fileName();
     m_decodeMode.clear();
     m_framePending = false;
+    m_atEnd = false;
     emit positionChanged();
     emit durationChanged();
     emit mediaChanged();
@@ -72,6 +81,10 @@ void PreviewController::play()
 {
     if (!m_info.supported || m_playing)
         return;
+    // Pressing play on the last frame restarts from the beginning; the seek
+    // also clears the decoder's EOF state and queues the first frame.
+    if (m_atEnd)
+        seekMs(0);
     m_playing = true;
     if (m_frameTimer.interval() <= 0)
         m_frameTimer.setInterval(33);
@@ -96,6 +109,7 @@ void PreviewController::togglePlay()
 
 void PreviewController::seekMs(qint64 ms)
 {
+    m_atEnd = false;
     m_positionUs = qMax<qint64>(0, ms) * 1000;
     emit positionChanged();
     QMetaObject::invokeMethod(m_worker, "seek", Qt::QueuedConnection,
@@ -132,21 +146,48 @@ void PreviewController::onOpened(const MediaInfo &info, bool hardware,
 
     emit durationChanged();
     emit decodeModeChanged();
-    requestNextFrame();
+    // The decoder already delivered the first frame in open(); do not request
+    // another one here or the initial display can skip frame 0.
 }
 
 void PreviewController::onFrameReady(int slot, const QSize &size, int rotation,
                                      qint64 ptsUs, quintptr h0, quintptr h1,
                                      quintptr h2)
 {
-    m_framePending = false;
     m_positionUs = ptsUs;
+    m_atEnd = false;
     emit positionChanged();
 
-    if (m_item) {
-        m_item->setSharedHandles({h0, h1, h2});
-        m_item->submitFrame(slot, size, rotation, ptsUs);
+    if (!m_item) {
+        m_framePending = false;
+        return;
     }
+
+    // The frame is not done until the scene graph presents it: a slot that is
+    // produced but never presented holds its keyed mutex and can stall the
+    // producer once the ring wraps.
+    m_framePending = true;
+    m_item->setSharedHandles({h0, h1, h2});
+    m_item->submitFrame(slot, size, rotation, ptsUs);
+}
+
+void PreviewController::onFramePresented(qint64 pts)
+{
+    m_framePending = false;
+}
+
+void PreviewController::onFinished()
+{
+    m_framePending = false;
+    m_atEnd = true;
+    pause();
+}
+
+void PreviewController::onError(const QString &message)
+{
+    m_framePending = false;
+    pause();
+    emit error(message);
 }
 
 void PreviewController::requestNextFrame()

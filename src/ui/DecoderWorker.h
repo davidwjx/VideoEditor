@@ -32,6 +32,7 @@ signals:
     void frameReady(int slot, QSize size, int rotationDegrees, qint64 ptsUs,
                     quintptr handle0, quintptr handle1, quintptr handle2);
     void error(QString message);
+    void finished();
 
 private:
     void clearDecoder();

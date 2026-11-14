@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 
+#include <QMetaObject>
 #include <QSGSimpleTextureNode>
 
 namespace VideoEditor {
@@ -17,6 +18,8 @@ void VideoPreviewItem::setSharedHandles(const std::array<quintptr, 3> &handles)
     if (m_handles == handles)
         return;
     m_handles = handles;
+    m_abandoned = {};
+    m_bridgeErrorReported = false;
     m_resetRequested.store(true);
     update();
 }
@@ -24,6 +27,8 @@ void VideoPreviewItem::setSharedHandles(const std::array<quintptr, 3> &handles)
 void VideoPreviewItem::resetBridge()
 {
     m_hasPending = false;
+    m_abandoned = {};
+    m_bridgeErrorReported = false;
     m_resetRequested.store(true);
     update();
 }
@@ -31,6 +36,12 @@ void VideoPreviewItem::resetBridge()
 void VideoPreviewItem::submitFrame(int slot, const QSize &size,
                                    int rotationDegrees, qint64 ptsUs)
 {
+    // A frame that is replaced before it is presented must be released back to
+    // the producer, or that ring slot stays locked forever.
+    if (m_hasPending && m_pendingSlot >= 0 && m_pendingSlot < 3
+        && m_pendingSlot != slot) {
+        m_abandoned[size_t(m_pendingSlot)] = true;
+    }
     m_pendingSlot = slot;
     m_pendingSize = size;
     m_rotation = rotationDegrees;
@@ -50,6 +61,14 @@ QRectF VideoPreviewItem::aspectFitRect(const QSizeF &frameSize) const
     return result;
 }
 
+void VideoPreviewItem::geometryChange(const QRectF &newGeometry,
+                                      const QRectF &oldGeometry)
+{
+    QQuickItem::geometryChange(newGeometry, oldGeometry);
+    if (newGeometry.size() != oldGeometry.size())
+        update();
+}
+
 QSGNode *VideoPreviewItem::updatePaintNode(QSGNode *oldNode,
                                            UpdatePaintNodeData *)
 {
@@ -66,8 +85,25 @@ QSGNode *VideoPreviewItem::updatePaintNode(QSGNode *oldNode,
     }
 
     if (!m_bridge.isValid() && window() && m_pendingSize.isValid()) {
-        m_bridge.initialize(window(), m_handles, m_pendingSize.width(),
-                            m_pendingSize.height());
+        QString error;
+        if (!m_bridge.initialize(window(), m_handles, m_pendingSize.width(),
+                                 m_pendingSize.height(), &error)) {
+            if (!m_bridgeErrorReported && !error.isEmpty()) {
+                m_bridgeErrorReported = true;
+                emit errorOccurred(error);
+            }
+        } else {
+            m_bridgeErrorReported = false;
+        }
+    }
+
+    if (m_bridge.isValid()) {
+        for (int i = 0; i < 3; ++i) {
+            if (m_abandoned[size_t(i)]) {
+                m_bridge.discard(i);
+                m_abandoned[size_t(i)] = false;
+            }
+        }
     }
 
     if (m_hasPending && m_bridge.isValid()) {
@@ -81,8 +117,20 @@ QSGNode *VideoPreviewItem::updatePaintNode(QSGNode *oldNode,
             node->markDirty(QSGNode::DirtyMaterial);
             emit framePresented(m_pendingPts);
             m_hasPending = false;
+        } else {
+            // The producer may not have released the keyed mutex yet. Never
+            // block the render thread; schedule the retry on the GUI thread
+            // (update() called during the sync pass can be swallowed by the
+            // current render cycle).
+            QMetaObject::invokeMethod(this, [this] { update(); },
+                                      Qt::QueuedConnection);
         }
     }
+
+    // Keep the aspect fit in sync with the item's current size even while
+    // paused (a resize must recentre/rescale the last presented frame).
+    if (node && m_pendingSize.isValid())
+        node->setRect(aspectFitRect(m_pendingSize));
 
     // No texture yet: return no node so the renderer never sees an empty
     // QSGSimpleTextureNode (its material logs "No QSGTexture provided").

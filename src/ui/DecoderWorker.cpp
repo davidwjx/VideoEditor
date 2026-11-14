@@ -115,18 +115,26 @@ void DecoderWorker::open(const QString &path, const QString &proxyPath)
 
 void DecoderWorker::requestFrame()
 {
-    if (!m_decoder || m_busy || m_eof)
+    if (!m_decoder || m_busy)
         return;
+    if (m_eof) {
+        // A request after EOF must still wake the controller so it does not
+        // stay in the "playing" state with a pending request forever.
+        emit finished();
+        return;
+    }
 
     m_busy = true;
     DecodedFrame frame;
     QString error;
     if (!m_decoder->decodeNext(frame, &error)) {
         m_busy = false;
-        if (!error.isEmpty())
+        if (!error.isEmpty()) {
             emit this->error(error);
-        else
+        } else {
             m_eof = true;
+            emit finished();
+        }
         return;
     }
 

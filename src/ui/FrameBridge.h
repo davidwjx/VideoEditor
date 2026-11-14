@@ -19,6 +19,10 @@ public:
                     const std::array<quintptr, 3> &handles,
                     int width, int height, QString *error = nullptr);
     QSGTexture *present(int slot, QQuickWindow *window);
+    // Release a slot whose frame the item will never present (it was replaced
+    // by a newer pending frame). Safe to call for slots that are not released
+    // by the producer yet.
+    void discard(int slot);
     bool isValid() const { return m_valid; }
 
 private:

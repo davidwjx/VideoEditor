@@ -44,6 +44,8 @@ AppController::AppController(QObject *parent, QString recoveryPath)
     m_preview = new PreviewController(this);
     connect(m_preview, &PreviewController::framePresented, this,
             [this](qint64) { emit selftestFramePresented(); });
+    connect(m_preview, &PreviewController::error, this,
+            &AppController::setLastError);
 }
 
 AppController::~AppController() = default;

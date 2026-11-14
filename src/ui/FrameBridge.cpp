@@ -86,7 +86,14 @@ QSGTexture *FrameBridge::present(int slot, QQuickWindow *window)
         return nullptr;
 
     Slot &target = m_slots[slot];
-    if (!target.mutex || target.mutex->AcquireSync(1, 2000) != S_OK)
+    if (!target.mutex)
+        return nullptr;
+    // The producer releases key 1 before it announces the frame, so a miss is
+    // transient. Never block the render thread waiting for a producer; a short
+    // grace absorbs GPU submission latency and the caller retries on the next
+    // frame when it still misses.
+    const HRESULT acquire = target.mutex->AcquireSync(1, 2);
+    if (acquire != S_OK)
         return nullptr;
 
     m_context->CopyResource(target.owned.Get(), target.shared.Get());
@@ -95,6 +102,15 @@ QSGTexture *FrameBridge::present(int slot, QQuickWindow *window)
     QSGTexture *texture = QNativeInterface::QSGD3D11Texture::fromNative(
         target.owned.Get(), window, QSize(m_width, m_height), {});
     return texture;
+}
+
+void FrameBridge::discard(int slot)
+{
+    if (!m_valid || slot < 0 || slot >= 3)
+        return;
+    Slot &slotData = m_slots[slot];
+    if (slotData.mutex && slotData.mutex->AcquireSync(1, 0) == S_OK)
+        slotData.mutex->ReleaseSync(0);
 }
 
 } // namespace VideoEditor

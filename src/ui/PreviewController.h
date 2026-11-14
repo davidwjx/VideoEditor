@@ -60,6 +60,9 @@ private:
                   const QString &fallbackReason);
     void onFrameReady(int slot, const QSize &size, int rotation, qint64 ptsUs,
                       quintptr h0, quintptr h1, quintptr h2);
+    void onFramePresented(qint64 ptsUs);
+    void onFinished();
+    void onError(const QString &message);
     void requestNextFrame();
 
     QThread m_thread;
@@ -73,6 +76,7 @@ private:
     qint64 m_durationUs = 0;
     bool m_playing = false;
     bool m_framePending = false;
+    bool m_atEnd = false;
 };
 
 } // namespace VideoEditor

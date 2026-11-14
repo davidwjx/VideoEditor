@@ -42,7 +42,10 @@ bool FramePublisher::publish(DecodedFrame &frame, int rotationDegrees,
 
     const int slot = m_ring.nextWriteIndex();
     IDXGIKeyedMutex *mutex = m_ring.mutex(slot);
-    if (!mutex || mutex->AcquireSync(0, 5000) != S_OK) {
+    // The consumer presents one frame at a time and releases abandoned slots,
+    // so a wait here should be near-instant. Keep it bounded: a long stall
+    // would freeze playback with no feedback.
+    if (!mutex || mutex->AcquireSync(0, 1000) != S_OK) {
         if (error)
             *error = QStringLiteral("等待共享纹理写入超时。");
         return false;
