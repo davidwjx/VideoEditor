@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <vector>
 
 #include <objbase.h>
 
@@ -16,6 +15,9 @@
 namespace VideoEditor {
 
 namespace {
+
+// Consecutive device I/O failures tolerated before declaring the endpoint lost.
+constexpr int kIoFailureThreshold = 3;
 
 void setError(QString *error, const QString &message)
 {
@@ -30,9 +32,30 @@ QString hexHresult(HRESULT hr)
 
 } // namespace
 
+void floatToPcm16(const float *samples, std::int16_t *out, std::size_t count)
+{
+    if (!samples || !out)
+        return;
+    for (std::size_t i = 0; i < count; ++i) {
+        const float clamped = std::clamp(samples[i], -1.0f, 1.0f);
+        out[i] = std::int16_t(std::lround(clamped * 32767.0f));
+    }
+}
+
 WasapiOutput::~WasapiOutput()
 {
     release();
+}
+
+void WasapiOutput::noteIoFailure() const
+{
+    if (m_ioFailures.fetch_add(1) + 1 >= kIoFailureThreshold)
+        m_deviceLost.store(true);
+}
+
+void WasapiOutput::noteIoSuccess() const
+{
+    m_ioFailures.store(0);
 }
 
 void WasapiOutput::release()
@@ -111,18 +134,21 @@ std::unique_ptr<WasapiOutput> WasapiOutput::create(int sampleRate, int channels,
     format.wBitsPerSample = 32;
     format.nBlockAlign = WORD(channels * 4);
     format.nAvgBytesPerSec = DWORD(sampleRate * channels * 4);
-    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-                                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                            200'000, 0, &format, nullptr);
+    const DWORD convertFlags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, convertFlags, 200'000, 0,
+                            &format, nullptr);
     if (FAILED(hr)) {
-        // Last resort: plain 16-bit PCM shared mode. write() converts.
+        // Last resort: plain 16-bit PCM with the same automatic conversion.
+        // Dropping AUTOCONVERTPCM here would request a format the shared-mode
+        // engine usually cannot provide, which made the first revision of this
+        // fallback effectively dead code. write() converts to int16 itself.
         format.wFormatTag = WAVE_FORMAT_PCM;
         format.wBitsPerSample = 16;
         format.nBlockAlign = WORD(channels * 2);
         format.nAvgBytesPerSec = DWORD(sampleRate * channels * 2);
-        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 200'000, 0, &format,
-                                nullptr);
+        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, convertFlags, 200'000, 0,
+                                &format, nullptr);
         if (SUCCEEDED(hr))
             output->m_pcm16 = true;
     }
@@ -155,6 +181,7 @@ std::unique_ptr<WasapiOutput> WasapiOutput::create(int sampleRate, int channels,
     output->m_client = client;
     output->m_render = render;
     output->m_bufferFrames = bufferFrames;
+    output->m_converted.resize(std::size_t(bufferFrames) * std::size_t(channels));
     return output;
 }
 
@@ -169,6 +196,7 @@ bool WasapiOutput::start(QString *error)
         setError(error, QStringLiteral("无法启动音频输出（%1）。").arg(hexHresult(hr)));
         return false;
     }
+    noteIoSuccess();
     m_started.store(true);
     return true;
 }
@@ -179,38 +207,71 @@ void WasapiOutput::stop()
         m_client->Stop();
 }
 
+void WasapiOutput::flush()
+{
+    if (!m_client)
+        return;
+    // IAudioClient::Reset requires a stopped stream and discards every queued
+    // frame, so a resumed/seeked stream never replays stale audio.
+    if (m_started.exchange(false))
+        m_client->Stop();
+    const HRESULT hr = m_client->Reset();
+    if (FAILED(hr)) {
+        noteIoFailure();
+        return;
+    }
+    noteIoSuccess();
+}
+
+int WasapiOutput::availableFrames() const
+{
+    if (!m_client)
+        return 0;
+    UINT32 padding = 0;
+    if (FAILED(m_client->GetCurrentPadding(&padding))) {
+        noteIoFailure();
+        return 0;
+    }
+    return int(m_bufferFrames > padding ? m_bufferFrames - padding : 0);
+}
+
 int WasapiOutput::write(const float *samples, int frames)
 {
     if (!m_client || !m_render || !samples || frames <= 0)
         return 0;
 
     UINT32 padding = 0;
-    if (FAILED(m_client->GetCurrentPadding(&padding)))
+    if (FAILED(m_client->GetCurrentPadding(&padding))) {
+        noteIoFailure();
         return 0;
+    }
     const UINT32 available = m_bufferFrames > padding ? m_bufferFrames - padding : 0;
     const int writable = int(std::min<UINT32>(UINT32(frames), available));
     if (writable <= 0) {
-        // Device buffer full; let the engine retry on the next 10 ms tick.
+        // Device buffer full; the engine retries on the next tick. This is not
+        // an I/O failure.
         QThread::msleep(1);
         return 0;
     }
 
     BYTE *buffer = nullptr;
-    if (FAILED(m_render->GetBuffer(UINT32(writable), &buffer)) || !buffer)
+    if (FAILED(m_render->GetBuffer(UINT32(writable), &buffer)) || !buffer) {
+        noteIoFailure();
         return 0;
+    }
 
     if (m_pcm16) {
-        std::vector<std::int16_t> converted(size_t(writable) * size_t(m_channels));
-        for (size_t i = 0; i < converted.size(); ++i) {
-            const float clamped = std::clamp(samples[i], -1.0f, 1.0f);
-            converted[i] = std::int16_t(std::lround(clamped * 32767.0f));
-        }
-        std::memcpy(buffer, converted.data(), converted.size() * sizeof(std::int16_t));
+        const std::size_t count = std::size_t(writable) * std::size_t(m_channels);
+        if (m_converted.size() < count)
+            m_converted.resize(count);
+        floatToPcm16(samples, m_converted.data(), count);
+        std::memcpy(buffer, m_converted.data(), count * sizeof(std::int16_t));
     } else {
         std::memcpy(buffer, samples,
-                    size_t(writable) * size_t(m_channels) * sizeof(float));
+                    std::size_t(writable) * std::size_t(m_channels) * sizeof(float));
     }
     m_render->ReleaseBuffer(UINT32(writable), 0);
+    noteIoSuccess();
     m_writtenFrames.fetch_add(writable);
     return writable;
 }
@@ -220,6 +281,8 @@ int64_t WasapiOutput::playedFrames() const
     UINT32 padding = 0;
     if (m_client && SUCCEEDED(m_client->GetCurrentPadding(&padding)))
         return std::max<int64_t>(0, m_writtenFrames.load() - int64_t(padding));
+    if (m_client)
+        noteIoFailure();
     return m_writtenFrames.load();
 }
 

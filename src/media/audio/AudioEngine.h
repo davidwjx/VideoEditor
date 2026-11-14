@@ -24,6 +24,10 @@ namespace VideoEditor {
 // with queued invocations, while positionUs()/hasOutputDevice()/
 // lastDeviceError() are safe to read from any thread. The audio clock is the
 // master clock; video presentation follows it.
+//
+// The `parent` argument is accepted for QObject-style construction but is not
+// applied, because parenting would prevent moveToThread() to the audio thread.
+// Keep the engine unparented (stack member or owned explicitly).
 class AudioEngine : public QObject {
     Q_OBJECT
 
@@ -41,14 +45,15 @@ public:
     QString lastDeviceError() const;
 
     // Replaces the sink immediately (blocking) so tests can run without audio
-    // hardware. Safe to call right after construction.
+    // hardware. Safe to call right after construction; must not be used while
+    // playback is running except by tests.
     void setSinkFactoryForTest(SinkFactory factory);
 
 public slots:
     void setProject(const Project &project);
-    void play(int64_t positionUs);
+    void play(qint64 positionUs);
     void pause();
-    void seek(int64_t positionUs);
+    void seek(qint64 positionUs);
     void shutdown();
 
 signals:
@@ -58,6 +63,9 @@ signals:
 private:
     void dispatchToAudioThread(std::function<void()> work, bool blocking);
     void replaceSink(SinkFactory factory, QString *error);
+    bool applyPendingSeek(bool restart);
+    void updateClockFromSink();
+    void failDevice(const QString &error);
     void setDeviceError(const QString &error);
     void clearDeviceError();
     void onRenderTimer();
@@ -72,13 +80,20 @@ private:
     mutable QMutex m_errorMutex;
     QString m_deviceError;
     std::atomic_bool m_hasOutputDevice{false};
+    std::atomic_bool m_shutdownRequested{false};
     std::atomic<int64_t> m_pendingSeekUs{-1};
 
     bool m_playing = false;
     int64_t m_playStartUs = 0;
     int64_t m_sinkBaseFrames = 0;
     int m_notifyCounter = 0;
+
+    // One mixer block plus a defensive carry for sinks that accept less than
+    // they advertise, so no rendered sample is ever dropped.
     std::vector<float> m_block;
+    std::vector<float> m_carry;
+    int m_carryFrames = 0;
+    int m_carryOffset = 0;
 };
 
 } // namespace VideoEditor
