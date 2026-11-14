@@ -15,6 +15,8 @@ add_library(videoeditor_ui STATIC
   DecoderWorker.cpp
   PreviewController.h
   PreviewController.cpp
+  WaveformImageProvider.h
+  WaveformImageProvider.cpp
 )
 target_include_directories(videoeditor_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(videoeditor_ui

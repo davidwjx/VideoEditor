@@ -51,6 +51,10 @@ add_library(videoeditor_media STATIC
   audio/ClipAudioReader.cpp
   audio/TimelineMixer.h
   audio/TimelineMixer.cpp
+  audio/Waveform.h
+  audio/Waveform.cpp
+  audio/WaveformService.h
+  audio/WaveformService.cpp
 )
 # Accept both "probe/MediaProbe.h" and "MediaProbe.h" from consumers, and the
 # same for the decode and proxy/cache headers.

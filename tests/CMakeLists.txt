@@ -36,6 +36,7 @@ add_executable(media_tests
   media/AudioMixTest.cpp
   media/AudioSyncTest.cpp
   media/AudioEngineTest.cpp
+  media/WaveformTest.cpp
   TestMain.cpp)
 target_link_libraries(media_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui Qt6::Test d3d11 dxgi d3dcompiler)
@@ -48,9 +49,12 @@ gtest_discover_tests(media_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV
 add_executable(ui_tests
   ui/TimelineModelTest.cpp
   ui/TimelineControllerTest.cpp
+  ui/WaveformImageProviderTest.cpp
   TestGuiMain.cpp)
 target_link_libraries(ui_tests PRIVATE
   videoeditor_ui GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
+target_compile_definitions(ui_tests PRIVATE
+  VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 gtest_discover_tests(ui_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 
