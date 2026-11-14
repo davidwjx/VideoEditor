@@ -53,7 +53,11 @@ public:
     void removeTrack(const QString &trackId);
     void moveTrack(int fromIndex, int toIndex);
 
+    // Generates an id when empty and rejects duplicate ids, invalid ranges and
+    // empty text. Returns the cue id, or an empty string when rejected.
     QString addSubtitleCue(const QString &trackId, SubtitleCue cue);
+    // Replaces the entire cue (identified by cueId) and keeps the track's cues
+    // sorted by startUs. Returns without an undo step when the cue is missing.
     void updateSubtitleCue(const QString &trackId, const QString &cueId,
                            const SubtitleCue &cue);
     void removeSubtitleCue(const QString &trackId, const QString &cueId);

@@ -180,6 +180,63 @@ TEST(Srt, ToleratesArrowPaddingAndExtraBlankLines)
     EXPECT_EQ(result.cues.first().text, QStringLiteral("带空格"));
 }
 
+TEST(Srt, ReportsMissingTimecode)
+{
+    const SrtParseResult result = parseSrt("1\n");
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.error.contains(QStringLiteral("缺少时间码")));
+}
+
+TEST(Srt, ReportsMissingText)
+{
+    const SrtParseResult result = parseSrt(
+        "1\n00:00:00,000 --> 00:00:01,000\n\n");
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.error.contains(QStringLiteral("第 1 条")));
+    EXPECT_TRUE(result.error.contains(QStringLiteral("没有文本")));
+}
+
+TEST(Srt, ReportsWhitespaceOnlyText)
+{
+    const SrtParseResult result = parseSrt(
+        "1\n00:00:00,000 --> 00:00:01,000\n   \n");
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.error.contains(QStringLiteral("没有文本")));
+}
+
+TEST(Srt, ReportsEmptyFile)
+{
+    const SrtParseResult result = parseSrt(QByteArray());
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.error.contains(QStringLiteral("没有可导入的字幕")));
+}
+
+TEST(Srt, SkipsInvalidRangesAndEmptyTextOnExport)
+{
+    QList<SubtitleCue> cues;
+    SubtitleCue valid;
+    valid.id = QStringLiteral("valid");
+    valid.startUs = 0;
+    valid.endUs = 1'000'000;
+    valid.text = QStringLiteral("有效");
+    SubtitleCue inverted = valid;
+    inverted.id = QStringLiteral("inverted");
+    inverted.startUs = 2'000'000;
+    inverted.endUs = 1'000'000;
+    inverted.text = QStringLiteral("倒序");
+    SubtitleCue emptyText = valid;
+    emptyText.id = QStringLiteral("empty");
+    emptyText.startUs = 3'000'000;
+    emptyText.endUs = 4'000'000;
+    emptyText.text = QStringLiteral("   ");
+    cues = {valid, inverted, emptyText};
+
+    const SrtParseResult parsed = parseSrt(writeSrt(cues));
+    ASSERT_TRUE(parsed.ok()) << parsed.error.toStdString();
+    ASSERT_EQ(parsed.cues.size(), 1);
+    EXPECT_EQ(parsed.cues.first().text, QStringLiteral("有效"));
+}
+
 TEST(Srt, FormatsTime)
 {
     EXPECT_EQ(formatSrtTime(3'661'234'000), QStringLiteral("01:01:01,234"));

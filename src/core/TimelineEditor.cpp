@@ -753,12 +753,7 @@ QList<TrackEdit> TimelineEditor::editsForCues(
     const Track *track = m_document.trackById(trackId);
     if (!track || track->type != TrackType::Subtitle || track->locked)
         return {};
-    TrackEdit edit;
-    edit.trackId = trackId;
-    edit.beforeClips = track->clips;
-    edit.afterClips = track->clips;
-    edit.beforeCues = track->cues;
-    edit.afterCues = track->cues;
+    TrackEdit edit = snapshotTrack(*track);
     mutate(edit.afterCues);
     if (edit.afterCues == edit.beforeCues)
         return {};
@@ -771,6 +766,8 @@ QString TimelineEditor::addSubtitleCue(const QString &trackId, SubtitleCue cue)
         cue.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (cue.endUs <= cue.startUs || cue.startUs < 0)
         return {};
+    if (cue.text.trimmed().isEmpty())
+        return {};
     cue.positionXPermille = qBound(0, cue.positionXPermille, 1000);
     cue.positionYPermille = qBound(0, cue.positionYPermille, 1000);
     if (cue.styleId.isEmpty())
@@ -778,6 +775,12 @@ QString TimelineEditor::addSubtitleCue(const QString &trackId, SubtitleCue cue)
     const QString id = cue.id;
     const QList<TrackEdit> edits =
         editsForCues(trackId, [cue](QList<SubtitleCue> &cues) {
+            // Reject a caller-supplied id that already exists: update/remove
+            // address cues by id and duplicates would be ambiguous.
+            for (const SubtitleCue &existing : cues) {
+                if (existing.id == cue.id)
+                    return;
+            }
             int index = cues.size();
             for (int i = 0; i < cues.size(); ++i) {
                 if (cues.at(i).startUs > cue.startUs) {
@@ -799,6 +802,8 @@ void TimelineEditor::updateSubtitleCue(const QString &trackId,
 {
     if (cue.endUs <= cue.startUs || cue.startUs < 0)
         return;
+    if (cue.text.trimmed().isEmpty())
+        return;
     SubtitleCue updated = cue;
     updated.id = cueId;
     updated.positionXPermille = qBound(0, updated.positionXPermille, 1000);
@@ -807,12 +812,22 @@ void TimelineEditor::updateSubtitleCue(const QString &trackId,
         updated.styleId = QStringLiteral("default");
     pushEdits(QStringLiteral("编辑字幕"),
               editsForCues(trackId, [cueId, updated](QList<SubtitleCue> &cues) {
+                  bool found = false;
                   for (SubtitleCue &existing : cues) {
                       if (existing.id == cueId) {
                           existing = updated;
-                          return;
+                          found = true;
+                          break;
                       }
                   }
+                  if (!found)
+                      return;
+                  // Keep the sorted-by-startUs invariant that addSubtitleCue
+                  // and importSrt rely on when placing new cues.
+                  std::stable_sort(cues.begin(), cues.end(),
+                                   [](const SubtitleCue &a, const SubtitleCue &b) {
+                                       return a.startUs < b.startUs;
+                                   });
               }));
 }
 
@@ -848,6 +863,17 @@ void TimelineEditor::applySubtitleStyle(const QString &trackId,
 int TimelineEditor::importSrt(const QString &trackId, const QByteArray &bytes,
                               QString *error)
 {
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->type != TrackType::Subtitle) {
+        if (error)
+            *error = QStringLiteral("未找到可用的字幕轨。");
+        return 0;
+    }
+    if (track->locked) {
+        if (error)
+            *error = QStringLiteral("字幕轨已锁定。");
+        return 0;
+    }
     const SrtParseResult parsed = parseSrt(bytes);
     if (!parsed.ok()) {
         if (error)

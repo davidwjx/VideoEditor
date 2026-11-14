@@ -163,7 +163,8 @@ SrtParseResult parseSrt(const QByteArray &bytes, const QString &defaultStyleId)
         }
 
         const QStringList textLines = lines.mid(timeLine + 1);
-        if (textLines.isEmpty()) {
+        const QString text = textLines.join(QLatin1Char('\n'));
+        if (textLines.isEmpty() || text.trimmed().isEmpty()) {
             result.error = QStringLiteral("第 %1 条字幕没有文本。").arg(cueIndex);
             return result;
         }
@@ -171,7 +172,7 @@ SrtParseResult parseSrt(const QByteArray &bytes, const QString &defaultStyleId)
         cue.id = QStringLiteral("cue-%1").arg(cueIndex);
         cue.startUs = startUs;
         cue.endUs = endUs;
-        cue.text = textLines.join(QLatin1Char('\n'));
+        cue.text = text;
         cue.styleId = defaultStyleId;
         result.cues.append(cue);
     }
@@ -198,8 +199,13 @@ QByteArray writeSrt(const QList<SubtitleCue> &cues)
 {
     QList<SubtitleCue> sorted;
     for (const SubtitleCue &cue : cues) {
-        if (cue.enabled)
-            sorted.append(cue);
+        // Never emit entries that a player cannot display: disabled, empty
+        // text, or a zero/inverted range.
+        if (!cue.enabled || cue.endUs <= cue.startUs)
+            continue;
+        if (cue.text.trimmed().isEmpty())
+            continue;
+        sorted.append(cue);
     }
     std::stable_sort(sorted.begin(), sorted.end(),
                      [](const SubtitleCue &a, const SubtitleCue &b) {
