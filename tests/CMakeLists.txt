@@ -50,3 +50,21 @@ set_tests_properties(preview_selftest PROPERTIES
   TIMEOUT 30
   LABELS "gpu"
 )
+
+# One end-to-end preview selftest per supported fixture. Each test opens the
+# fixture in the Qt Quick preview window and exits after the first presented
+# frame, so it needs an interactive desktop session.
+foreach(_fixture IN ITEMS
+    mpeg4.mp4 h264.mp4 h265.mp4 h265_10bit.mp4 wmv2.wmv rotated.mp4
+    "中文 文件名.mp4" noaudio.mp4)
+  get_filename_component(_name "${_fixture}" NAME_WE)
+  add_test(NAME "preview_${_name}"
+           COMMAND VideoEditor --selftest
+                   "${CMAKE_SOURCE_DIR}/tests/fixtures/${_fixture}")
+  set_tests_properties("preview_${_name}" PROPERTIES
+    ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+    ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+    TIMEOUT 30
+    LABELS "gpu"
+  )
+endforeach()
