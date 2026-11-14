@@ -36,7 +36,7 @@
       "configurePreset": "windows-x64-debug",
       "configuration": "Debug",
       "environment": {
-        "PATH": "C:/Qt/6.8.3/msvc2022_64/bin;$penv{PATH}"
+        "PATH": "C:/Qt/6.8.3/msvc2022_64/bin;C:/Users/David/AppData/Local/Microsoft/WinGet/Packages/BtbN.FFmpeg.LGPL.Shared.7.1_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-lgpl-shared-7.1/bin;$penv{PATH}"
       },
       "output": { "outputOnFailure": true }
     },
@@ -45,7 +45,7 @@
       "configurePreset": "windows-x64-release",
       "configuration": "Release",
       "environment": {
-        "PATH": "C:/Qt/6.8.3/msvc2022_64/bin;$penv{PATH}"
+        "PATH": "C:/Qt/6.8.3/msvc2022_64/bin;C:/Users/David/AppData/Local/Microsoft/WinGet/Packages/BtbN.FFmpeg.LGPL.Shared.7.1_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-n7.1.5-12-g1fdbca85aa-win64-lgpl-shared-7.1/bin;$penv{PATH}"
       },
       "output": { "outputOnFailure": true }
     }
