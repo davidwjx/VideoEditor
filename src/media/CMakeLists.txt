@@ -38,6 +38,11 @@ add_library(videoeditor_media STATIC
   cache/CacheStore.cpp
   audio/AudioBuffer.h
   audio/AudioClock.h
+  audio/AudioSink.h
+  audio/WasapiOutput.h
+  audio/WasapiOutput.cpp
+  audio/AudioEngine.h
+  audio/AudioEngine.cpp
   audio/FfmpegAudioSource.h
   audio/FfmpegAudioSource.cpp
   audio/SpeedProcessor.h
@@ -59,6 +64,6 @@ target_include_directories(videoeditor_media PUBLIC
 target_link_libraries(videoeditor_media
   PUBLIC videoeditor_core Qt6::Core Qt6::Gui
   PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample
-          d3d11 dxgi d3dcompiler
+          d3d11 dxgi d3dcompiler ole32 uuid
 )
 target_compile_definitions(videoeditor_media PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
