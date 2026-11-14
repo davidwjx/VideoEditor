@@ -124,6 +124,13 @@ bool RgbaConverter::convert(ID3D11Texture2D *source, int width, int height,
     m_context->IASetInputLayout(nullptr);
     m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_context->Draw(3, 0);
+
+    // Do not leave the temporary SRV or the render target bound on the shared
+    // immediate context: stale bindings keep source frames alive and leak
+    // state into whatever draws next.
+    ID3D11ShaderResourceView *nullSrv = nullptr;
+    m_context->PSSetShaderResources(0, 1, &nullSrv);
+    m_context->OMSetRenderTargets(0, nullptr, nullptr);
     return true;
 }
 

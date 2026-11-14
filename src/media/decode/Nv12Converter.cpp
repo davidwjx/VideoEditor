@@ -167,6 +167,13 @@ bool Nv12Converter::draw(ID3D11ShaderResourceView *lumaSrv,
     m_context->IASetInputLayout(nullptr);
     m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_context->Draw(3, 0);
+
+    // Do not leave temporary SRVs or the render target bound on the shared
+    // immediate context: stale bindings keep decoder frames alive and leak
+    // state into whatever draws next.
+    ID3D11ShaderResourceView *nullSrvs[2] = {nullptr, nullptr};
+    m_context->PSSetShaderResources(0, 2, nullSrvs);
+    m_context->OMSetRenderTargets(0, nullptr, nullptr);
     return true;
 }
 

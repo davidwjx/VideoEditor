@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -110,6 +111,79 @@ TEST(D3D11Pipeline, ConvertsNv12RedToRgba)
 
     luma->Release();
     chroma->Release();
+    deviceContext->Flush();
+}
+
+TEST(D3D11Pipeline, ConvertsRealNv12Texture)
+{
+    QString error;
+    auto context = createContext(&error);
+    if (!context)
+        GTEST_SKIP() << "D3D11 unavailable: " << error.toStdString();
+
+    ID3D11Device *device = context->device();
+    ID3D11DeviceContext *deviceContext = context->context();
+
+    constexpr int width = 64;
+    constexpr int height = 64;
+    constexpr uint8_t yValue = 63;
+    constexpr uint8_t uValue = 102;
+    constexpr uint8_t vValue = 240;
+
+    // NV12 layout: full-resolution Y plane followed by interleaved UV plane.
+    const UINT yPitch = UINT(width);
+    std::vector<uint8_t> nv12(size_t(yPitch) * height * 3 / 2, 0);
+    std::fill_n(nv12.begin(), size_t(yPitch) * height, yValue);
+    for (int row = 0; row < height / 2; ++row) {
+        uint8_t *uv = nv12.data() + size_t(yPitch) * height + size_t(row) * yPitch;
+        for (int col = 0; col < width / 2; ++col) {
+            uv[col * 2] = uValue;
+            uv[col * 2 + 1] = vValue;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_NV12;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA data{};
+    data.pSysMem = nv12.data();
+    data.SysMemPitch = yPitch;
+    data.SysMemSlicePitch = UINT(nv12.size());
+
+    ComPtr<ID3D11Texture2D> nv12Texture;
+    HRESULT hr = device->CreateTexture2D(&desc, &data, &nv12Texture);
+    ASSERT_TRUE(SUCCEEDED(hr)) << "CreateTexture2D(NV12) failed: 0x"
+                               << std::hex << quint32(hr);
+
+    SharedTextureRing ring(*context);
+    ASSERT_TRUE(ring.create(width, height, 1, &error)) << error.toStdString();
+
+    Nv12Converter converter;
+    ASSERT_TRUE(converter.initialize(*context, &error)) << error.toStdString();
+
+    ComPtr<IDXGIKeyedMutex> mutex;
+    ring.texture(0)->QueryInterface(IID_PPV_ARGS(&mutex));
+    ASSERT_NE(mutex, nullptr);
+    ASSERT_EQ(mutex->AcquireSync(0, 5000), S_OK);
+    ASSERT_TRUE(converter.convert(nv12Texture.Get(), UINT(0), width, height,
+                                  ring.rtv(0), 0.0f, &error))
+        << error.toStdString();
+    mutex->ReleaseSync(1);
+
+    const std::vector<uint8_t> rgba = readbackSharedTexture(*context, ring.texture(0), &error);
+    ASSERT_EQ(rgba.size(), size_t(width * height * 4)) << error.toStdString();
+    EXPECT_GT(rgba[0], 200);
+    EXPECT_LT(rgba[1], 60);
+    EXPECT_LT(rgba[2], 60);
+    EXPECT_EQ(rgba[3], 255);
+
     deviceContext->Flush();
 }
 
