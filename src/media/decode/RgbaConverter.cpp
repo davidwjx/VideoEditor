@@ -38,6 +38,23 @@ Microsoft::WRL::ComPtr<ID3DBlob> compileShader(const char *source,
     return blob;
 }
 
+// Render into the full target so a 90/270 degree frame, whose shared ring is
+// allocated transposed at display size, is neither cropped nor stretched.
+void renderTargetSize(ID3D11RenderTargetView *target, int *width, int *height)
+{
+    if (!target)
+        return;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    target->GetResource(&resource);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    if (FAILED(resource.As(&texture)))
+        return;
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    *width = int(desc.Width);
+    *height = int(desc.Height);
+}
+
 } // namespace
 
 bool RgbaConverter::initialize(D3D11Context &context, QString *error)
@@ -108,9 +125,13 @@ bool RgbaConverter::convert(ID3D11Texture2D *source, int width, int height,
     ID3D11RenderTargetView *targets[] = {target};
     m_context->OMSetRenderTargets(1, targets, nullptr);
 
+    int viewportWidth = width;
+    int viewportHeight = height;
+    renderTargetSize(target, &viewportWidth, &viewportHeight);
+
     D3D11_VIEWPORT viewport{};
-    viewport.Width = float(width);
-    viewport.Height = float(height);
+    viewport.Width = float(viewportWidth);
+    viewport.Height = float(viewportHeight);
     viewport.MinDepth = 0.0f;
     viewport.MaxDepth = 1.0f;
     m_context->RSSetViewports(1, &viewport);

@@ -1,11 +1,16 @@
+#include <QCommandLineParser>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QTimer>
 
 #include "AppController.h"
 #include "AppInfo.h"
+#include "PreviewController.h"
+#include "VideoPreviewItem.h"
 
 int main(int argc, char *argv[])
 {
@@ -15,14 +20,42 @@ int main(int argc, char *argv[])
     QGuiApplication::setOrganizationName(QStringLiteral("VideoEditor"));
     QGuiApplication::setApplicationName(QStringLiteral("VideoEditor"));
 
+    QCommandLineParser parser;
+    parser.addOption({QStringLiteral("selftest"),
+                      QStringLiteral("Open a file and exit after first frame"),
+                      QStringLiteral("path")});
+    parser.process(app);
+
     VideoEditor::AppController controller;
+
+    qmlRegisterType<VideoEditor::VideoPreviewItem>("VideoEditor", 1, 0,
+                                                  "VideoPreview");
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
+                                             controller.preview());
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              VideoEditor::appVersion());
     engine.loadFromModule(QStringLiteral("VideoEditor"), QStringLiteral("Main"));
     if (engine.rootObjects().isEmpty())
         return -1;
+
+    if (parser.isSet(QStringLiteral("selftest"))) {
+        QObject::connect(&controller,
+                         &VideoEditor::AppController::selftestFramePresented,
+                         &app, [] {
+                             qInfo("SELFTEST_FRAME_OK");
+                             QCoreApplication::exit(0);
+                         });
+        QTimer::singleShot(0, &controller, [&controller, &parser] {
+            controller.selftest(parser.value(QStringLiteral("selftest")));
+        });
+        QTimer::singleShot(15000, &app, [] {
+            qCritical("SELFTEST_TIMEOUT");
+            QCoreApplication::exit(2);
+        });
+    }
 
     return app.exec();
 }

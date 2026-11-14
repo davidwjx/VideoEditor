@@ -8,6 +8,7 @@
 #include "CodecSupport.h"
 #include "MediaListModel.h"
 #include "MediaProbe.h"
+#include "PreviewController.h"
 
 namespace VideoEditor {
 
@@ -39,6 +40,10 @@ AppController::AppController(QObject *parent, QString recoveryPath)
     // Prompt only once, at startup, for a recovery file left by a prior session.
     // Autosaving during this session must not raise the prompt.
     m_recoveryAvailable = QFileInfo::exists(m_store->recoveryFilePath());
+
+    m_preview = new PreviewController(this);
+    connect(m_preview, &PreviewController::framePresented, this,
+            [this](qint64) { emit selftestFramePresented(); });
 }
 
 AppController::~AppController() = default;
@@ -137,6 +142,15 @@ void AppController::openProject(const QUrl &url)
         setLastError(error);
     else
         clearError();
+}
+
+void AppController::selftest(const QString &path)
+{
+    importUrls({QUrl::fromLocalFile(path)});
+    if (m_mediaModel->rowCount() <= 0)
+        return;
+    const Asset &asset = m_document->project().assets.first();
+    m_preview->openMedia(asset.path, asset.proxyPath);
 }
 
 void AppController::setLastError(const QString &message)

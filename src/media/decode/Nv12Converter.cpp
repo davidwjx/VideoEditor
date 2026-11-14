@@ -39,6 +39,25 @@ Microsoft::WRL::ComPtr<ID3DBlob> compile(const char *source,
     return blob;
 }
 
+// The render target can be larger than (or transposed relative to) the source
+// frame: DecoderWorker allocates the shared ring at display dimensions and
+// rotates 90/270 degree frames in the viewport. Render into the full target so
+// the rotated picture is not cropped or stretched.
+void renderTargetSize(ID3D11RenderTargetView *target, int *width, int *height)
+{
+    if (!target)
+        return;
+    Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+    target->GetResource(&resource);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    if (FAILED(resource.As(&texture)))
+        return;
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    *width = int(desc.Width);
+    *height = int(desc.Height);
+}
+
 } // namespace
 
 bool Nv12Converter::initialize(D3D11Context &context, QString *error)
@@ -205,9 +224,13 @@ bool Nv12Converter::draw(ID3D11ShaderResourceView *lumaSrv,
     ID3D11RenderTargetView *targets[] = {target};
     m_context->OMSetRenderTargets(1, targets, nullptr);
 
+    int viewportWidth = width;
+    int viewportHeight = height;
+    renderTargetSize(target, &viewportWidth, &viewportHeight);
+
     D3D11_VIEWPORT viewport{};
-    viewport.Width = float(width);
-    viewport.Height = float(height);
+    viewport.Width = float(viewportWidth);
+    viewport.Height = float(viewportHeight);
     viewport.MinDepth = 0.0f;
     viewport.MaxDepth = 1.0f;
     m_context->RSSetViewports(1, &viewport);

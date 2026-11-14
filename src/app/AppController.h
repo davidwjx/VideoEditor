@@ -11,6 +11,8 @@
 
 namespace VideoEditor {
 
+class PreviewController;
+
 class AppController : public QObject {
     Q_OBJECT
     Q_PROPERTY(MediaListModel *mediaModel READ mediaModel CONSTANT)
@@ -37,15 +39,18 @@ public:
     Q_INVOKABLE void discardRecovery();
     Q_INVOKABLE void saveProject(const QUrl &url);
     Q_INVOKABLE void openProject(const QUrl &url);
+    Q_INVOKABLE void selftest(const QString &path);
 
     ProjectDocument *document() const { return m_document; }
     ProjectStore *store() const { return m_store.get(); }
+    PreviewController *preview() const { return m_preview; }
 
 signals:
     void lastErrorChanged();
     void undoStateChanged();
     void recoveryAvailableChanged();
     void projectChanged();
+    void selftestFramePresented();
 
 private:
     void setLastError(const QString &message);
@@ -55,6 +60,7 @@ private:
 
     ProjectDocument *m_document = nullptr;
     MediaListModel *m_mediaModel = nullptr;
+    PreviewController *m_preview = nullptr;
     std::unique_ptr<ProjectStore> m_store;
     QTimer m_autosaveTimer;
     QString m_lastError;

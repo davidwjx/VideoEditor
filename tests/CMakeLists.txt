@@ -40,3 +40,12 @@ target_compile_definitions(app_tests PRIVATE
   VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 gtest_discover_tests(app_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
+
+add_test(NAME preview_selftest
+         COMMAND VideoEditor --selftest "${CMAKE_SOURCE_DIR}/tests/fixtures/h264.mp4")
+set_tests_properties(preview_selftest PROPERTIES
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  TIMEOUT 30
+  LABELS "gpu"
+)

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import VideoEditor 1.0
 
 ApplicationWindow {
     id: root
@@ -22,21 +23,80 @@ ApplicationWindow {
         }
     }
 
-    ListView {
-        id: mediaList
+    footer: RowLayout {
+        spacing: 8
+        ToolButton {
+            text: Preview.playing ? "暂停" : "播放"
+            onClicked: Preview.togglePlay()
+        }
+        ToolButton { text: "◀"; onClicked: Preview.stepFrames(-1) }
+        ToolButton { text: "▶"; onClicked: Preview.stepFrames(1) }
+        Label {
+            text: Preview.timecode
+            color: "white"
+            font.family: "Consolas"
+        }
+        Slider {
+            Layout.fillWidth: true
+            from: 0
+            to: Math.max(1, Preview.durationMs)
+            value: Preview.positionMs
+            onMoved: Preview.seekMs(value)
+        }
+        Label { text: Preview.decodeMode; color: "#cccccc" }
+    }
+
+    RowLayout {
         anchors.fill: parent
-        model: App.mediaModel
-        delegate: ItemDelegate {
-            width: ListView.view.width
-            text: model.name + "\n" + model.codec + " · " + model.resolution
-                  + " · " + model.duration
+        spacing: 1
+
+        Rectangle {
+            Layout.preferredWidth: 320
+            Layout.fillHeight: true
+            color: "#1b1b1b"
+
+            ListView {
+                id: mediaList
+                anchors.fill: parent
+                model: App.mediaModel
+                delegate: ItemDelegate {
+                    width: ListView.view.width
+                    text: model.name + "\n" + model.codec + " · " + model.resolution
+                          + " · " + model.duration
+                    onClicked: Preview.openMedia(model.path, model.proxyPath)
+                }
+
+                Label {
+                    anchors.centerIn: parent
+                    visible: mediaList.count === 0
+                    text: "媒体库为空，点击“导入视频”开始"
+                    color: "#888888"
+                }
+            }
         }
 
-        Label {
-            anchors.centerIn: parent
-            visible: mediaList.count === 0
-            text: "媒体库为空，点击“导入视频”开始"
-            color: "#888888"
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+
+            Rectangle {
+                anchors.fill: parent
+                color: "black"
+            }
+
+            VideoPreview {
+                id: previewItem
+                anchors.fill: parent
+            }
+
+            Component.onCompleted: Preview.item = previewItem
+
+            Label {
+                anchors.centerIn: parent
+                visible: !Preview.mediaName
+                text: "选择左侧素材开始预览"
+                color: "#888888"
+            }
         }
     }
 

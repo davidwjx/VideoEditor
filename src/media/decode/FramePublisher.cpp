@@ -48,7 +48,9 @@ bool FramePublisher::publish(DecodedFrame &frame, int rotationDegrees,
         return false;
     }
 
-    const float radians = float(rotationDegrees) * 3.14159265358979323846f / 180.0f;
+    // MediaProbe reports the clockwise display rotation, but sample-space UV
+    // rotation is counter-clockwise for a positive angle, so negate here.
+    const float radians = float(-rotationDegrees) * 3.14159265358979323846f / 180.0f;
     bool ok = false;
     if (frame.kind == DecodedFrame::Kind::HardwareTexture) {
         ok = m_nv12->convert(frame.texture, frame.subresource, frame.width,
