@@ -188,6 +188,26 @@ TEST(AudioMix, LimiterEngagesOnOverdrivenMix)
         EXPECT_LE(std::abs(sample), 0.98f + 1e-6f);
 }
 
+TEST(AudioMix, PreservePitchSpeedRendersThroughMixer)
+{
+    if (!QFileInfo::exists(tonePath()))
+        GTEST_SKIP() << "missing tone.wav";
+    Project project = projectWithAudio(QStringLiteral("c1"), 0, 2'000'000, 2000);
+    project.tracks[0].clips[0].preservePitch = true;
+    TimelineMixer mixer;
+    mixer.setProject(project);
+    mixer.setPosition(0);
+
+    std::vector<float> out(size_t(4800) * 2);
+    MixStats stats;
+    mixer.render(out.data(), 4800, &stats);
+    EXPECT_EQ(stats.activeLayers, 1);
+    EXPECT_GT(stats.peak, 0.05f);
+    for (float sample : out)
+        EXPECT_TRUE(std::isfinite(sample));
+    EXPECT_EQ(mixer.positionUs(), 100'000);
+}
+
 TEST(AudioMix, InterpolatesVolumeKeyframes)
 {
     Clip clip;

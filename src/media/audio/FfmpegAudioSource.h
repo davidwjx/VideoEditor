@@ -27,6 +27,13 @@ public:
     bool readRange(int64_t startUs, int frames, float *out, QString *error);
     int64_t durationUs() const;
 
+    // Native channel count of the decoded source (1 for mono, 2 for stereo...).
+    // The output itself is always the requested interleaved layout at the
+    // requested sample rate; libswresample's standard power-preserving matrix
+    // is used, so mono -> stereo produces 1/sqrt(2) per channel. Consumers
+    // that want a dual-mono preview level apply their own documented trim.
+    int sourceChannels() const;
+
 private:
     struct Impl;
     explicit FfmpegAudioSource(std::unique_ptr<Impl> impl);

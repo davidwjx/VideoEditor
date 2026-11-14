@@ -162,8 +162,15 @@ void TimelineMixer::render(float *interleaved, int frames, MixStats *stats)
         audible.append(layer);
     }
 
+    // Layers are rendered from the start of the current block. A clip that
+    // begins mid-block therefore starts at the block boundary (up to 10 ms
+    // early) rather than being offset inside the block; this is the documented
+    // preview mixing granularity (well below the one-frame A/V tolerance).
     std::vector<float> scratch(sampleCount, 0.0f);
     for (const AudioLayer &layer : audible) {
+        // Fully muted/disabled clips need no decoding at all.
+        if (!layer.clip.enabled || layer.clip.audio.muted)
+            continue;
         ClipAudioReader *reader = readerFor(layer.clip);
         if (!reader)
             continue;

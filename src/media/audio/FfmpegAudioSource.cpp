@@ -12,7 +12,6 @@ extern "C" {
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/mathematics.h>
-#include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 }
 
@@ -51,7 +50,7 @@ struct FfmpegAudioSource::Impl {
     int64_t durationUs = 0;
     int64_t fifoStartSample = 0;   // source sample index of fifo[0]
     bool drainSent = false;
-    bool monoToStereo = false;     // apply +3 dB per channel dual-mono upmix
+    int sourceChannels = 0;
 
     ~Impl()
     {
@@ -205,7 +204,7 @@ std::unique_ptr<FfmpegAudioSource> FfmpegAudioSource::open(const QString &path,
     ret = swr_alloc_set_opts2(&impl->swr, &outLayout, AV_SAMPLE_FMT_FLT, sampleRate,
                               &inLayout, impl->codec->sample_fmt,
                               impl->codec->sample_rate, 0, nullptr);
-    impl->monoToStereo = inLayout.nb_channels == 1 && channels == 2;
+    impl->sourceChannels = inLayout.nb_channels;
     av_channel_layout_uninit(&inLayout);
     av_channel_layout_uninit(&outLayout);
     if (ret < 0 || !impl->swr) {
@@ -301,15 +300,6 @@ bool FfmpegAudioSource::decodeMore(QString *error)
             if (converted == 0) {
                 av_frame_unref(impl.frame);
                 continue;
-            }
-            // libswresample upmixes mono to stereo with a 1/sqrt(2) matrix so
-            // that total power is preserved. Preview mixing instead uses the
-            // dual-mono convention (+3 dB per channel), which keeps a mono
-            // asset as loud as a stereo one at the same source level.
-            if (impl.monoToStereo) {
-                const size_t count = size_t(converted) * size_t(impl.channels);
-                for (size_t i = 0; i < count; ++i)
-                    impl.scratch[i] *= 2.0f;
             }
             av_frame_unref(impl.frame);
             impl.appendConverted(frameStart, converted);
@@ -412,6 +402,11 @@ bool FfmpegAudioSource::readRange(int64_t startUs, int frames, float *out,
 int64_t FfmpegAudioSource::durationUs() const
 {
     return m_impl ? m_impl->durationUs : 0;
+}
+
+int FfmpegAudioSource::sourceChannels() const
+{
+    return m_impl ? m_impl->sourceChannels : 0;
 }
 
 } // namespace VideoEditor
