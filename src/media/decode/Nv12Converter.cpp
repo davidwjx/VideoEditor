@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 
+#include <algorithm>
 #include <cstring>
 #include <d3dcompiler.h>
 
@@ -107,11 +108,28 @@ bool Nv12Converter::convert(ID3D11Texture2D *nv12, UINT subresource,
     if (!(sourceDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
         // FFmpeg's D3D11VA pool textures carry only D3D11_BIND_DECODER. Copy
         // the decoded array slice into a texture that can be sampled.
-        if (!m_sampleableTexture || m_sampleableWidth != width
-            || m_sampleableHeight != height) {
+        //
+        // The pool is allocated at coded/alignment dimensions, which can be
+        // larger than the visible frame (e.g. a 640x360 stream in a 640x368
+        // surface). Copy only the visible box, never the whole subresource,
+        // or the implied destination box can run past the destination texture.
+        // NV12 textures must have even dimensions; round the destination up
+        // for odd display sizes while still copying only the visible region.
+        const UINT copyWidth = std::min<UINT>(UINT(std::max(width, 0)),
+                                              sourceDesc.Width);
+        const UINT copyHeight = std::min<UINT>(UINT(std::max(height, 0)),
+                                               sourceDesc.Height);
+        if (copyWidth == 0 || copyHeight == 0) {
+            setError(error, QStringLiteral("视频帧尺寸无效。"));
+            return false;
+        }
+        const UINT textureWidth = (copyWidth + 1u) & ~1u;
+        const UINT textureHeight = (copyHeight + 1u) & ~1u;
+        if (!m_sampleableTexture || m_sampleableWidth != int(textureWidth)
+            || m_sampleableHeight != int(textureHeight)) {
             D3D11_TEXTURE2D_DESC copyDesc{};
-            copyDesc.Width = UINT(width);
-            copyDesc.Height = UINT(height);
+            copyDesc.Width = textureWidth;
+            copyDesc.Height = textureHeight;
             copyDesc.MipLevels = 1;
             copyDesc.ArraySize = 1;
             copyDesc.Format = DXGI_FORMAT_NV12;
@@ -124,11 +142,12 @@ bool Nv12Converter::convert(ID3D11Texture2D *nv12, UINT subresource,
                 setError(error, QStringLiteral("无法创建可采样的视频纹理。"));
                 return false;
             }
-            m_sampleableWidth = width;
-            m_sampleableHeight = height;
+            m_sampleableWidth = int(textureWidth);
+            m_sampleableHeight = int(textureHeight);
         }
+        const D3D11_BOX sourceBox{0, 0, 0, copyWidth, copyHeight, 1};
         m_context->CopySubresourceRegion(m_sampleableTexture.Get(), 0, 0, 0, 0,
-                                         nv12, subresource, nullptr);
+                                         nv12, subresource, &sourceBox);
         nv12 = m_sampleableTexture.Get();
         subresource = 0;
     }

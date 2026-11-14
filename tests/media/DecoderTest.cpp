@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 
@@ -80,6 +81,10 @@ TEST(Decoder, Decodes10BitH265WithFallback)
     auto result = createVideoDecoder(path, *context, *info);
     ASSERT_NE(result.decoder, nullptr) << result.error.toStdString();
     notePath(QStringLiteral("h265_10bit.mp4"), *result.decoder);
+
+    // P010/10-bit must never reach the NV12 hardware path.
+    EXPECT_FALSE(result.decoder->isHardware());
+    EXPECT_FALSE(result.hardwareFallbackReason.isEmpty());
 
     DecodedFrame frame;
     QString error;
@@ -202,6 +207,54 @@ TEST(Decoder, PublishesRedFrameToSharedTexture)
     EXPECT_GT(rgba[0], 200);
     EXPECT_LT(rgba[1], 60);
     EXPECT_LT(rgba[2], 60);
+}
+
+TEST(Decoder, PublishesDecodedH264AtNonAlignedHeight)
+{
+    // 640x360 is not 16-row aligned. FFmpeg's D3D11VA pool may allocate a
+    // coded/alignment-height surface, so the copy into the sampleable texture
+    // must be bounded to the visible region instead of the whole subresource.
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFile::exists(path)) GTEST_SKIP() << "missing fixture";
+
+    QString contextError;
+    auto context = requireContext(true, &contextError);
+    if (!context) GTEST_SKIP() << "D3D11 unavailable: " << contextError.toStdString();
+
+    const auto info = MediaProbe::probe(path, nullptr);
+    ASSERT_TRUE(info.has_value());
+    auto result = createVideoDecoder(path, *context, *info);
+    ASSERT_NE(result.decoder, nullptr) << result.error.toStdString();
+    if (!result.decoder->isHardware())
+        GTEST_SKIP() << "hardware decoder unavailable: "
+                     << result.hardwareFallbackReason.toStdString();
+    notePath(QStringLiteral("h264.mp4 (hardware publish)"), *result.decoder);
+
+    DecodedFrame frame;
+    QString error;
+    ASSERT_TRUE(result.decoder->decodeNext(frame, &error)) << error.toStdString();
+    ASSERT_EQ(frame.kind, DecodedFrame::Kind::HardwareTexture);
+    ASSERT_EQ(frame.width, 640);
+    ASSERT_EQ(frame.height, 360);
+
+    SharedTextureRing ring(*context);
+    ASSERT_TRUE(ring.create(frame.width, frame.height, 1, &error)) << error.toStdString();
+
+    FramePublisher publisher(*context, ring);
+    ASSERT_TRUE(publisher.publish(frame, 0, &error)) << error.toStdString();
+
+    const auto rgba = readbackSharedTexture(*context, ring.texture(0), &error);
+    ASSERT_EQ(rgba.size(), size_t(frame.width) * frame.height * 4)
+        << error.toStdString();
+
+    // The source frame is a non-black test pattern; checking RGB (not alpha,
+    // which is always 255) proves the copy actually produced visible pixels.
+    int maxRgb = 0;
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        maxRgb = std::max({maxRgb, int(rgba[i]), int(rgba[i + 1]),
+                           int(rgba[i + 2])});
+    }
+    EXPECT_GT(maxRgb, 20) << "decoded frame should not be black";
 }
 
 TEST(Decoder, PublishesHardwareNv12FrameToSharedTexture)
