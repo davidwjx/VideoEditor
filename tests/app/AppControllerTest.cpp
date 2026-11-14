@@ -75,6 +75,43 @@ TEST(AppController, UndoRemovesImportedAsset)
     EXPECT_EQ(controller.mediaModel()->rowCount(), 1);
 }
 
+TEST(AppController, SavesAndReopensProject)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFile::exists(path))
+        GTEST_SKIP() << "missing fixture";
+
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString projectPath = dir.filePath(QStringLiteral("project"));
+
+    {
+        AppController controller;
+        controller.importUrls({QUrl::fromLocalFile(path)});
+        ASSERT_EQ(controller.mediaModel()->rowCount(), 1);
+
+        // No suffix: saveProject must append .veproj.
+        controller.saveProject(QUrl::fromLocalFile(projectPath));
+        EXPECT_TRUE(controller.lastError().isEmpty());
+        EXPECT_TRUE(QFileInfo::exists(projectPath + QStringLiteral(".veproj")));
+    }
+
+    AppController reopened;
+    reopened.openProject(
+        QUrl::fromLocalFile(projectPath + QStringLiteral(".veproj")));
+    EXPECT_TRUE(reopened.lastError().isEmpty());
+    ASSERT_EQ(reopened.mediaModel()->rowCount(), 1);
+
+    const QModelIndex index = reopened.mediaModel()->index(0, 0);
+    ASSERT_TRUE(index.isValid());
+    EXPECT_EQ(reopened.mediaModel()->data(index, MediaListModel::NameRole).toString(),
+              QStringLiteral("h264.mp4"));
+    EXPECT_EQ(reopened.mediaModel()->data(index, MediaListModel::CodecRole).toString(),
+              QStringLiteral("H.264"));
+    EXPECT_EQ(reopened.mediaModel()->data(index, MediaListModel::PathRole).toString(),
+              path);
+}
+
 TEST(AppController, RestoresRecoveryAtStartup)
 {
     QTemporaryDir dir;

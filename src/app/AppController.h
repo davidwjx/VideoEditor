@@ -72,6 +72,7 @@ private:
     std::unique_ptr<ProjectStore> m_store;
     QTimer m_autosaveTimer;
     QString m_lastError;
+    QString m_currentAssetId;
     bool m_recoveryAvailable = false;
     bool m_useProxy = true;
 };

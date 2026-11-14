@@ -1,5 +1,7 @@
 #include "AppController.h"
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -139,6 +141,7 @@ void AppController::openAsset(const QString &id)
                 m_proxyService->request(asset.id, asset.path,
                                         planProxy(asset.info).height);
             }
+            m_currentAssetId = id;
             m_preview->openMedia(asset.path,
                                  m_useProxy ? asset.proxyPath : QString());
             return;
@@ -152,6 +155,10 @@ void AppController::setUseProxy(bool enabled)
         return;
     m_useProxy = enabled;
     emit useProxyChanged();
+    // Re-opening the current asset is what actually switches the preview
+    // between the proxy and the source; changing the flag alone does nothing.
+    if (!m_currentAssetId.isEmpty())
+        openAsset(m_currentAssetId);
 }
 
 void AppController::undo()
@@ -181,6 +188,7 @@ void AppController::restoreRecovery()
         return;
     }
     m_document->setProject(std::move(*project));
+    m_currentAssetId.clear();
     m_store->discardRecovery();
     setRecoveryAvailable(false);
     clearError();
@@ -194,8 +202,14 @@ void AppController::discardRecovery()
 
 void AppController::saveProject(const QUrl &url)
 {
+    QString path = url.toLocalFile();
+    // The Qt Quick save dialog does not expose a default suffix, so add the
+    // project extension here when the user did not type one.
+    if (QFileInfo(path).suffix().isEmpty())
+        path += QStringLiteral(".veproj");
+
     QString error;
-    if (!m_document->save(url.toLocalFile(), &error))
+    if (!m_document->save(path, &error))
         setLastError(error);
     else
         clearError();
@@ -204,10 +218,12 @@ void AppController::saveProject(const QUrl &url)
 void AppController::openProject(const QUrl &url)
 {
     QString error;
-    if (!m_document->load(url.toLocalFile(), &error))
+    if (!m_document->load(url.toLocalFile(), &error)) {
         setLastError(error);
-    else
-        clearError();
+        return;
+    }
+    m_currentAssetId.clear();
+    clearError();
 }
 
 void AppController::selftest(const QString &path)
@@ -230,6 +246,18 @@ void AppController::setLastError(const QString &message)
 void AppController::refreshModel()
 {
     m_mediaModel->setAssets(m_document->project().assets);
+
+    // Drop the remembered asset when undo/redo or a project load removes it,
+    // so toggling the proxy cannot try to reopen a stale id.
+    if (!m_currentAssetId.isEmpty()) {
+        const auto &assets = m_document->project().assets;
+        const auto it = std::find_if(assets.cbegin(), assets.cend(),
+                                     [this](const Asset &asset) {
+                                         return asset.id == m_currentAssetId;
+                                     });
+        if (it == assets.cend())
+            m_currentAssetId.clear();
+    }
 }
 
 void AppController::setRecoveryAvailable(bool available)

@@ -16,6 +16,8 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent
             Button { text: "导入视频"; onClicked: fileDialog.open() }
+            Button { text: "打开工程"; onClicked: openProjectDialog.open() }
+            Button { text: "保存工程"; onClicked: saveProjectDialog.open() }
             Button { text: "撤销"; enabled: App.canUndo; onClicked: App.undo() }
             Button { text: "重做"; enabled: App.canRedo; onClicked: App.redo() }
             Item { Layout.fillWidth: true }
@@ -134,6 +136,22 @@ ApplicationWindow {
         nameFilters: ["视频文件 (*.mp4 *.wmv)", "所有文件 (*)"]
         fileMode: FileDialog.OpenFiles
         onAccepted: App.importUrls(selectedFiles)
+    }
+
+    FileDialog {
+        id: openProjectDialog
+        title: "打开工程"
+        nameFilters: ["VideoEditor 工程 (*.veproj)"]
+        fileMode: FileDialog.OpenFile
+        onAccepted: App.openProject(selectedFile)
+    }
+
+    FileDialog {
+        id: saveProjectDialog
+        title: "保存工程"
+        nameFilters: ["VideoEditor 工程 (*.veproj)"]
+        fileMode: FileDialog.SaveFile
+        onAccepted: App.saveProject(selectedFile)
     }
 
     Dialog {
