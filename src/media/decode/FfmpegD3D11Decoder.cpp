@@ -53,6 +53,23 @@ bool isEightBitFormat(AVPixelFormat format)
     return descriptor->comp[0].depth <= 8;
 }
 
+// Some codecs (for example the MJPEG used by preview proxies) have no D3D11VA
+// hardware decoder at all. Opening one would succeed but the first packet
+// would fail with EINVAL from get_format, so reject it here and let the
+// factory fall back to software decoding.
+bool hasD3D11Decoder(const AVCodec *codec)
+{
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
+        if (!config)
+            return false;
+        if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
+            && config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
+            return true;
+        }
+    }
+}
+
 } // namespace
 
 struct FfmpegD3D11Decoder::Impl {
@@ -123,6 +140,10 @@ std::unique_ptr<FfmpegD3D11Decoder> FfmpegD3D11Decoder::open(
         impl.format->streams[impl.videoStream]->codecpar->codec_id);
     if (!codec) {
         setError(error, QStringLiteral("FFmpeg 不支持该视频编码。"));
+        return nullptr;
+    }
+    if (!hasD3D11Decoder(codec)) {
+        setError(error, QStringLiteral("该编码没有 D3D11 硬件解码器，已回退软件解码。"));
         return nullptr;
     }
 

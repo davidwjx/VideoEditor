@@ -43,6 +43,11 @@ ApplicationWindow {
             value: Preview.positionMs
             onMoved: Preview.seekMs(value)
         }
+        CheckBox {
+            text: "使用代理"
+            checked: App.useProxy
+            onToggled: App.useProxy = checked
+        }
         Label { text: Preview.decodeMode; color: "#cccccc" }
     }
 
@@ -63,7 +68,7 @@ ApplicationWindow {
                     width: ListView.view.width
                     text: model.name + "\n" + model.codec + " · " + model.resolution
                           + " · " + model.duration
-                    onClicked: Preview.openMedia(model.path, model.proxyPath)
+                    onClicked: App.openAsset(model.id)
                 }
 
                 Label {

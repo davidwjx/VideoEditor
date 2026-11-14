@@ -9,6 +9,8 @@
 #include "MediaListModel.h"
 #include "MediaProbe.h"
 #include "PreviewController.h"
+#include "ProxyPlanner.h"
+#include "ProxyService.h"
 
 namespace VideoEditor {
 
@@ -17,9 +19,9 @@ AppController::AppController(QObject *parent, QString recoveryPath)
     , m_document(new ProjectDocument(this))
     , m_mediaModel(new MediaListModel(this))
 {
+    const QString appData = QStandardPaths::writableLocation(
+        QStandardPaths::AppLocalDataLocation);
     if (recoveryPath.isEmpty()) {
-        const QString appData = QStandardPaths::writableLocation(
-            QStandardPaths::AppLocalDataLocation);
         recoveryPath = QDir(appData).filePath(
             QStringLiteral("recovery/project.autosave.json"));
     }
@@ -46,6 +48,19 @@ AppController::AppController(QObject *parent, QString recoveryPath)
             [this](qint64) { emit selftestFramePresented(); });
     connect(m_preview, &PreviewController::error, this,
             &AppController::setLastError);
+
+    const QString cacheRoot = QDir(appData).filePath(QStringLiteral("cache"));
+    const QString ffmpegPath = qEnvironmentVariable(
+        "VIDEOEDITOR_FFMPEG", QStringLiteral("ffmpeg"));
+    m_proxyService = new ProxyService(cacheRoot, ffmpegPath, this);
+    connect(m_proxyService, &ProxyService::ready, this,
+            [this](const QString &assetId, const QString &proxyPath) {
+                m_document->setAssetProxyPath(assetId, proxyPath);
+            });
+    connect(m_proxyService, &ProxyService::failed, this,
+            [this](const QString &, const QString &message) {
+                setLastError(message);
+            });
 }
 
 AppController::~AppController() = default;
@@ -82,12 +97,37 @@ void AppController::importUrls(const QList<QUrl> &urls)
         asset.path = path;
         asset.info = *info;
         m_document->addAsset(asset);
+
+        // Proxies are cache metadata: generated in the background and stored
+        // outside the undo stack, so an import never blocks on ffmpeg.
+        const ProxyPlan plan = planProxy(asset.info);
+        if (plan.needed)
+            m_proxyService->request(asset.id, asset.path, plan.height);
     }
 
     if (failures.isEmpty())
         clearError();
     else
         setLastError(failures.join(QLatin1Char('\n')));
+}
+
+void AppController::openAsset(const QString &id)
+{
+    for (const Asset &asset : m_document->project().assets) {
+        if (asset.id == id) {
+            m_preview->openMedia(asset.path,
+                                 m_useProxy ? asset.proxyPath : QString());
+            return;
+        }
+    }
+}
+
+void AppController::setUseProxy(bool enabled)
+{
+    if (m_useProxy == enabled)
+        return;
+    m_useProxy = enabled;
+    emit useProxyChanged();
 }
 
 void AppController::undo()
@@ -152,7 +192,7 @@ void AppController::selftest(const QString &path)
     if (m_mediaModel->rowCount() <= 0)
         return;
     const Asset &asset = m_document->project().assets.first();
-    m_preview->openMedia(asset.path, asset.proxyPath);
+    openAsset(asset.id);
 }
 
 void AppController::setLastError(const QString &message)

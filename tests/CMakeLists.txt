@@ -25,9 +25,10 @@ add_executable(media_tests
   media/MediaProbeTest.cpp
   media/D3D11PipelineTest.cpp
   media/DecoderTest.cpp
+  media/ProxyTest.cpp
   TestMain.cpp)
 target_link_libraries(media_tests PRIVATE
-  videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)
+  videoeditor_media GTest::gtest Qt6::Core Qt6::Gui Qt6::Test d3d11 dxgi d3dcompiler)
 target_compile_definitions(media_tests PRIVATE
   NOMINMAX WIN32_LEAN_AND_MEAN
   VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")

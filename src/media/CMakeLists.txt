@@ -26,13 +26,25 @@ add_library(videoeditor_media STATIC
   decode/VideoDecoderFactory.cpp
   decode/FramePublisher.h
   decode/FramePublisher.cpp
+  proxy/AssetFingerprint.h
+  proxy/AssetFingerprint.cpp
+  proxy/ProxyPlanner.h
+  proxy/ProxyPlanner.cpp
+  proxy/ProxyGenerator.h
+  proxy/ProxyGenerator.cpp
+  proxy/ProxyService.h
+  proxy/ProxyService.cpp
+  cache/CacheStore.h
+  cache/CacheStore.cpp
 )
 # Accept both "probe/MediaProbe.h" and "MediaProbe.h" from consumers, and the
-# same for the decode headers.
+# same for the decode and proxy/cache headers.
 target_include_directories(videoeditor_media PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/probe
-  ${CMAKE_CURRENT_SOURCE_DIR}/decode)
+  ${CMAKE_CURRENT_SOURCE_DIR}/decode
+  ${CMAKE_CURRENT_SOURCE_DIR}/proxy
+  ${CMAKE_CURRENT_SOURCE_DIR}/cache)
 target_link_libraries(videoeditor_media
   PUBLIC videoeditor_core Qt6::Core Qt6::Gui
   PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample

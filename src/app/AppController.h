@@ -12,6 +12,7 @@
 namespace VideoEditor {
 
 class PreviewController;
+class ProxyService;
 
 class AppController : public QObject {
     Q_OBJECT
@@ -20,6 +21,7 @@ class AppController : public QObject {
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoStateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoStateChanged)
     Q_PROPERTY(bool recoveryAvailable READ recoveryAvailable NOTIFY recoveryAvailableChanged)
+    Q_PROPERTY(bool useProxy READ useProxy WRITE setUseProxy NOTIFY useProxyChanged)
 
 public:
     explicit AppController(QObject *parent = nullptr, QString recoveryPath = {});
@@ -30,8 +32,11 @@ public:
     bool canUndo() const;
     bool canRedo() const;
     bool recoveryAvailable() const { return m_recoveryAvailable; }
+    bool useProxy() const { return m_useProxy; }
+    void setUseProxy(bool enabled);
 
     Q_INVOKABLE void importUrls(const QList<QUrl> &urls);
+    Q_INVOKABLE void openAsset(const QString &id);
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE void clearError();
@@ -44,11 +49,13 @@ public:
     ProjectDocument *document() const { return m_document; }
     ProjectStore *store() const { return m_store.get(); }
     PreviewController *preview() const { return m_preview; }
+    ProxyService *proxyService() const { return m_proxyService; }
 
 signals:
     void lastErrorChanged();
     void undoStateChanged();
     void recoveryAvailableChanged();
+    void useProxyChanged();
     void projectChanged();
     void selftestFramePresented();
 
@@ -61,10 +68,12 @@ private:
     ProjectDocument *m_document = nullptr;
     MediaListModel *m_mediaModel = nullptr;
     PreviewController *m_preview = nullptr;
+    ProxyService *m_proxyService = nullptr;
     std::unique_ptr<ProjectStore> m_store;
     QTimer m_autosaveTimer;
     QString m_lastError;
     bool m_recoveryAvailable = false;
+    bool m_useProxy = true;
 };
 
 } // namespace VideoEditor
