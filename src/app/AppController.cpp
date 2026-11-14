@@ -1,5 +1,6 @@
 #include "AppController.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -13,6 +14,24 @@
 #include "ProxyService.h"
 
 namespace VideoEditor {
+
+namespace {
+
+// Proxy generation runs the FFmpeg CLI. Prefer the executable shipped next to
+// the app, then the documented override, then whatever is on PATH.
+QString resolveFfmpegPath()
+{
+    const QString bundled = QDir(QCoreApplication::applicationDirPath())
+                                .filePath(QStringLiteral("ffmpeg.exe"));
+    if (QFileInfo::exists(bundled))
+        return bundled;
+    const QString configured = qEnvironmentVariable("VIDEOEDITOR_FFMPEG");
+    if (!configured.isEmpty())
+        return configured;
+    return QStringLiteral("ffmpeg");
+}
+
+} // namespace
 
 AppController::AppController(QObject *parent, QString recoveryPath)
     : QObject(parent)
@@ -50,9 +69,7 @@ AppController::AppController(QObject *parent, QString recoveryPath)
             &AppController::setLastError);
 
     const QString cacheRoot = QDir(appData).filePath(QStringLiteral("cache"));
-    const QString ffmpegPath = qEnvironmentVariable(
-        "VIDEOEDITOR_FFMPEG", QStringLiteral("ffmpeg"));
-    m_proxyService = new ProxyService(cacheRoot, ffmpegPath, this);
+    m_proxyService = new ProxyService(cacheRoot, resolveFfmpegPath(), this);
     connect(m_proxyService, &ProxyService::ready, this,
             [this](const QString &assetId, const QString &proxyPath) {
                 m_document->setAssetProxyPath(assetId, proxyPath);
@@ -115,6 +132,13 @@ void AppController::openAsset(const QString &id)
 {
     for (const Asset &asset : m_document->project().assets) {
         if (asset.id == id) {
+            // Undo/redo, a cleared cache, or a project saved before generation
+            // finished can leave the asset without a usable proxy. Re-request
+            // it so the preview does not fall back to the source forever.
+            if (needsProxyGeneration(asset.info, asset.proxyPath)) {
+                m_proxyService->request(asset.id, asset.path,
+                                        planProxy(asset.info).height);
+            }
             m_preview->openMedia(asset.path,
                                  m_useProxy ? asset.proxyPath : QString());
             return;

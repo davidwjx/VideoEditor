@@ -14,4 +14,9 @@ struct ProxyPlan {
 
 ProxyPlan planProxy(const MediaInfo &info);
 
+// True when the source needs a proxy and the recorded proxy path is either
+// unset or no longer present on disk (cache cleared, undo/redo, project saved
+// before generation finished).
+bool needsProxyGeneration(const MediaInfo &info, const QString &proxyPath);
+
 } // namespace VideoEditor

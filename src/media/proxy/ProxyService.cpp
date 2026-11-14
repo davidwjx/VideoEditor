@@ -31,9 +31,24 @@ void ProxyService::request(const QString &assetId, const QString &sourcePath,
         emit ready(assetId, output);
         return;
     }
+    // Import requests the proxy and opening the asset shortly after may
+    // request it again. Keep one generation per output.
+    if (hasPendingOutput(output))
+        return;
 
     m_queue.enqueue(Job{assetId, sourcePath, output, height});
     startNext();
+}
+
+bool ProxyService::hasPendingOutput(const QString &output) const
+{
+    if (m_generator && m_currentOutput == output)
+        return true;
+    for (const Job &job : m_queue) {
+        if (job.outputPath == output)
+            return true;
+    }
+    return false;
 }
 
 void ProxyService::startNext()
@@ -43,11 +58,13 @@ void ProxyService::startNext()
 
     const Job job = m_queue.dequeue();
     m_generator = new ProxyGenerator(m_ffmpegPath, this);
+    m_currentOutput = job.outputPath;
 
     connect(m_generator, &ProxyGenerator::finished, this,
             [this, job](const QString &path) {
                 m_generator->deleteLater();
                 m_generator = nullptr;
+                m_currentOutput.clear();
                 emit ready(job.assetId, path);
                 startNext();
             });
@@ -56,6 +73,7 @@ void ProxyService::startNext()
             [this, job](const QString &message) {
                 m_generator->deleteLater();
                 m_generator = nullptr;
+                m_currentOutput.clear();
                 emit failed(job.assetId, message);
                 startNext();
             });

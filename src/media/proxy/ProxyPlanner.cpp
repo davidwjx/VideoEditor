@@ -1,5 +1,7 @@
 #include "ProxyPlanner.h"
 
+#include <QFileInfo>
+
 namespace VideoEditor {
 
 ProxyPlan planProxy(const MediaInfo &info)
@@ -11,6 +13,13 @@ ProxyPlan planProxy(const MediaInfo &info)
         plan.reason = QStringLiteral("素材分辨率高于 1080p，已生成代理。");
     }
     return plan;
+}
+
+bool needsProxyGeneration(const MediaInfo &info, const QString &proxyPath)
+{
+    if (!planProxy(info).needed)
+        return false;
+    return proxyPath.isEmpty() || !QFileInfo::exists(proxyPath);
 }
 
 } // namespace VideoEditor

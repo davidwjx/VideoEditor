@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -40,6 +41,42 @@ TEST(ProxyPlanner, TriggersOnlyAbove1080p)
     const ProxyPlan plan = planProxy(info);
     EXPECT_TRUE(plan.needed);
     EXPECT_EQ(plan.height, 540);
+}
+
+TEST(ProxyPlanner, NeedsGenerationWhenProxyMissing)
+{
+    MediaInfo highres;
+    highres.width = 2560;
+    highres.height = 1440;
+    EXPECT_TRUE(needsProxyGeneration(highres, QString()));
+
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString existing = dir.filePath(QStringLiteral("proxy.mp4"));
+    QFile file(existing);
+    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+    file.write("proxy");
+    file.close();
+    EXPECT_FALSE(needsProxyGeneration(highres, existing));
+    EXPECT_TRUE(needsProxyGeneration(
+        highres, dir.filePath(QStringLiteral("missing.mp4"))));
+
+    MediaInfo fullHd;
+    fullHd.width = 1920;
+    fullHd.height = 1080;
+    EXPECT_FALSE(needsProxyGeneration(fullHd, QString()));
+}
+
+TEST(ProxyBundling, ShipsFfmpegNextToApp)
+{
+    // media_tests and VideoEditor are emitted into the same configuration
+    // directory, so the app's bundled CLI is visible here once it is built.
+    const QString bundled = QDir(QCoreApplication::applicationDirPath())
+                                .filePath(QStringLiteral("ffmpeg.exe"));
+    if (!QFileInfo::exists(bundled))
+        GTEST_SKIP() << "VideoEditor app target was not built: "
+                     << bundled.toStdString();
+    EXPECT_TRUE(QFileInfo(bundled).isExecutable());
 }
 
 TEST(AssetFingerprint, ChangesWithContentAndMtime)

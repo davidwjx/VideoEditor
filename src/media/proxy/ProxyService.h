@@ -34,11 +34,13 @@ private:
     };
 
     void startNext();
+    bool hasPendingOutput(const QString &output) const;
 
     CacheStore m_cache;
     QString m_ffmpegPath;
     QQueue<Job> m_queue;
     ProxyGenerator *m_generator = nullptr;
+    QString m_currentOutput;
 };
 
 } // namespace VideoEditor

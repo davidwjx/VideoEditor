@@ -15,7 +15,13 @@ target_link_libraries(VideoEditor PRIVATE Qt6::Quick Qt6::QuickControls2 videoed
 
 if(WIN32 AND FFMPEG_ROOT)
   file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
+  # Proxy generation shells out to the FFmpeg CLI, so it has to ship with the
+  # app next to the libraries it loads.
+  set(FFMPEG_RUNTIME_FILES ${FFMPEG_DLLS})
+  if(EXISTS "${FFMPEG_ROOT}/bin/ffmpeg.exe")
+    list(APPEND FFMPEG_RUNTIME_FILES "${FFMPEG_ROOT}/bin/ffmpeg.exe")
+  endif()
   add_custom_command(TARGET VideoEditor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${FFMPEG_DLLS} "$<TARGET_FILE_DIR:VideoEditor>")
+            ${FFMPEG_RUNTIME_FILES} "$<TARGET_FILE_DIR:VideoEditor>")
 endif()
