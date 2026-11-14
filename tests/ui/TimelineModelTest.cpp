@@ -51,8 +51,10 @@ TEST(TimelineModel, UpdatesIncrementallyWithoutReset)
     TrackListModel tracks;
     model.setProject(document.project());
     tracks.setProject(document.project());
-    QAbstractItemModelTester modelTester(&model);
-    QAbstractItemModelTester trackTester(&tracks);
+    QAbstractItemModelTester modelTester(
+        &model, QAbstractItemModelTester::FailureReportingMode::Fatal);
+    QAbstractItemModelTester trackTester(
+        &tracks, QAbstractItemModelTester::FailureReportingMode::Fatal);
 
     QSignalSpy resetSpy(&model, &QAbstractItemModel::modelReset);
     QSignalSpy insertSpy(&model, &QAbstractItemModel::rowsInserted);
@@ -106,7 +108,8 @@ TEST(TrackListModel, ReconcilesTrackReorder)
     ProjectDocument document;
     TrackListModel model;
     model.setProject(document.project());
-    QAbstractItemModelTester tester(&model);
+    QAbstractItemModelTester tester(
+        &model, QAbstractItemModelTester::FailureReportingMode::Fatal);
     ASSERT_EQ(model.rowCount(), 3);
 
     Track extra;

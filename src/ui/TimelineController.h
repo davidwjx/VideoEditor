@@ -107,6 +107,7 @@ private:
     bool m_snapEnabled = true;
     QString m_selectedClipId;
     QString m_selectedCueId;
+    qint64 m_lastDurationUs = -1;
 };
 
 } // namespace VideoEditor

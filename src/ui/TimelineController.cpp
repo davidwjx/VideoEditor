@@ -63,7 +63,14 @@ void TimelineController::refreshFromDocument()
         m_timelineModel->selectItem(QString());
         emit selectionChanged();
     }
-    emit durationChanged();
+
+    // Track commands emit tracksChanged and timelineChanged back to back; only
+    // notify bindings when the duration actually changed.
+    const qint64 duration = durationUs();
+    if (duration != m_lastDurationUs) {
+        m_lastDurationUs = duration;
+        emit durationChanged();
+    }
 }
 
 qint64 TimelineController::durationUs() const
@@ -115,6 +122,24 @@ void TimelineController::stepFrames(int delta)
 QList<int64_t> TimelineController::snapCandidates(
     const QString &excludeClipId) const
 {
+    // A linked drag moves the whole group together, so excluding only the
+    // clicked clip would still let the twin's edges pull the drag back.
+    QString excludeLinkId;
+    if (!excludeClipId.isEmpty()) {
+        bool found = false;
+        for (const Track &track : m_document.project().tracks) {
+            for (const Clip &clip : track.clips) {
+                if (clip.id == excludeClipId) {
+                    excludeLinkId = clip.linkId;
+                    found = true;
+                    break;
+                }
+            }
+            if (found)
+                break;
+        }
+    }
+
     QList<int64_t> candidates;
     candidates.append(0);
     candidates.append(m_positionUs);
@@ -122,6 +147,8 @@ QList<int64_t> TimelineController::snapCandidates(
     for (const Track &track : m_document.project().tracks) {
         for (const Clip &clip : track.clips) {
             if (!excludeClipId.isEmpty() && clip.id == excludeClipId)
+                continue;
+            if (!excludeLinkId.isEmpty() && clip.linkId == excludeLinkId)
                 continue;
             candidates.append(clip.timelineStartUs);
             candidates.append(clip.timelineEndUs());
@@ -136,7 +163,9 @@ qint64 TimelineController::snapUs(qint64 timeUs) const
         return timeUs;
     const int64_t threshold = qMax<int64_t>(
         1, std::llround(8.0 / m_pixelsPerSecond * 1'000'000.0));
-    return TimelineEditor::snapTime(timeUs, threshold, snapCandidates()).timeUs;
+    return TimelineEditor::snapTime(timeUs, threshold,
+                                    snapCandidates(m_selectedClipId))
+        .timeUs;
 }
 
 QString TimelineController::firstTrackIdOfType(TrackType type) const
@@ -285,6 +314,12 @@ QString TimelineController::addAssetToTimeline(const QString &assetId,
 
     // One addClips command keeps the linked pair in a single undo step.
     const QStringList added = m_editor.addClips(entries);
+    if (added.size() != entries.size()) {
+        // addClips skips locked tracks silently; a half-added link group would
+        // leave the timeline inconsistent, so report it as a failed edit.
+        emit editFailed(QStringLiteral("部分片段未能添加，轨道可能已锁定。"));
+        return {};
+    }
     if (!videoClipId.isEmpty() && added.contains(videoClipId))
         return videoClipId;
     if (!audioClipId.isEmpty() && added.contains(audioClipId))
@@ -379,7 +414,24 @@ void TimelineController::copySelected()
     QString trackId;
     if (!trackForClip(m_selectedClipId, &trackId))
         return;
-    m_editor.copy({ClipLocator{trackId, m_selectedClipId}});
+    const Clip *selected = findClip(trackId, m_selectedClipId);
+    if (!selected)
+        return;
+
+    QList<ClipLocator> locators;
+    if (selected->linkId.isEmpty()) {
+        locators.append(ClipLocator{trackId, m_selectedClipId});
+    } else {
+        // Copying one half of a linked pair must copy the whole group so a
+        // later paste stays in sync.
+        for (const Track &track : m_document.project().tracks) {
+            for (const Clip &clip : track.clips) {
+                if (clip.linkId == selected->linkId)
+                    locators.append(ClipLocator{track.id, clip.id});
+            }
+        }
+    }
+    m_editor.copy(locators);
 }
 
 void TimelineController::pasteAtPlayhead()
