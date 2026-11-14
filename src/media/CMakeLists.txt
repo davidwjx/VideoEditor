@@ -16,6 +16,16 @@ add_library(videoeditor_media STATIC
   decode/RgbaConverter.cpp
   decode/FrameReadback.h
   decode/FrameReadback.cpp
+  decode/IVideoDecoder.h
+  decode/IVideoDecoder.cpp
+  decode/FfmpegD3D11Decoder.h
+  decode/FfmpegD3D11Decoder.cpp
+  decode/FfmpegSoftwareDecoder.h
+  decode/FfmpegSoftwareDecoder.cpp
+  decode/VideoDecoderFactory.h
+  decode/VideoDecoderFactory.cpp
+  decode/FramePublisher.h
+  decode/FramePublisher.cpp
 )
 # Accept both "probe/MediaProbe.h" and "MediaProbe.h" from consumers, and the
 # same for the decode headers.

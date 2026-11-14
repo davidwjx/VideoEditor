@@ -134,6 +134,54 @@ bool RgbaConverter::convert(ID3D11Texture2D *source, int width, int height,
     return true;
 }
 
+bool RgbaConverter::convertRgba(const std::vector<uint8_t> &rgba, int width,
+                                int height, ID3D11RenderTargetView *target,
+                                float rotationRadians, QString *error)
+{
+    if (rgba.size() < size_t(width) * size_t(height) * 4) {
+        setError(error, QStringLiteral("RGBA 缓冲区尺寸不正确。"));
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = UINT(width);
+    desc.Height = UINT(height);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    if (!m_uploadTexture || m_uploadWidth != width || m_uploadHeight != height) {
+        m_uploadTexture.Reset();
+        if (FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_uploadTexture))) {
+            setError(error, QStringLiteral("无法创建 CPU 上传纹理。"));
+            return false;
+        }
+        m_uploadWidth = width;
+        m_uploadHeight = height;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(m_context->Map(m_uploadTexture.Get(), 0, D3D11_MAP_WRITE_DISCARD,
+                              0, &mapped))) {
+        setError(error, QStringLiteral("无法映射 CPU 上传纹理。"));
+        return false;
+    }
+    for (int row = 0; row < height; ++row) {
+        std::memcpy(static_cast<uint8_t *>(mapped.pData)
+                        + size_t(row) * mapped.RowPitch,
+                    rgba.data() + size_t(row) * size_t(width) * 4,
+                    size_t(width) * 4);
+    }
+    m_context->Unmap(m_uploadTexture.Get(), 0);
+
+    return convert(m_uploadTexture.Get(), width, height, target, rotationRadians,
+                   error);
+}
+
 } // namespace VideoEditor
 
 #endif

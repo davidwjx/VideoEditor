@@ -34,6 +34,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_params;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> m_rasterizer;
+    // Decoder-owned D3D11 textures are created with D3D11_BIND_DECODER only,
+    // so they cannot be sampled directly. Convert() copies those frames into
+    // this shader-resource-capable texture first.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_sampleableTexture;
+    int m_sampleableWidth = 0;
+    int m_sampleableHeight = 0;
 };
 
 } // namespace VideoEditor

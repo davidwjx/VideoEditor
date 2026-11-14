@@ -2,6 +2,9 @@
 
 #ifdef _WIN32
 
+#include <cstdint>
+#include <vector>
+
 #include <d3d11.h>
 #include <wrl/client.h>
 
@@ -17,6 +20,9 @@ public:
     bool convert(ID3D11Texture2D *source, int width, int height,
                  ID3D11RenderTargetView *target, float rotationRadians,
                  QString *error = nullptr);
+    bool convertRgba(const std::vector<uint8_t> &rgba, int width, int height,
+                     ID3D11RenderTargetView *target, float rotationRadians,
+                     QString *error = nullptr);
 
 private:
     ID3D11Device *m_device = nullptr;
@@ -26,6 +32,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_sampler;
     Microsoft::WRL::ComPtr<ID3D11Buffer> m_params;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> m_rasterizer;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_uploadTexture;
+    int m_uploadWidth = 0;
+    int m_uploadHeight = 0;
 };
 
 } // namespace VideoEditor

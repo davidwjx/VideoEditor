@@ -97,6 +97,42 @@ bool Nv12Converter::convert(ID3D11Texture2D *nv12, UINT subresource,
                             int width, int height, ID3D11RenderTargetView *target,
                             float rotationRadians, QString *error)
 {
+    if (!nv12) {
+        setError(error, QStringLiteral("视频纹理为空。"));
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC sourceDesc{};
+    nv12->GetDesc(&sourceDesc);
+    if (!(sourceDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
+        // FFmpeg's D3D11VA pool textures carry only D3D11_BIND_DECODER. Copy
+        // the decoded array slice into a texture that can be sampled.
+        if (!m_sampleableTexture || m_sampleableWidth != width
+            || m_sampleableHeight != height) {
+            D3D11_TEXTURE2D_DESC copyDesc{};
+            copyDesc.Width = UINT(width);
+            copyDesc.Height = UINT(height);
+            copyDesc.MipLevels = 1;
+            copyDesc.ArraySize = 1;
+            copyDesc.Format = DXGI_FORMAT_NV12;
+            copyDesc.SampleDesc.Count = 1;
+            copyDesc.Usage = D3D11_USAGE_DEFAULT;
+            copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            m_sampleableTexture.Reset();
+            if (FAILED(m_device->CreateTexture2D(&copyDesc, nullptr,
+                                                 &m_sampleableTexture))) {
+                setError(error, QStringLiteral("无法创建可采样的视频纹理。"));
+                return false;
+            }
+            m_sampleableWidth = width;
+            m_sampleableHeight = height;
+        }
+        m_context->CopySubresourceRegion(m_sampleableTexture.Get(), 0, 0, 0, 0,
+                                         nv12, subresource, nullptr);
+        nv12 = m_sampleableTexture.Get();
+        subresource = 0;
+    }
+
     // D3D11 selects the NV12 plane from the view format (R8 -> luma,
     // R8G8 -> chroma); there is no PlaneSlice member in D3D11 view descs.
     D3D11_SHADER_RESOURCE_VIEW_DESC desc{};

@@ -21,7 +21,11 @@ target_link_libraries(core_tests PRIVATE videoeditor_core GTest::gtest_main Qt6:
 gtest_discover_tests(core_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 
-add_executable(media_tests media/MediaProbeTest.cpp media/D3D11PipelineTest.cpp TestMain.cpp)
+add_executable(media_tests
+  media/MediaProbeTest.cpp
+  media/D3D11PipelineTest.cpp
+  media/DecoderTest.cpp
+  TestMain.cpp)
 target_link_libraries(media_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)
 target_compile_definitions(media_tests PRIVATE
