@@ -29,3 +29,15 @@ TEST(TimeBase, ClampsNegativeValues)
     EXPECT_EQ(formatTimecode(-5, Rational{30, 1}), QStringLiteral("00:00:00:00"));
     EXPECT_EQ(formatDuration(-5), QStringLiteral("00:00:00.000"));
 }
+
+TEST(TimeBase, FormatsDropFrameTimecode)
+{
+    const Rational ntsc{30000, 1001};
+    EXPECT_EQ(formatTimecodeAtRate(1'800 * 1'001'000LL / 30, ntsc, true),
+              QStringLiteral("00:01:00;02"));
+    EXPECT_EQ(formatTimecodeAtRate(17'982 * 1'001'000LL / 30, ntsc, true),
+              QStringLiteral("00:10:00;00"));
+    EXPECT_EQ(formatTimecodeAtRate(0, ntsc, true), QStringLiteral("00:00:00;00"));
+    EXPECT_EQ(formatTimecodeAtRate(1'000'000, Rational{30, 1}, false),
+              QStringLiteral("00:00:01:00"));
+}

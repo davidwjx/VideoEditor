@@ -53,6 +53,44 @@ QString formatTimecode(int64_t micros, Rational fps)
         .arg(frames, 2, 10, QLatin1Char('0'));
 }
 
+QString formatTimecodeAtRate(int64_t micros, Rational fps, bool dropFrame)
+{
+    micros = clampNonNegative(micros);
+    if (!fps.isValid())
+        fps = Rational{30, 1};
+    if (!dropFrame)
+        return formatTimecode(micros, fps);
+
+    // Nominal rate is the rounded frame rate: 29.97 -> 30, 59.94 -> 60.
+    const int64_t nominalFps =
+        std::max<int64_t>(1, (static_cast<int64_t>(fps.num) + fps.den / 2) / fps.den);
+    // 29.97 -> 2, 59.94 -> 4 dropped frame numbers per minute (round(nominal / 15)).
+    const int64_t dropPerMinute = (nominalFps + 7) / 15;
+
+    int64_t frames = microsToFrames(micros, fps);
+    const int64_t framesPerMinute = nominalFps * 60 - dropPerMinute;
+    const int64_t framesPer10Minutes = nominalFps * 600 - dropPerMinute * 9;
+    const int64_t tens = frames / framesPer10Minutes;
+    const int64_t remainder = frames % framesPer10Minutes;
+    if (remainder >= dropPerMinute) {
+        frames += dropPerMinute * 9 * tens
+                  + dropPerMinute * ((remainder - dropPerMinute) / framesPerMinute);
+    } else {
+        frames += dropPerMinute * 9 * tens;
+    }
+
+    const int64_t frameNumber = frames % nominalFps;
+    const int64_t totalSeconds = frames / nominalFps;
+    const int64_t seconds = totalSeconds % 60;
+    const int64_t minutes = (totalSeconds / 60) % 60;
+    const int64_t hours = totalSeconds / 3600;
+    return QStringLiteral("%1:%2:%3;%4")
+        .arg(hours, 2, 10, QLatin1Char('0'))
+        .arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(seconds, 2, 10, QLatin1Char('0'))
+        .arg(frameNumber, 2, 10, QLatin1Char('0'));
+}
+
 QString formatDuration(int64_t micros)
 {
     micros = clampNonNegative(micros);

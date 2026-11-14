@@ -15,6 +15,7 @@ add_executable(core_tests
   core/CodecSupportTest.cpp
   core/MediaInfoTest.cpp
   core/TimelineTest.cpp
+  core/TimelineEvaluatorTest.cpp
   core/ProjectSerializerTest.cpp
   core/ProjectDocumentTest.cpp
 )

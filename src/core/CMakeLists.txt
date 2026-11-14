@@ -8,6 +8,8 @@ add_library(videoeditor_core STATIC
   CodecSupport.cpp
   Timeline.h
   Timeline.cpp
+  TimelineEvaluator.h
+  TimelineEvaluator.cpp
   Project.h
   Project.cpp
   ProjectSerializer.h

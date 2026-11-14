@@ -19,6 +19,7 @@ constexpr int64_t kMicrosPerSecond = 1'000'000;
 int64_t framesToMicros(int64_t frames, Rational fps);
 int64_t microsToFrames(int64_t micros, Rational fps);
 QString formatTimecode(int64_t micros, Rational fps);
+QString formatTimecodeAtRate(int64_t micros, Rational fps, bool dropFrame);
 QString formatDuration(int64_t micros);
 
 } // namespace VideoEditor
