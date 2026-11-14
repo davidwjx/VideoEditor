@@ -31,6 +31,8 @@ void ProjectDocument::setProject(Project project, const QString &filePath)
     m_undoStack.setClean();
     emit changed();
     emit assetsChanged();
+    emit tracksChanged();
+    emit timelineChanged();
     emit undoStateChanged();
     emit dirtyChanged();
 }
@@ -83,6 +85,49 @@ bool ProjectDocument::load(const QString &path, QString *error)
         return false;
     setProject(std::move(*project), path);
     return true;
+}
+
+void ProjectDocument::applyTrackEdit(const QString &trackId,
+                                     const QList<Clip> &clips,
+                                     const QList<SubtitleCue> &cues)
+{
+    for (Track &track : m_project.tracks) {
+        if (track.id != trackId)
+            continue;
+        track.clips = clips;
+        track.cues = cues;
+        emit changed();
+        emit timelineChanged();
+        emit dirtyChanged();
+        return;
+    }
+}
+
+void ProjectDocument::replaceTracks(const QList<Track> &tracks)
+{
+    m_project.tracks = tracks;
+    emit changed();
+    emit tracksChanged();
+    emit timelineChanged();
+    emit dirtyChanged();
+}
+
+Track *ProjectDocument::trackById(const QString &id)
+{
+    for (Track &track : m_project.tracks) {
+        if (track.id == id)
+            return &track;
+    }
+    return nullptr;
+}
+
+const Track *ProjectDocument::trackById(const QString &id) const
+{
+    for (const Track &track : m_project.tracks) {
+        if (track.id == id)
+            return &track;
+    }
+    return nullptr;
 }
 
 void ProjectDocument::insertAssetInternal(const Asset &asset)

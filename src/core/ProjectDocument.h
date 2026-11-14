@@ -28,6 +28,12 @@ public:
     void removeAsset(const QString &assetId);
     void setAssetProxyPath(const QString &assetId, const QString &proxyPath);
 
+    void applyTrackEdit(const QString &trackId, const QList<Clip> &clips,
+                        const QList<SubtitleCue> &cues);
+    void replaceTracks(const QList<Track> &tracks);
+    Track *trackById(const QString &id);
+    const Track *trackById(const QString &id) const;
+
     bool save(const QString &path, QString *error = nullptr);
     bool load(const QString &path, QString *error = nullptr);
 
@@ -42,6 +48,8 @@ public:
 signals:
     void changed();
     void assetsChanged();
+    void timelineChanged();
+    void tracksChanged();
     void undoStateChanged();
     void dirtyChanged();
 

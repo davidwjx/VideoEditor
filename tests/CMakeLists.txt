@@ -18,6 +18,7 @@ add_executable(core_tests
   core/TimelineEvaluatorTest.cpp
   core/ProjectSerializerTest.cpp
   core/ProjectDocumentTest.cpp
+  core/TimelineEditorTest.cpp
 )
 target_link_libraries(core_tests PRIVATE videoeditor_core GTest::gtest_main Qt6::Core)
 gtest_discover_tests(core_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
