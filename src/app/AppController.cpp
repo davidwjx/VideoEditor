@@ -189,6 +189,9 @@ void AppController::restoreRecovery()
     }
     m_document->setProject(std::move(*project));
     m_currentAssetId.clear();
+    // The restored document replaces whatever was previewed; stop and clear
+    // the old preview so its clip does not keep playing behind the new project.
+    m_preview->closeMedia();
     m_store->discardRecovery();
     setRecoveryAvailable(false);
     clearError();
@@ -209,10 +212,16 @@ void AppController::saveProject(const QUrl &url)
         path += QStringLiteral(".veproj");
 
     QString error;
-    if (!m_document->save(path, &error))
+    if (!m_document->save(path, &error)) {
         setLastError(error);
-    else
-        clearError();
+        return;
+    }
+    // The project on disk now supersedes any autosaved snapshot; keeping the
+    // recovery file would let the next launch roll back edits saved after the
+    // last autosave.
+    m_store->discardRecovery();
+    setRecoveryAvailable(false);
+    clearError();
 }
 
 void AppController::openProject(const QUrl &url)
@@ -223,7 +232,17 @@ void AppController::openProject(const QUrl &url)
         return;
     }
     m_currentAssetId.clear();
+    // The loaded project replaces the current document, so the previous
+    // asset's preview must stop instead of playing on behind it.
+    m_preview->closeMedia();
     clearError();
+}
+
+void AppController::discardRecoveryIfClean()
+{
+    if (m_document->isDirty() || m_recoveryAvailable)
+        return;
+    m_store->discardRecovery();
 }
 
 void AppController::selftest(const QString &path)

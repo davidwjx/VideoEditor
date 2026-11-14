@@ -39,6 +39,7 @@ public:
 
     Q_INVOKABLE void openMedia(const QString &path,
                                const QString &proxyPath = {});
+    Q_INVOKABLE void closeMedia();
     Q_INVOKABLE void play();
     Q_INVOKABLE void pause();
     Q_INVOKABLE void togglePlay();
@@ -57,9 +58,10 @@ signals:
 
 private:
     void onOpened(const MediaInfo &info, bool hardware,
-                  const QString &fallbackReason);
+                  const QString &fallbackReason, quint64 generation);
     void onFrameReady(int slot, const QSize &size, int rotation, qint64 ptsUs,
-                      quintptr h0, quintptr h1, quintptr h2);
+                      quintptr h0, quintptr h1, quintptr h2,
+                      quint64 generation);
     void onFramePresented(qint64 ptsUs);
     void onFinished();
     void onError(const QString &message);
@@ -74,6 +76,9 @@ private:
     QString m_decodeMode;
     qint64 m_positionUs = 0;
     qint64 m_durationUs = 0;
+    // Incremented whenever the media changes; signals tagged with an older
+    // token belong to the previous media and must not reach the item.
+    quint64 m_generation = 0;
     bool m_playing = false;
     bool m_framePending = false;
     bool m_atEnd = false;

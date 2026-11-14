@@ -46,6 +46,10 @@ public:
     Q_INVOKABLE void openProject(const QUrl &url);
     Q_INVOKABLE void selftest(const QString &path);
 
+    // Called on clean shutdown: removes a stale autosave only when the open
+    // document is clean and no startup recovery prompt is still pending.
+    void discardRecoveryIfClean();
+
     ProjectDocument *document() const { return m_document; }
     ProjectStore *store() const { return m_store.get(); }
     PreviewController *preview() const { return m_preview; }

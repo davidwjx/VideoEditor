@@ -28,6 +28,11 @@ int main(int argc, char *argv[])
 
     VideoEditor::AppController controller;
 
+    // A clean quit must not leave an autosave behind: a later launch would
+    // offer an older snapshot and could roll back edits saved after it.
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &controller,
+                     &VideoEditor::AppController::discardRecoveryIfClean);
+
     qmlRegisterType<VideoEditor::VideoPreviewItem>("VideoEditor", 1, 0,
                                                   "VideoPreview");
 

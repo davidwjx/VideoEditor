@@ -44,9 +44,18 @@ void DecoderWorker::clearDecoder()
     m_busy = false;
 }
 
-void DecoderWorker::open(const QString &path, const QString &proxyPath)
+void DecoderWorker::close()
 {
     clearDecoder();
+    m_info = MediaInfo{};
+    m_generation = 0;
+}
+
+void DecoderWorker::open(const QString &path, const QString &proxyPath,
+                         quint64 generation)
+{
+    clearDecoder();
+    m_generation = generation;
 
     const bool usingProxy = QFileInfo::exists(proxyPath);
     const QString actualPath = usingProxy ? proxyPath : path;
@@ -105,12 +114,14 @@ void DecoderWorker::open(const QString &path, const QString &proxyPath)
     }
     m_eof = false;
 
-    emit opened(m_info, m_decoder->isHardware(), result.hardwareFallbackReason);
+    emit opened(m_info, m_decoder->isHardware(), result.hardwareFallbackReason,
+                m_generation);
     emit frameReady(m_publisher->lastWrittenSlot(), displaySize,
                     m_info.rotationDegrees, firstFrame.ptsUs,
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(0)),
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(1)),
-                    reinterpret_cast<quintptr>(m_ring->sharedHandle(2)));
+                    reinterpret_cast<quintptr>(m_ring->sharedHandle(2)),
+                    m_generation);
 }
 
 void DecoderWorker::requestFrame()
@@ -151,7 +162,8 @@ void DecoderWorker::requestFrame()
                     m_info.rotationDegrees, frame.ptsUs,
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(0)),
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(1)),
-                    reinterpret_cast<quintptr>(m_ring->sharedHandle(2)));
+                    reinterpret_cast<quintptr>(m_ring->sharedHandle(2)),
+                    m_generation);
 }
 
 void DecoderWorker::seek(qint64 ptsUs)

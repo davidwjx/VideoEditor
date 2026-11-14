@@ -59,6 +59,7 @@ void PreviewController::setItem(VideoPreviewItem *item)
 void PreviewController::openMedia(const QString &path, const QString &proxyPath)
 {
     pause();
+    const quint64 generation = ++m_generation;
     if (m_item)
         m_item->resetBridge();
     m_info = MediaInfo{};
@@ -74,7 +75,32 @@ void PreviewController::openMedia(const QString &path, const QString &proxyPath)
     emit decodeModeChanged();
 
     QMetaObject::invokeMethod(m_worker, "open", Qt::QueuedConnection,
-                              Q_ARG(QString, path), Q_ARG(QString, proxyPath));
+                              Q_ARG(QString, path), Q_ARG(QString, proxyPath),
+                              Q_ARG(quint64, generation));
+}
+
+void PreviewController::closeMedia()
+{
+    pause();
+    m_frameTimer.stop();
+    // Bump before clearing anything so any frame the worker already emitted
+    // for the previous media is treated as stale.
+    ++m_generation;
+    m_info = MediaInfo{};
+    m_positionUs = 0;
+    m_durationUs = 0;
+    m_mediaName.clear();
+    m_decodeMode.clear();
+    m_framePending = false;
+    m_atEnd = false;
+    if (m_item)
+        m_item->resetBridge();
+    emit positionChanged();
+    emit durationChanged();
+    emit mediaChanged();
+    emit decodeModeChanged();
+
+    QMetaObject::invokeMethod(m_worker, "close", Qt::QueuedConnection);
 }
 
 void PreviewController::play()
@@ -129,8 +155,11 @@ void PreviewController::stepFrames(int delta)
 }
 
 void PreviewController::onOpened(const MediaInfo &info, bool hardware,
-                                 const QString &fallbackReason)
+                                 const QString &fallbackReason,
+                                 quint64 generation)
 {
+    if (generation != m_generation)
+        return;
     m_info = info;
     m_durationUs = info.durationUs;
 
@@ -152,8 +181,16 @@ void PreviewController::onOpened(const MediaInfo &info, bool hardware,
 
 void PreviewController::onFrameReady(int slot, const QSize &size, int rotation,
                                      qint64 ptsUs, quintptr h0, quintptr h1,
-                                     quintptr h2)
+                                     quintptr h2, quint64 generation)
 {
+    if (generation != m_generation) {
+        // The frame belongs to a media that is no longer open. Release its
+        // ring slot so the old producer/ring teardown is never left waiting.
+        if (m_item)
+            m_item->discardFrame(slot);
+        return;
+    }
+
     m_positionUs = ptsUs;
     m_atEnd = false;
     emit positionChanged();

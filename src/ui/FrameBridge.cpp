@@ -17,6 +17,13 @@ bool FrameBridge::initialize(QQuickWindow *window,
         return false;
     }
 
+    if (width <= 0 || height <= 0 || !handles[0] || !handles[1]
+        || !handles[2]) {
+        if (error)
+            *error = QStringLiteral("共享纹理句柄无效。");
+        return false;
+    }
+
     // getResource() is an instance method on QSGRendererInterface in Qt 6.8;
     // the window only hands it out on the scene-graph render thread, which is
     // where updatePaintNode() calls initialize().

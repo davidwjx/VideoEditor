@@ -27,9 +27,25 @@ void VideoPreviewItem::setSharedHandles(const std::array<quintptr, 3> &handles)
 void VideoPreviewItem::resetBridge()
 {
     m_hasPending = false;
+    // The old handles and frame size belong to a texture ring that is about to
+    // be torn down. Keeping them would let the render thread reopen stale
+    // shared resources before the first frame of the new media arrives.
+    m_handles = {};
+    m_pendingSize = QSize{};
+    m_pendingSlot = -1;
+    m_pendingPts = 0;
+    m_rotation = 0;
     m_abandoned = {};
     m_bridgeErrorReported = false;
     m_resetRequested.store(true);
+    update();
+}
+
+void VideoPreviewItem::discardFrame(int slot)
+{
+    if (slot < 0 || slot >= 3)
+        return;
+    m_abandoned[size_t(slot)] = true;
     update();
 }
 
@@ -75,16 +91,18 @@ QSGNode *VideoPreviewItem::updatePaintNode(QSGNode *oldNode,
     auto *node = static_cast<QSGSimpleTextureNode *>(oldNode);
 
     if (m_resetRequested.exchange(false)) {
-        m_bridge = FrameBridge();
-        // QSGSimpleTextureNode::setTexture(nullptr) dereferences the texture in
-        // this Qt build, so the old node is dropped instead of cleared. A frame
-        // submitted together with new shared handles survives the reset;
-        // resetBridge() is what explicitly drops a stale pending frame.
+        // Drop the node (and the Qt texture wrappers it owns) before the bridge
+        // releases the D3D11 textures they wrap. QSGSimpleTextureNode::
+        // setTexture(nullptr) dereferences the texture in this Qt build, so
+        // the old node is dropped instead of cleared.
         delete node;
         node = nullptr;
+        m_bridge = FrameBridge();
     }
 
-    if (!m_bridge.isValid() && window() && m_pendingSize.isValid()) {
+    const bool handlesValid = m_handles[0] && m_handles[1] && m_handles[2];
+    if (!m_bridge.isValid() && window() && handlesValid
+        && m_pendingSize.isValid()) {
         QString error;
         if (!m_bridge.initialize(window(), m_handles, m_pendingSize.width(),
                                  m_pendingSize.height(), &error)) {
@@ -99,7 +117,10 @@ QSGNode *VideoPreviewItem::updatePaintNode(QSGNode *oldNode,
 
     if (m_bridge.isValid()) {
         for (int i = 0; i < 3; ++i) {
-            if (m_abandoned[size_t(i)]) {
+            // Never consume the slot of a live pending frame: an abandoned flag
+            // can outlive a bridge reset and the slot indices are reused.
+            if (m_abandoned[size_t(i)]
+                && !(m_hasPending && m_pendingSlot == i)) {
                 m_bridge.discard(i);
                 m_abandoned[size_t(i)] = false;
             }

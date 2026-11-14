@@ -18,6 +18,10 @@ public:
     void setSharedHandles(const std::array<quintptr, 3> &handles);
     void submitFrame(int slot, const QSize &size, int rotationDegrees,
                      qint64 ptsUs);
+    // Release a frame the controller rejected (stale media generation) without
+    // showing it. The actual keyed-mutex release happens in updatePaintNode(),
+    // where the shared resources are valid.
+    void discardFrame(int slot);
     void resetBridge();
 
 signals:
