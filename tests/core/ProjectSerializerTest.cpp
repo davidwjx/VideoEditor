@@ -43,6 +43,56 @@ TEST(ProjectSerializer, RoundTripsAllFields)
     EXPECT_EQ(*restored, original);
 }
 
+TEST(ProjectSerializer, RoundTripsAudioOnlyAssetMetadata)
+{
+    MediaInfo info;
+    info.path = QStringLiteral("C:/music/bgm.mp3");
+    info.container = QStringLiteral("mp3");
+    info.audioCodec = QStringLiteral("mp3");
+    info.durationUs = 10'000'000;
+    info.hasAudio = true;
+    info.supported = true;
+    info.kind = MediaKind::Audio;
+    info.hasVideo = false;
+    info.audioSampleRate = 48000;
+    info.audioChannels = 1;
+    info.audioDurationUs = 10'000'000;
+
+    Project project;
+    project.assets.append(Asset{QStringLiteral("asset-a"), info.path, info, {}});
+
+    QString error;
+    const auto restored = ProjectSerializer::fromJson(
+        ProjectSerializer::toJson(project), &error);
+    ASSERT_TRUE(restored.has_value()) << error.toStdString();
+    const MediaInfo &roundTripped = restored->assets.first().info;
+    EXPECT_EQ(roundTripped.kind, MediaKind::Audio);
+    EXPECT_FALSE(roundTripped.hasVideo);
+    EXPECT_TRUE(roundTripped.hasAudio);
+    EXPECT_EQ(roundTripped.audioSampleRate, 48000);
+    EXPECT_EQ(roundTripped.audioChannels, 1);
+    EXPECT_EQ(roundTripped.audioDurationUs, 10'000'000);
+}
+
+TEST(ProjectSerializer, DefaultsLegacyAssetsToVideoKind)
+{
+    QJsonObject json = ProjectSerializer::toJson(sampleProject());
+    QJsonArray assets = json.value(QStringLiteral("assets")).toArray();
+    QJsonObject asset = assets.at(0).toObject();
+    QJsonObject info = asset.value(QStringLiteral("info")).toObject();
+    info.remove(QStringLiteral("kind"));
+    info.remove(QStringLiteral("hasVideo"));
+    asset.insert(QStringLiteral("info"), info);
+    assets.replace(0, asset);
+    json.insert(QStringLiteral("assets"), assets);
+
+    QString error;
+    const auto restored = ProjectSerializer::fromJson(json, &error);
+    ASSERT_TRUE(restored.has_value()) << error.toStdString();
+    EXPECT_EQ(restored->assets.first().info.kind, MediaKind::Video);
+    EXPECT_TRUE(restored->assets.first().info.hasVideo);
+}
+
 TEST(ProjectSerializer, RejectsNewerSchema)
 {
     QJsonObject json = ProjectSerializer::toJson(sampleProject());

@@ -67,4 +67,28 @@ if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE whi
 Copy-Item (Join-Path $out "h264.mp4") (Join-Path $out "中文 文件名.mp4") -Force
 Set-Content -Path (Join-Path $out "corrupt.mp4") -Value "this is not a video" -Encoding Ascii
 
+# M2 audio, sync and performance fixtures.
+& $ffmpeg -y -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=2" `
+  -c:a pcm_s16le (Join-Path $out "tone.wav")
+if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating tone.wav: $ffmpeg" }
+
+& $ffmpeg -y -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=10" `
+  -c:a libmp3lame -b:a 192k (Join-Path $out "bgm.mp3")
+if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating bgm.mp3: $ffmpeg" }
+
+& $ffmpeg -y -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=10" `
+  -c:a flac (Join-Path $out "bgm.flac")
+if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating bgm.flac: $ffmpeg" }
+
+& $ffmpeg -y -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=10" `
+  -c:a aac -b:a 192k (Join-Path $out "bgm.m4a")
+if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating bgm.m4a: $ffmpeg" }
+
+# sync.mp4: testsrc2 timestamp pattern + a 100 ms 1 kHz beep at every whole second.
+& $ffmpeg -y -hide_banner -loglevel error `
+  -f lavfi -i "testsrc2=size=640x360:rate=30:duration=10" `
+  -f lavfi -i "aevalsrc=0.8*sin(2*PI*1000*t)*lt(mod(t\,1)\,0.1):s=48000:d=10" `
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest (Join-Path $out "sync.mp4")
+if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating sync.mp4: $ffmpeg" }
+
 Write-Host "Fixtures written to $out"

@@ -21,4 +21,8 @@ struct CodecVerdict {
 CodecVerdict classifyVideoCodec(const QString &ffmpegName);
 QString friendlyCodecName(VideoCodecKind kind);
 
+// Audio codecs that the M2 audio pipeline can decode. Everything else is
+// rejected at import time with an actionable Chinese message.
+bool isSupportedAudioCodec(const QString &ffmpegName);
+
 } // namespace VideoEditor

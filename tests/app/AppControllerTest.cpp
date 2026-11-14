@@ -49,6 +49,21 @@ TEST(AppController, ImportsSupportedFile)
     EXPECT_TRUE(controller.lastError().isEmpty());
 }
 
+TEST(AppController, ImportsAudioOnlyAsset)
+{
+    AppController controller;
+    const QString path = fixture(QStringLiteral("bgm.mp3"));
+    if (!QFile::exists(path))
+        GTEST_SKIP() << "missing fixture";
+
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    ASSERT_EQ(controller.mediaModel()->rowCount(), 1);
+    EXPECT_TRUE(controller.lastError().isEmpty());
+    const QVariant codec = controller.mediaModel()->data(
+        controller.mediaModel()->index(0, 0), MediaListModel::CodecRole);
+    EXPECT_TRUE(codec.toString().contains(QStringLiteral("音频")));
+}
+
 TEST(AppController, ReportsUnsupportedOrMissingFile)
 {
     AppController controller;

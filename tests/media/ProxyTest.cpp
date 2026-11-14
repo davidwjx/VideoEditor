@@ -32,6 +32,8 @@ QString fixture(const QString &name)
 TEST(ProxyPlanner, TriggersOnlyAbove1080p)
 {
     MediaInfo info;
+    info.kind = MediaKind::Video;
+    info.hasVideo = true;
     info.width = 1920;
     info.height = 1080;
     EXPECT_FALSE(planProxy(info).needed);
@@ -41,11 +43,19 @@ TEST(ProxyPlanner, TriggersOnlyAbove1080p)
     const ProxyPlan plan = planProxy(info);
     EXPECT_TRUE(plan.needed);
     EXPECT_EQ(plan.height, 540);
+
+    // Audio-only assets have no picture to proxy.
+    MediaInfo audio;
+    audio.kind = MediaKind::Audio;
+    audio.audioSampleRate = 48000;
+    EXPECT_FALSE(planProxy(audio).needed);
 }
 
 TEST(ProxyPlanner, NeedsGenerationWhenProxyMissing)
 {
     MediaInfo highres;
+    highres.kind = MediaKind::Video;
+    highres.hasVideo = true;
     highres.width = 2560;
     highres.height = 1440;
     EXPECT_TRUE(needsProxyGeneration(highres, QString()));
@@ -62,9 +72,15 @@ TEST(ProxyPlanner, NeedsGenerationWhenProxyMissing)
         highres, dir.filePath(QStringLiteral("missing.mp4"))));
 
     MediaInfo fullHd;
+    fullHd.kind = MediaKind::Video;
+    fullHd.hasVideo = true;
     fullHd.width = 1920;
     fullHd.height = 1080;
     EXPECT_FALSE(needsProxyGeneration(fullHd, QString()));
+
+    MediaInfo audioOnly;
+    audioOnly.kind = MediaKind::Audio;
+    EXPECT_FALSE(needsProxyGeneration(audioOnly, QString()));
 }
 
 TEST(ProxyBundling, ShipsFfmpegNextToApp)

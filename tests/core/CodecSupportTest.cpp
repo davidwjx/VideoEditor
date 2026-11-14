@@ -26,3 +26,13 @@ TEST(CodecSupport, RejectsUnknownCodecWithActionableMessage)
     EXPECT_TRUE(verdict.reason.contains(QStringLiteral("不支持")));
     EXPECT_TRUE(verdict.reason.contains(QStringLiteral("转码")));
 }
+
+TEST(CodecSupport, AcceptsBackgroundMusicCodecs)
+{
+    for (const QString name : {QStringLiteral("aac"), QStringLiteral("mp3"),
+                               QStringLiteral("flac"), QStringLiteral("pcm_s16le"),
+                               QStringLiteral("pcm_s24le"), QStringLiteral("alac")}) {
+        EXPECT_TRUE(isSupportedAudioCodec(name)) << name.toStdString();
+    }
+    EXPECT_FALSE(isSupportedAudioCodec(QStringLiteral("opus")));
+}

@@ -29,6 +29,34 @@ Rational rationalFromJson(const QJsonObject &json)
                     json.value(QStringLiteral("den")).toInt(1)};
 }
 
+QString mediaKindToString(MediaKind kind)
+{
+    switch (kind) {
+    case MediaKind::Audio:
+        return QStringLiteral("audio");
+    case MediaKind::Video:
+        return QStringLiteral("video");
+    case MediaKind::Unknown:
+        break;
+    }
+    return QStringLiteral("unknown");
+}
+
+MediaKind mediaKindFromJson(const QJsonObject &json)
+{
+    // Files written before M2 had no "kind" field and only ever contained
+    // video assets, so a missing value means video.
+    const QString value = json.value(QStringLiteral("kind"))
+                              .toString(QStringLiteral("video"))
+                              .trimmed()
+                              .toLower();
+    if (value == QStringLiteral("audio"))
+        return MediaKind::Audio;
+    if (value == QStringLiteral("unknown"))
+        return MediaKind::Unknown;
+    return MediaKind::Video;
+}
+
 QJsonObject infoToJson(const MediaInfo &info)
 {
     return {
@@ -44,6 +72,11 @@ QJsonObject infoToJson(const MediaInfo &info)
         {QStringLiteral("hasAudio"), info.hasAudio},
         {QStringLiteral("supported"), info.supported},
         {QStringLiteral("unsupportedReason"), info.unsupportedReason},
+        {QStringLiteral("kind"), mediaKindToString(info.kind)},
+        {QStringLiteral("hasVideo"), info.hasVideo},
+        {QStringLiteral("audioSampleRate"), info.audioSampleRate},
+        {QStringLiteral("audioChannels"), info.audioChannels},
+        {QStringLiteral("audioDurationUs"), static_cast<double>(info.audioDurationUs)},
     };
 }
 
@@ -64,6 +97,13 @@ MediaInfo infoFromJson(const QJsonObject &json)
     info.hasAudio = json.value(QStringLiteral("hasAudio")).toBool();
     info.supported = json.value(QStringLiteral("supported")).toBool();
     info.unsupportedReason = json.value(QStringLiteral("unsupportedReason")).toString();
+    info.kind = mediaKindFromJson(json);
+    info.hasVideo = json.value(QStringLiteral("hasVideo"))
+                        .toBool(info.kind == MediaKind::Video);
+    info.audioSampleRate = json.value(QStringLiteral("audioSampleRate")).toInt();
+    info.audioChannels = json.value(QStringLiteral("audioChannels")).toInt();
+    info.audioDurationUs = static_cast<int64_t>(
+        json.value(QStringLiteral("audioDurationUs")).toDouble());
     return info;
 }
 

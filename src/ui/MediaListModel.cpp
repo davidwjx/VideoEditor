@@ -38,8 +38,15 @@ QVariant MediaListModel::data(const QModelIndex &index, int role) const
     case PathRole:
         return asset.path;
     case CodecRole:
+        if (asset.info.kind == MediaKind::Audio)
+            return QStringLiteral("音频 · %1").arg(asset.info.audioCodec.toUpper());
         return friendlyCodecName(classifyVideoCodec(asset.info.videoCodec).kind);
     case ResolutionRole:
+        if (asset.info.kind == MediaKind::Audio) {
+            return QStringLiteral("%1 Hz · %2 声道")
+                .arg(asset.info.audioSampleRate)
+                .arg(asset.info.audioChannels);
+        }
         return QStringLiteral("%1×%2").arg(asset.info.width).arg(asset.info.height);
     case DurationRole:
         return formatDuration(asset.info.durationUs);

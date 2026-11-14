@@ -1,5 +1,7 @@
 #include "CodecSupport.h"
 
+#include <QSet>
+
 namespace VideoEditor {
 
 CodecVerdict classifyVideoCodec(const QString &ffmpegName)
@@ -21,6 +23,16 @@ CodecVerdict classifyVideoCodec(const QString &ffmpegName)
             false,
             QStringLiteral("不支持的视频编码（%1）。请先转码为 H.264 或 H.265 的 MP4。")
                 .arg(ffmpegName)};
+}
+
+bool isSupportedAudioCodec(const QString &ffmpegName)
+{
+    static const QSet<QString> kSupported{
+        QStringLiteral("aac"), QStringLiteral("mp3"), QStringLiteral("flac"),
+        QStringLiteral("pcm_s16le"), QStringLiteral("pcm_s24le"),
+        QStringLiteral("pcm_s32le"), QStringLiteral("pcm_f32le"),
+        QStringLiteral("alac")};
+    return kSupported.contains(ffmpegName.trimmed().toLower());
 }
 
 QString friendlyCodecName(VideoCodecKind kind)

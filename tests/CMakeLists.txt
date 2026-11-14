@@ -24,6 +24,7 @@ gtest_discover_tests(core_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_
 
 add_executable(media_tests
   media/MediaProbeTest.cpp
+  media/AudioProbeTest.cpp
   media/D3D11PipelineTest.cpp
   media/DecoderTest.cpp
   media/ProxyTest.cpp

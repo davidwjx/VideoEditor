@@ -7,6 +7,8 @@
 
 namespace VideoEditor {
 
+enum class MediaKind { Unknown, Video, Audio };
+
 struct MediaInfo {
     QString path;
     QString container;
@@ -20,6 +22,11 @@ struct MediaInfo {
     bool hasAudio = false;
     bool supported = false;
     QString unsupportedReason;
+    MediaKind kind = MediaKind::Unknown;
+    bool hasVideo = false;
+    int audioSampleRate = 0;
+    int audioChannels = 0;
+    int64_t audioDurationUs = 0;
 
     bool operator==(const MediaInfo &) const = default;
 };
