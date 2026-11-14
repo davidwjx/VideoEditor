@@ -41,3 +41,22 @@ TEST(TimeBase, FormatsDropFrameTimecode)
     EXPECT_EQ(formatTimecodeAtRate(1'000'000, Rational{30, 1}, false),
               QStringLiteral("00:00:01:00"));
 }
+
+TEST(TimeBase, FormatsDropFrameTimecodeAtSixtyNtsc)
+{
+    const Rational ntsc60{60000, 1001};
+    EXPECT_EQ(formatTimecodeAtRate(3'600 * 1'001'000LL / 60, ntsc60, true),
+              QStringLiteral("00:01:00;04"));
+    EXPECT_EQ(formatTimecodeAtRate(35'964 * 1'001'000LL / 60, ntsc60, true),
+              QStringLiteral("00:10:00;00"));
+}
+
+TEST(TimeBase, IgnoresDropFrameForIntegerRates)
+{
+    // Drop-frame is only defined for NTSC 29.97/59.94. An integer rate must
+    // keep every frame label even when the flag is set.
+    EXPECT_EQ(formatTimecodeAtRate(60'000'000, Rational{30, 1}, true),
+              QStringLiteral("00:01:00:00"));
+    EXPECT_EQ(formatTimecodeAtRate(60'000'000, Rational{60, 1}, true),
+              QStringLiteral("00:01:00:00"));
+}

@@ -58,7 +58,9 @@ QString formatTimecodeAtRate(int64_t micros, Rational fps, bool dropFrame)
     micros = clampNonNegative(micros);
     if (!fps.isValid())
         fps = Rational{30, 1};
-    if (!dropFrame)
+    // Drop-frame numbering is only defined for non-integer NTSC rates
+    // (29.97/59.94). Integer rates keep every frame label.
+    if (!dropFrame || fps.num % fps.den == 0)
         return formatTimecode(micros, fps);
 
     // Nominal rate is the rounded frame rate: 29.97 -> 30, 59.94 -> 60.

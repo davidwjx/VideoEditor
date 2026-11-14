@@ -148,3 +148,37 @@ TEST(TimelineEvaluator, PicksLastOverlappingClipInTrackOrder)
     ASSERT_EQ(frame.video.size(), 1);
     EXPECT_EQ(frame.video.first().clipId, QStringLiteral("second"));
 }
+
+TEST(TimelineEvaluator, PropagatesMuteAndSoloFlags)
+{
+    Project project = projectWithTracks();
+    project.tracks[2].muted = true;
+    project.tracks[2].solo = true;
+    const TimelineEvaluator evaluator(project);
+    const QList<AudioLayer> layers = evaluator.audioRange(500'000, 600'000);
+    ASSERT_EQ(layers.size(), 1);
+    EXPECT_TRUE(layers.first().trackMuted);
+    EXPECT_TRUE(layers.first().trackSolo);
+    EXPECT_EQ(layers.first().clipId, QStringLiteral("a1-c1"));
+}
+
+TEST(TimelineEvaluator, ExcludesDisabledAudioContent)
+{
+    Project trackDisabled = projectWithTracks();
+    trackDisabled.tracks[2].enabled = false;
+    const TimelineEvaluator trackEvaluator(trackDisabled);
+    EXPECT_TRUE(trackEvaluator.audioRange(0, 1'000'000).isEmpty());
+
+    Project clipDisabled = projectWithTracks();
+    clipDisabled.tracks[2].clips[0].enabled = false;
+    const TimelineEvaluator clipEvaluator(clipDisabled);
+    EXPECT_TRUE(clipEvaluator.audioRange(0, 1'000'000).isEmpty());
+}
+
+TEST(TimelineEvaluator, ExcludesDisabledSubtitleCue)
+{
+    Project project = projectWithTracks();
+    project.tracks[3].cues[0].enabled = false;
+    const TimelineEvaluator evaluator(project);
+    EXPECT_TRUE(evaluator.frameAt(1'000'000).subtitles.isEmpty());
+}
