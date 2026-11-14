@@ -38,6 +38,7 @@ TimelineController::TimelineController(ProjectDocument &document, QObject *paren
     m_trackModel = new TrackListModel(this);
     m_timelineModel->setProject(m_document.project());
     m_trackModel->setProject(m_document.project());
+    m_lastDurationUs = durationUs();
 
     connect(&m_document, &ProjectDocument::timelineChanged, this,
             &TimelineController::refreshFromDocument);
@@ -122,8 +123,8 @@ void TimelineController::stepFrames(int delta)
 QList<int64_t> TimelineController::snapCandidates(
     const QString &excludeClipId) const
 {
-    // A linked drag moves the whole group together, so excluding only the
-    // clicked clip would still let the twin's edges pull the drag back.
+    // A linked drag moves the whole group together, so the edges excluded
+    // below are those of the selected clip and every clip sharing its linkId.
     QString excludeLinkId;
     if (!excludeClipId.isEmpty()) {
         bool found = false;
@@ -140,20 +141,36 @@ QList<int64_t> TimelineController::snapCandidates(
         }
     }
 
+    const QList<Track> &tracks = m_document.project().tracks;
+    auto isOwnClip = [&](const Clip &clip) {
+        return (!excludeClipId.isEmpty() && clip.id == excludeClipId)
+            || (!excludeLinkId.isEmpty() && clip.linkId == excludeLinkId);
+    };
+
+    QList<int64_t> ownEdges;
     QList<int64_t> candidates;
     candidates.append(0);
     candidates.append(m_positionUs);
     candidates.append(durationUs());
-    for (const Track &track : m_document.project().tracks) {
+
+    for (const Track &track : tracks) {
         for (const Clip &clip : track.clips) {
-            if (!excludeClipId.isEmpty() && clip.id == excludeClipId)
+            if (isOwnClip(clip)) {
+                ownEdges.append(clip.timelineStartUs);
+                ownEdges.append(clip.timelineEndUs());
                 continue;
-            if (!excludeLinkId.isEmpty() && clip.linkId == excludeLinkId)
-                continue;
+            }
             candidates.append(clip.timelineStartUs);
             candidates.append(clip.timelineEndUs());
         }
     }
+
+    // The origin, playhead and project duration may coincide with the moving
+    // group's own edges (first clip at 0, last clip at duration, playhead on
+    // the clip start). Those values must not self-snap either.
+    candidates.removeIf([&ownEdges](int64_t candidate) {
+        return ownEdges.contains(candidate);
+    });
     return candidates;
 }
 
@@ -316,7 +333,10 @@ QString TimelineController::addAssetToTimeline(const QString &assetId,
     const QStringList added = m_editor.addClips(entries);
     if (added.size() != entries.size()) {
         // addClips skips locked tracks silently; a half-added link group would
-        // leave the timeline inconsistent, so report it as a failed edit.
+        // leave the timeline inconsistent. Roll back the partial command
+        // before reporting failure so the caller's model stays unchanged.
+        if (!added.isEmpty())
+            m_document.undo();
         emit editFailed(QStringLiteral("部分片段未能添加，轨道可能已锁定。"));
         return {};
     }
