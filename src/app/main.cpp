@@ -4,6 +4,7 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 
+#include "AppController.h"
 #include "AppInfo.h"
 
 int main(int argc, char *argv[])
@@ -14,7 +15,9 @@ int main(int argc, char *argv[])
     QGuiApplication::setOrganizationName(QStringLiteral("VideoEditor"));
     QGuiApplication::setApplicationName(QStringLiteral("VideoEditor"));
 
+    VideoEditor::AppController controller;
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              VideoEditor::appVersion());
     engine.loadFromModule(QStringLiteral("VideoEditor"), QStringLiteral("Main"));
