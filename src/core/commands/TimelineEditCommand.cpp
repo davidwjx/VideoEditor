@@ -17,14 +17,17 @@ TimelineEditCommand::TimelineEditCommand(ProjectDocument *document,
 
 void TimelineEditCommand::redo()
 {
-    for (const TrackEdit &edit : m_edits)
-        m_document->applyTrackEdit(edit.trackId, edit.afterClips, edit.afterCues);
+    m_document->applyTrackEdits(m_edits);
 }
 
 void TimelineEditCommand::undo()
 {
-    for (const TrackEdit &edit : m_edits)
-        m_document->applyTrackEdit(edit.trackId, edit.beforeClips, edit.beforeCues);
+    QList<TrackEdit> before = m_edits;
+    for (TrackEdit &edit : before) {
+        edit.afterClips = edit.beforeClips;
+        edit.afterCues = edit.beforeCues;
+    }
+    m_document->applyTrackEdits(before);
 }
 
 } // namespace VideoEditor

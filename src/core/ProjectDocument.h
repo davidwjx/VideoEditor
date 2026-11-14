@@ -6,6 +6,7 @@
 #include <QUndoStack>
 
 #include "Project.h"
+#include "commands/TimelineEditCommand.h"
 
 namespace VideoEditor {
 
@@ -30,6 +31,7 @@ public:
 
     void applyTrackEdit(const QString &trackId, const QList<Clip> &clips,
                         const QList<SubtitleCue> &cues);
+    void applyTrackEdits(const QList<TrackEdit> &edits);
     void replaceTracks(const QList<Track> &tracks);
     Track *trackById(const QString &id);
     const Track *trackById(const QString &id) const;

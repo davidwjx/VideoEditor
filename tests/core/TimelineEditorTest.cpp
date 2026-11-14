@@ -66,6 +66,33 @@ Clip linkedPair(Fixture &fixture, const QString &linkId, int64_t startUs)
     return video;
 }
 
+void addLinkedPair(Fixture &fixture, const QString &linkId, int64_t startUs,
+                   int64_t videoIn, int64_t videoOut, int64_t audioIn,
+                   int64_t audioOut, int videoSpeed = 1000, int audioSpeed = 1000)
+{
+    TimelineEditor editor(fixture.document);
+    Clip video = makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
+                          startUs, videoIn, videoOut);
+    video.linkId = linkId;
+    video.speedMilli = videoSpeed;
+    editor.addClip(QStringLiteral("track-v1"), video);
+    Clip audio = makeClip(QStringLiteral("clip-a"), QStringLiteral("asset-a"),
+                          startUs, audioIn, audioOut);
+    audio.linkId = linkId;
+    audio.speedMilli = audioSpeed;
+    editor.addClip(QStringLiteral("track-a1"), audio);
+}
+
+void setTrackLocked(ProjectDocument &document, const QString &trackId, bool locked)
+{
+    Project project = document.project();
+    for (Track &track : project.tracks) {
+        if (track.id == trackId)
+            track.locked = locked;
+    }
+    document.setProject(project);
+}
+
 } // namespace
 
 TEST(TimelineEditor, AddsClipsAsUndoableCommands)
@@ -122,8 +149,15 @@ TEST(TimelineEditor, RejectsTrimsShorterThanOneFrame)
     TimelineEditor editor(fixture.document);
     editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"),
                      9'000'000); // 1 frame before the end
-    const Clip &clip = fixture.videoTrack().clips.first();
-    EXPECT_GE(clip.timelineDurationUs(), framesToMicros(1, Rational{30, 1}));
+    const int64_t oneFrame = framesToMicros(1, Rational{30, 1});
+    // The shorter linked member (audio 0-8s) bounds the group delta, so both
+    // clips stop one frame before their source out and stay aligned.
+    const Clip &video = fixture.videoTrack().clips.first();
+    const Clip &audio = fixture.audioTrack().clips.first();
+    EXPECT_EQ(video.timelineStartUs, 8'000'000 - oneFrame);
+    EXPECT_EQ(audio.timelineStartUs, 8'000'000 - oneFrame);
+    EXPECT_EQ(video.timelineDurationUs(), oneFrame);
+    EXPECT_EQ(audio.timelineDurationUs(), oneFrame);
 }
 
 TEST(TimelineEditor, TrimEndKeepsOneFrameAtFourX)
@@ -383,4 +417,366 @@ TEST(TimelineEditor, RemovesTracks)
     fixture.document.undo();
     ASSERT_EQ(fixture.document.project().tracks.size(), 3);
     EXPECT_NE(fixture.document.trackById(QStringLiteral("track-a1")), nullptr);
+}
+
+TEST(TimelineEditor, LinkedTrimStartClampsToShortestMember)
+{
+    Fixture fixture;
+    addLinkedPair(fixture, QStringLiteral("link-1"), 0,
+                  0, 8'000'000, 0, 4'000'000);
+    TimelineEditor editor(fixture.document);
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 4'000'000);
+
+    const int64_t oneFrame = framesToMicros(1, Rational{30, 1});
+    const int64_t expectedStart = 4'000'000 - oneFrame;
+    const Clip &video = fixture.videoTrack().clips.first();
+    const Clip &audio = fixture.audioTrack().clips.first();
+    ASSERT_EQ(video.timelineStartUs, expectedStart);
+    EXPECT_EQ(audio.timelineStartUs, expectedStart);
+    EXPECT_EQ(video.sourceInUs, expectedStart);
+    EXPECT_EQ(audio.sourceInUs, expectedStart);
+    EXPECT_EQ(video.timelineDurationUs(), 8'000'000 - expectedStart);
+    EXPECT_EQ(audio.timelineDurationUs(), oneFrame);
+}
+
+TEST(TimelineEditor, TrimStartExtensionReachesSourceZero)
+{
+    Fixture fixture;
+    addLinkedPair(fixture, QStringLiteral("link-1"), 1'000'000,
+                  1'000'000, 9'000'000, 1'000'000, 9'000'000);
+    TimelineEditor editor(fixture.document);
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 0);
+
+    ASSERT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 0);
+    EXPECT_EQ(fixture.videoTrack().clips.first().sourceInUs, 0);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 0);
+    EXPECT_EQ(fixture.audioTrack().clips.first().sourceInUs, 0);
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineDurationUs(), 9'000'000);
+
+    fixture.document.undo();
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 1'000'000);
+    EXPECT_EQ(fixture.videoTrack().clips.first().sourceInUs, 1'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 1'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().sourceInUs, 1'000'000);
+}
+
+TEST(TimelineEditor, TrimStartExtensionBlockedByMemberSourceZero)
+{
+    Fixture fixture;
+    // The audio member is already at source 0, so the group cannot extend.
+    addLinkedPair(fixture, QStringLiteral("link-1"), 1'000'000,
+                  1'000'000, 9'000'000, 0, 8'000'000);
+    TimelineEditor editor(fixture.document);
+    const int index = fixture.document.undoStack()->index();
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 0);
+
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 1'000'000);
+    EXPECT_EQ(fixture.videoTrack().clips.first().sourceInUs, 1'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 1'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().sourceInUs, 0);
+    EXPECT_EQ(fixture.document.undoStack()->index(), index);
+}
+
+TEST(TimelineEditor, TrimEndClampsToShortestAssetRoom)
+{
+    Fixture fixture;
+    linkedPair(fixture, QStringLiteral("link-1"), 0);
+    TimelineEditor editor(fixture.document);
+    editor.trimEnd(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 50'000'000);
+
+    const Clip &video = fixture.videoTrack().clips.first();
+    const Clip &audio = fixture.audioTrack().clips.first();
+    EXPECT_EQ(video.sourceOutUs, 20'000'000); // asset room: 20s - 1s in-point
+    EXPECT_EQ(audio.sourceOutUs, 19'000'000); // common span bounded by video
+    EXPECT_EQ(video.timelineStartUs, 0);
+    EXPECT_EQ(audio.timelineStartUs, 0);
+    EXPECT_EQ(video.timelineDurationUs(), 19'000'000);
+    EXPECT_EQ(audio.timelineDurationUs(), 19'000'000);
+}
+
+TEST(TimelineEditor, RedoReappliesGroupEdit)
+{
+    Fixture fixture;
+    linkedPair(fixture, QStringLiteral("link-1"), 0);
+    TimelineEditor editor(fixture.document);
+    editor.moveClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 2'000'000);
+    fixture.document.undo();
+    ASSERT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 0);
+    ASSERT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 0);
+
+    fixture.document.redo();
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 2'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 2'000'000);
+}
+
+TEST(TimelineEditor, UndoRestoresLinkedSpeed)
+{
+    Fixture fixture;
+    linkedPair(fixture, QStringLiteral("link-1"), 0);
+    TimelineEditor editor(fixture.document);
+    editor.setClipSpeed(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 2000, true);
+    ASSERT_EQ(fixture.videoTrack().clips.first().speedMilli, 2000);
+
+    fixture.document.undo();
+    EXPECT_EQ(fixture.videoTrack().clips.first().speedMilli, 1000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().speedMilli, 1000);
+    EXPECT_FALSE(fixture.videoTrack().clips.first().preservePitch);
+    EXPECT_FALSE(fixture.audioTrack().clips.first().preservePitch);
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineDurationUs(), 8'000'000);
+}
+
+TEST(TimelineEditor, RippleDeleteUsesGroupUnionInterval)
+{
+    Fixture fixture;
+    addLinkedPair(fixture, QStringLiteral("link-1"), 0,
+                  0, 8'000'000, 0, 4'000'000);
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("later-v"), QStringLiteral("asset-v"),
+                            10'000'000, 0, 2'000'000));
+    editor.addClip(QStringLiteral("track-a1"),
+                   makeClip(QStringLiteral("later-a"), QStringLiteral("asset-a"),
+                            10'000'000, 0, 2'000'000));
+
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), true);
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    ASSERT_EQ(fixture.audioTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.videoTrack().clips.first().id, QStringLiteral("later-v"));
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 2'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().id, QStringLiteral("later-a"));
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 2'000'000);
+
+    fixture.document.undo();
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 2);
+    ASSERT_EQ(fixture.audioTrack().clips.size(), 2);
+    EXPECT_EQ(fixture.videoTrack().clips.at(1).timelineStartUs, 10'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.at(1).timelineStartUs, 10'000'000);
+}
+
+TEST(TimelineEditor, RippleDeleteKeepsLaterLinkedPairInSync)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("unlinked"), QStringLiteral("asset-v"),
+                            0, 0, 2'000'000));
+    addLinkedPair(fixture, QStringLiteral("later-link"), 5'000'000,
+                  0, 4'000'000, 0, 4'000'000);
+
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("unlinked"), true);
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    ASSERT_EQ(fixture.audioTrack().clips.size(), 1);
+    const Clip &video = fixture.videoTrack().clips.first();
+    const Clip &audio = fixture.audioTrack().clips.first();
+    EXPECT_EQ(video.timelineStartUs, 3'000'000);
+    EXPECT_EQ(audio.timelineStartUs, 3'000'000);
+    EXPECT_EQ(video.linkId, QStringLiteral("later-link"));
+    EXPECT_EQ(audio.linkId, QStringLiteral("later-link"));
+}
+
+TEST(TimelineEditor, AddClipsRejectsInvalidEntries)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    ASSERT_FALSE(editor.addClip(QStringLiteral("track-v1"),
+                                makeClip(QStringLiteral("dup"), QStringLiteral("asset-v"),
+                                         0, 0, 2'000'000)).isEmpty());
+    // Duplicate existing id.
+    EXPECT_TRUE(editor.addClip(QStringLiteral("track-v1"),
+                               makeClip(QStringLiteral("dup"), QStringLiteral("asset-v"),
+                                        3'000'000, 0, 2'000'000)).isEmpty());
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+
+    // Duplicate id inside one batch: only the first is accepted.
+    const QStringList batch = editor.addClips(
+        {{QStringLiteral("track-a1"),
+          makeClip(QStringLiteral("dup-b"), QStringLiteral("asset-a"), 0, 0, 2'000'000)},
+         {QStringLiteral("track-a1"),
+          makeClip(QStringLiteral("dup-b"), QStringLiteral("asset-a"), 2'000'000, 0, 2'000'000)}});
+    EXPECT_EQ(batch, QStringList{QStringLiteral("dup-b")});
+    EXPECT_EQ(fixture.audioTrack().clips.size(), 1);
+
+    // Negative source in, out beyond known asset duration, empty source range.
+    EXPECT_TRUE(editor.addClip(QStringLiteral("track-v1"),
+                               makeClip(QStringLiteral("neg"), QStringLiteral("asset-v"),
+                                        0, -1, 2'000'000)).isEmpty());
+    EXPECT_TRUE(editor.addClip(QStringLiteral("track-v1"),
+                               makeClip(QStringLiteral("long"), QStringLiteral("asset-v"),
+                                        0, 0, 25'000'000)).isEmpty());
+    EXPECT_TRUE(editor.addClip(QStringLiteral("track-v1"),
+                               makeClip(QStringLiteral("empty"), QStringLiteral("asset-v"),
+                                        0, 2'000'000, 2'000'000)).isEmpty());
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+}
+
+TEST(TimelineEditor, PasteOffsetsAndClampsNegativeStart)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c1"), QStringLiteral("asset-v"),
+                            1'000'000, 0, 2'000'000));
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c2"), QStringLiteral("asset-v"),
+                            3'000'000, 0, 2'000'000));
+    editor.copy({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("c1")},
+                 ClipLocator{QStringLiteral("track-v1"), QStringLiteral("c2")}});
+
+    editor.paste(-5'000'000, QStringLiteral("track-v1"));
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 4);
+    EXPECT_EQ(fixture.videoTrack().clips.at(2).timelineStartUs, 0);
+    EXPECT_EQ(fixture.videoTrack().clips.at(3).timelineStartUs, 2'000'000);
+
+    fixture.document.undo();
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 2);
+    editor.paste(5'000'000, QStringLiteral("track-v1"));
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 4);
+    EXPECT_EQ(fixture.videoTrack().clips.at(2).timelineStartUs, 5'000'000);
+    EXPECT_EQ(fixture.videoTrack().clips.at(3).timelineStartUs, 7'000'000);
+}
+
+TEST(TimelineEditor, MixedSpeedGroupRejectsTrimAndSplit)
+{
+    Fixture fixture;
+    addLinkedPair(fixture, QStringLiteral("link-1"), 0,
+                  0, 8'000'000, 0, 8'000'000, 1000, 2000);
+    TimelineEditor editor(fixture.document);
+    const int index = fixture.document.undoStack()->index();
+
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 1'000'000);
+    editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 2'000'000);
+
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 0);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 0);
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.audioTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.document.undoStack()->index(), index);
+}
+
+TEST(TimelineEditor, LinkClipsNormalizesSpeed)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    Clip video = makeClip(QStringLiteral("c-v"), QStringLiteral("asset-v"),
+                          0, 0, 8'000'000);
+    video.speedMilli = 1000;
+    editor.addClip(QStringLiteral("track-v1"), video);
+    Clip audio = makeClip(QStringLiteral("c-a"), QStringLiteral("asset-a"),
+                          500'000, 0, 8'000'000);
+    audio.speedMilli = 2000;
+    editor.addClip(QStringLiteral("track-a1"), audio);
+
+    editor.linkClips({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("c-v")},
+                      ClipLocator{QStringLiteral("track-a1"), QStringLiteral("c-a")}});
+    EXPECT_EQ(fixture.videoTrack().clips.first().speedMilli, 1000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().speedMilli, 1000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 0);
+    EXPECT_FALSE(fixture.videoTrack().clips.first().linkId.isEmpty());
+    EXPECT_EQ(fixture.videoTrack().clips.first().linkId,
+              fixture.audioTrack().clips.first().linkId);
+}
+
+TEST(TimelineEditor, SplitRejectsWhenAnyMemberCannotSplit)
+{
+    Fixture fixture;
+    addLinkedPair(fixture, QStringLiteral("link-1"), 0,
+                  0, 8'000'000, 0, 4'000'000);
+    TimelineEditor editor(fixture.document);
+    const int index = fixture.document.undoStack()->index();
+
+    // 6s is past the audio member's 4s source out.
+    editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 6'000'000);
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.audioTrack().clips.size(), 1);
+
+    // A sub-frame split is rejected for the whole group.
+    editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 10);
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.audioTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.document.undoStack()->index(), index);
+}
+
+TEST(TimelineEditor, LockedTrackRejectsAllEdits)
+{
+    Fixture fixture;
+    linkedPair(fixture, QStringLiteral("link-1"), 0);
+    TimelineEditor editor(fixture.document);
+    editor.copy({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("clip-v")}});
+    const AudioParams originalAudio = fixture.videoTrack().clips.first().audio;
+    const Transform originalTransform = fixture.videoTrack().clips.first().transform;
+
+    setTrackLocked(fixture.document, QStringLiteral("track-v1"), true);
+    ASSERT_EQ(fixture.document.undoStack()->index(), 0);
+
+    EXPECT_TRUE(editor.addClip(QStringLiteral("track-v1"),
+                               makeClip(QStringLiteral("locked-add"),
+                                        QStringLiteral("asset-v"), 0, 0, 2'000'000)).isEmpty());
+    editor.paste(10'000'000, QStringLiteral("track-v1"));
+    editor.moveClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 5'000'000);
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 1'000'000);
+    editor.trimEnd(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 2'000'000);
+    editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 2'000'000);
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), false);
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), true);
+    editor.setClipSpeed(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 2000, true);
+    AudioParams louder = originalAudio;
+    louder.volumeMilli = 300;
+    editor.setClipAudio(QStringLiteral("track-v1"), QStringLiteral("clip-v"), louder);
+    Transform zoomed = originalTransform;
+    zoomed.scaleMilli = 500;
+    editor.setClipTransform(QStringLiteral("track-v1"), QStringLiteral("clip-v"), zoomed);
+    editor.setClipEnabled(QStringLiteral("track-v1"), QStringLiteral("clip-v"), false);
+    editor.unlinkClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"));
+    editor.linkClips({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("clip-v")},
+                      ClipLocator{QStringLiteral("track-a1"), QStringLiteral("clip-a")}});
+    editor.removeTrack(QStringLiteral("track-v1"));
+    editor.moveTrack(0, 1);
+
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    const Clip &video = fixture.videoTrack().clips.first();
+    EXPECT_EQ(video.timelineStartUs, 0);
+    EXPECT_EQ(video.sourceInUs, 1'000'000);
+    EXPECT_EQ(video.sourceOutUs, 9'000'000);
+    EXPECT_EQ(video.speedMilli, 1000);
+    EXPECT_EQ(video.audio, originalAudio);
+    EXPECT_EQ(video.transform, originalTransform);
+    EXPECT_TRUE(video.enabled);
+    EXPECT_EQ(video.linkId, QStringLiteral("link-1"));
+    EXPECT_EQ(fixture.document.project().tracks.size(), 3);
+    EXPECT_EQ(fixture.document.project().tracks.first().id, QStringLiteral("track-v1"));
+    EXPECT_EQ(fixture.document.undoStack()->index(), 0);
+}
+
+TEST(TimelineEditor, NoOpEditsDoNotCreateUndoEntries)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c1"), QStringLiteral("asset-v"),
+                            1'000'000, 0, 2'000'000));
+    const int index = fixture.document.undoStack()->index();
+
+    editor.moveClip(QStringLiteral("track-v1"), QStringLiteral("c1"), 1'000'000);
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("c1"), 1'000'000);
+    editor.trimEnd(QStringLiteral("track-v1"), QStringLiteral("c1"), 3'000'000);
+    editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("c1"), 1'000'000);
+    editor.setClipSpeed(QStringLiteral("track-v1"), QStringLiteral("c1"), 1000, false);
+    editor.setClipAudio(QStringLiteral("track-v1"), QStringLiteral("c1"), AudioParams{});
+    editor.setClipTransform(QStringLiteral("track-v1"), QStringLiteral("c1"), Transform{});
+    editor.setClipEnabled(QStringLiteral("track-v1"), QStringLiteral("c1"), true);
+    editor.unlinkClip(QStringLiteral("track-v1"), QStringLiteral("c1"));
+    editor.linkClips({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("c1")}});
+    editor.moveClip(QStringLiteral("track-v1"), QStringLiteral("missing"), 5'000'000);
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("missing"), false);
+    editor.moveTrack(0, 0);
+    editor.removeTrack(QStringLiteral("missing-track"));
+    editor.paste(0, QStringLiteral("track-v1"));
+    Track duplicate;
+    duplicate.id = QStringLiteral("track-v1");
+    editor.addTrack(duplicate);
+
+    EXPECT_EQ(fixture.document.undoStack()->index(), index);
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.videoTrack().clips.first().sourceOutUs, 2'000'000);
+    EXPECT_EQ(fixture.document.project().tracks.size(), 3);
 }

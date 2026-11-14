@@ -63,6 +63,8 @@ private:
 
     QList<ClipLocator> linkGroup(const QString &trackId, const QString &clipId) const;
     const Clip *findClip(const QString &trackId, const QString &clipId) const;
+    bool groupLocked(const QList<ClipLocator> &group) const;
+    bool groupSpeed(const QList<ClipLocator> &group, int *speedMilli) const;
     void pushEdits(const QString &text, QList<TrackEdit> edits);
     QList<TrackEdit> editsForClips(const QList<ClipLocator> &locators,
                                    const std::function<void(Clip &)> &mutate) const;

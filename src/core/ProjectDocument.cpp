@@ -103,6 +103,26 @@ void ProjectDocument::applyTrackEdit(const QString &trackId,
     }
 }
 
+void ProjectDocument::applyTrackEdits(const QList<TrackEdit> &edits)
+{
+    bool applied = false;
+    for (const TrackEdit &edit : edits) {
+        for (Track &track : m_project.tracks) {
+            if (track.id != edit.trackId)
+                continue;
+            track.clips = edit.afterClips;
+            track.cues = edit.afterCues;
+            applied = true;
+            break;
+        }
+    }
+    if (!applied)
+        return;
+    emit changed();
+    emit timelineChanged();
+    emit dirtyChanged();
+}
+
 void ProjectDocument::replaceTracks(const QList<Track> &tracks)
 {
     m_project.tracks = tracks;
