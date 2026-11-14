@@ -1,5 +1,6 @@
 #include "TimelineEditor.h"
 
+#include <algorithm>
 #include <climits>
 #include <utility>
 #include <QHash>
@@ -7,6 +8,7 @@
 #include <QUuid>
 
 #include "ProjectDocument.h"
+#include "Srt.h"
 #include "commands/TimelineEditCommand.h"
 #include "commands/TrackListCommand.h"
 
@@ -742,6 +744,148 @@ void TimelineEditor::moveTrack(int fromIndex, int toIndex)
     after.move(fromIndex, toIndex);
     m_document.undoStack()->push(new TrackListCommand(
         &m_document, QStringLiteral("调整轨道顺序"), before, after));
+}
+
+QList<TrackEdit> TimelineEditor::editsForCues(
+    const QString &trackId,
+    const std::function<void(QList<SubtitleCue> &)> &mutate) const
+{
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->type != TrackType::Subtitle || track->locked)
+        return {};
+    TrackEdit edit;
+    edit.trackId = trackId;
+    edit.beforeClips = track->clips;
+    edit.afterClips = track->clips;
+    edit.beforeCues = track->cues;
+    edit.afterCues = track->cues;
+    mutate(edit.afterCues);
+    if (edit.afterCues == edit.beforeCues)
+        return {};
+    return {edit};
+}
+
+QString TimelineEditor::addSubtitleCue(const QString &trackId, SubtitleCue cue)
+{
+    if (cue.id.isEmpty())
+        cue.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (cue.endUs <= cue.startUs || cue.startUs < 0)
+        return {};
+    cue.positionXPermille = qBound(0, cue.positionXPermille, 1000);
+    cue.positionYPermille = qBound(0, cue.positionYPermille, 1000);
+    if (cue.styleId.isEmpty())
+        cue.styleId = QStringLiteral("default");
+    const QString id = cue.id;
+    const QList<TrackEdit> edits =
+        editsForCues(trackId, [cue](QList<SubtitleCue> &cues) {
+            int index = cues.size();
+            for (int i = 0; i < cues.size(); ++i) {
+                if (cues.at(i).startUs > cue.startUs) {
+                    index = i;
+                    break;
+                }
+            }
+            cues.insert(index, cue);
+        });
+    if (edits.isEmpty())
+        return {};
+    pushEdits(QStringLiteral("添加字幕"), edits);
+    return id;
+}
+
+void TimelineEditor::updateSubtitleCue(const QString &trackId,
+                                       const QString &cueId,
+                                       const SubtitleCue &cue)
+{
+    if (cue.endUs <= cue.startUs || cue.startUs < 0)
+        return;
+    SubtitleCue updated = cue;
+    updated.id = cueId;
+    updated.positionXPermille = qBound(0, updated.positionXPermille, 1000);
+    updated.positionYPermille = qBound(0, updated.positionYPermille, 1000);
+    if (updated.styleId.isEmpty())
+        updated.styleId = QStringLiteral("default");
+    pushEdits(QStringLiteral("编辑字幕"),
+              editsForCues(trackId, [cueId, updated](QList<SubtitleCue> &cues) {
+                  for (SubtitleCue &existing : cues) {
+                      if (existing.id == cueId) {
+                          existing = updated;
+                          return;
+                      }
+                  }
+              }));
+}
+
+void TimelineEditor::removeSubtitleCue(const QString &trackId,
+                                       const QString &cueId)
+{
+    pushEdits(QStringLiteral("删除字幕"),
+              editsForCues(trackId, [cueId](QList<SubtitleCue> &cues) {
+                  for (int i = 0; i < cues.size(); ++i) {
+                      if (cues.at(i).id == cueId) {
+                          cues.removeAt(i);
+                          return;
+                      }
+                  }
+              }));
+}
+
+void TimelineEditor::applySubtitleStyle(const QString &trackId,
+                                        const QString &styleId,
+                                        const QString &cueId)
+{
+    if (styleId.isEmpty())
+        return;
+    pushEdits(QStringLiteral("应用字幕样式"),
+              editsForCues(trackId, [styleId, cueId](QList<SubtitleCue> &cues) {
+                  for (SubtitleCue &cue : cues) {
+                      if (cueId.isEmpty() || cue.id == cueId)
+                          cue.styleId = styleId;
+                  }
+              }));
+}
+
+int TimelineEditor::importSrt(const QString &trackId, const QByteArray &bytes,
+                              QString *error)
+{
+    const SrtParseResult parsed = parseSrt(bytes);
+    if (!parsed.ok()) {
+        if (error)
+            *error = parsed.error;
+        return 0;
+    }
+    QList<SubtitleCue> imported;
+    QSet<QString> usedIds;
+    for (SubtitleCue cue : parsed.cues) {
+        cue.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        while (usedIds.contains(cue.id))
+            cue.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        usedIds.insert(cue.id);
+        imported.append(cue);
+    }
+    const QList<TrackEdit> edits =
+        editsForCues(trackId, [imported](QList<SubtitleCue> &cues) {
+            cues.append(imported);
+            std::stable_sort(cues.begin(), cues.end(),
+                             [](const SubtitleCue &a, const SubtitleCue &b) {
+                                 return a.startUs < b.startUs;
+                             });
+        });
+    if (edits.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("没有可用的字幕轨。");
+        return 0;
+    }
+    pushEdits(QStringLiteral("导入 SRT"), edits);
+    return int(imported.size());
+}
+
+QByteArray TimelineEditor::exportSrt(const QString &trackId) const
+{
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->type != TrackType::Subtitle)
+        return {};
+    return writeSrt(track->cues);
 }
 
 QString TimelineEditor::uniqueLinkId() const

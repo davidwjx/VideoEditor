@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <QByteArray>
 #include <QList>
 #include <QPair>
 #include <QString>
@@ -52,6 +53,16 @@ public:
     void removeTrack(const QString &trackId);
     void moveTrack(int fromIndex, int toIndex);
 
+    QString addSubtitleCue(const QString &trackId, SubtitleCue cue);
+    void updateSubtitleCue(const QString &trackId, const QString &cueId,
+                           const SubtitleCue &cue);
+    void removeSubtitleCue(const QString &trackId, const QString &cueId);
+    void applySubtitleStyle(const QString &trackId, const QString &styleId,
+                            const QString &cueId = {});
+    int importSrt(const QString &trackId, const QByteArray &bytes,
+                  QString *error = nullptr);
+    QByteArray exportSrt(const QString &trackId) const;
+
     static SnapResult snapTime(int64_t timeUs, int64_t thresholdUs,
                                const QList<int64_t> &candidates);
 
@@ -68,6 +79,9 @@ private:
     void pushEdits(const QString &text, QList<TrackEdit> edits);
     QList<TrackEdit> editsForClips(const QList<ClipLocator> &locators,
                                    const std::function<void(Clip &)> &mutate) const;
+    QList<TrackEdit> editsForCues(
+        const QString &trackId,
+        const std::function<void(QList<SubtitleCue> &)> &mutate) const;
     QString uniqueLinkId() const;
 
     ProjectDocument &m_document;

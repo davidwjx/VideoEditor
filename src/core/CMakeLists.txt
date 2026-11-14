@@ -20,6 +20,8 @@ add_library(videoeditor_core STATIC
   ProjectDocument.cpp
   TimelineEditor.h
   TimelineEditor.cpp
+  Srt.h
+  Srt.cpp
   commands/AddAssetCommand.h
   commands/AddAssetCommand.cpp
   commands/RemoveAssetCommand.h
