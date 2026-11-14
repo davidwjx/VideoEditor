@@ -18,6 +18,9 @@ constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int kSamplesPerBucket = 480;   // 10 ms at 48 kHz
 constexpr int kBucketsPerRead = 10;      // 100 ms per decoded block
+// Reject implausible durations before converting to int or allocating; the
+// binary cache format stores the count as qint32 anyway.
+constexpr qint64 kMaxWaveformBuckets = qint64(24) * 60 * 60 * 100;
 
 } // namespace
 
@@ -28,9 +31,13 @@ WaveformPeaks computeWaveform(const QString &path, QString *error)
     if (!info)
         return peaks;
     peaks.durationUs = info->durationUs;
-    const int buckets = int((peaks.durationUs + 9'999) / 10'000);
-    if (buckets <= 0)
-        return peaks;
+    const qint64 bucketCount64 = (peaks.durationUs + 9'999) / 10'000;
+    if (bucketCount64 <= 0 || bucketCount64 > kMaxWaveformBuckets) {
+        if (error)
+            *error = QStringLiteral("音频时长无效或过长，无法生成波形。");
+        return WaveformPeaks{};
+    }
+    const int buckets = int(bucketCount64);
     peaks.minValues = QList<float>(buckets, 0.0f);
     peaks.maxValues = QList<float>(buckets, 0.0f);
 

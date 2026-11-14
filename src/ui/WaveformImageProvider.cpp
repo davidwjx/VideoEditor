@@ -30,8 +30,10 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
         *size = QSize(width, height);
 
     QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull())
+        return image;
     image.fill(Qt::transparent);
-    if (!m_service || parts.isEmpty())
+    if (!m_service)
         return image;
     const WaveformPeaks peaks = m_service->peaks(parts.first());
     if (peaks.isEmpty())

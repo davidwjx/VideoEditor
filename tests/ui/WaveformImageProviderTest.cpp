@@ -4,6 +4,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 
 #include "WaveformImageProvider.h"
 #include "WaveformService.h"
@@ -17,7 +18,9 @@ TEST(WaveformImageProvider, DrawsRequestedSize)
     if (!QFileInfo::exists(tone))
         GTEST_SKIP() << "missing tone.wav";
 
-    WaveformService service(QDir::tempPath());
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    WaveformService service(dir.path());
     QSignalSpy ready(&service, &WaveformService::ready);
     service.request(QStringLiteral("asset-a"), tone);
     if (!ready.wait(5000))
@@ -42,7 +45,9 @@ TEST(WaveformImageProvider, DrawsRequestedSize)
 
 TEST(WaveformImageProvider, UnknownAssetIsTransparent)
 {
-    WaveformService service(QDir::tempPath());
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    WaveformService service(dir.path());
     WaveformImageProvider provider(&service);
     QSize size;
     const QImage image = provider.requestImage(
