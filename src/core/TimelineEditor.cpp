@@ -298,8 +298,11 @@ void TimelineEditor::trimStart(const QString &trackId, const QString &clipId,
         const Clip *clip = findClip(locator.trackId, locator.clipId);
         if (!clip)
             return;
+        // Both bounds are deltas: extension cannot move sourceIn below 0,
+        // trim-in cannot consume the last frame of the remaining source span.
         sourceLower = qMax(sourceLower, -clip->sourceInUs);
-        sourceUpper = qMin(sourceUpper, clip->sourceOutUs - minSource);
+        sourceUpper = qMin(sourceUpper,
+                           clip->sourceOutUs - clip->sourceInUs - minSource);
         timelineLower = qMax(timelineLower, -clip->timelineStartUs);
     }
     if (sourceLower > sourceUpper)

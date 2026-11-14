@@ -780,3 +780,76 @@ TEST(TimelineEditor, NoOpEditsDoNotCreateUndoEntries)
     EXPECT_EQ(fixture.videoTrack().clips.first().sourceOutUs, 2'000'000);
     EXPECT_EQ(fixture.document.project().tracks.size(), 3);
 }
+
+TEST(TimelineEditor, TrimStartWithPositiveSourceInKeepsValidRange)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c1"), QStringLiteral("asset-v"),
+                            0, 1'000'000, 9'000'000));
+    const int64_t oneFrame = framesToMicros(1, Rational{30, 1});
+
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("c1"), 9'000'000);
+    const Clip &clip = fixture.videoTrack().clips.first();
+    EXPECT_LT(clip.sourceInUs, clip.sourceOutUs);
+    EXPECT_EQ(clip.sourceInUs, 9'000'000 - oneFrame);
+    EXPECT_EQ(clip.sourceOutUs, 9'000'000);
+    EXPECT_EQ(clip.timelineStartUs, 8'000'000 - oneFrame);
+    EXPECT_EQ(clip.timelineDurationUs(), oneFrame);
+
+    fixture.document.undo();
+    const Clip &restored = fixture.videoTrack().clips.first();
+    EXPECT_EQ(restored.sourceInUs, 1'000'000);
+    EXPECT_EQ(restored.timelineStartUs, 0);
+    EXPECT_EQ(restored.timelineDurationUs(), 8'000'000);
+}
+
+TEST(TimelineEditor, LinkedTrimStartWithPositiveInsKeepsBothValid)
+{
+    Fixture fixture;
+    addLinkedPair(fixture, QStringLiteral("link-1"), 0,
+                  1'000'000, 9'000'000, 1'000'000, 9'000'000);
+    TimelineEditor editor(fixture.document);
+    const int64_t oneFrame = framesToMicros(1, Rational{30, 1});
+
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("clip-v"), 9'000'000);
+    const Clip &video = fixture.videoTrack().clips.first();
+    const Clip &audio = fixture.audioTrack().clips.first();
+    EXPECT_EQ(video.sourceInUs, 9'000'000 - oneFrame);
+    EXPECT_EQ(audio.sourceInUs, 9'000'000 - oneFrame);
+    EXPECT_EQ(video.sourceOutUs, 9'000'000);
+    EXPECT_EQ(audio.sourceOutUs, 9'000'000);
+    EXPECT_EQ(video.timelineStartUs, 8'000'000 - oneFrame);
+    EXPECT_EQ(audio.timelineStartUs, 8'000'000 - oneFrame);
+    EXPECT_EQ(video.timelineDurationUs(), oneFrame);
+    EXPECT_EQ(audio.timelineDurationUs(), oneFrame);
+    EXPECT_EQ(video.linkId, audio.linkId);
+
+    fixture.document.undo();
+    EXPECT_EQ(fixture.videoTrack().clips.first().sourceInUs, 1'000'000);
+    EXPECT_EQ(fixture.audioTrack().clips.first().sourceInUs, 1'000'000);
+    EXPECT_EQ(fixture.videoTrack().clips.first().timelineStartUs, 0);
+    EXPECT_EQ(fixture.audioTrack().clips.first().timelineStartUs, 0);
+}
+
+TEST(TimelineEditor, TrimStartBeyondOneFrameMinimumIsNoOp)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c1"), QStringLiteral("asset-v"),
+                            0, 1'000'000, 9'000'000));
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("c1"), 9'000'000);
+    const Clip before = fixture.videoTrack().clips.first();
+    const int index = fixture.document.undoStack()->index();
+
+    // One frame already remains; trimming in any further cannot be satisfied
+    // without crossing the source out point.
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("c1"), 9'000'000);
+    editor.trimStart(QStringLiteral("track-v1"), QStringLiteral("c1"), 20'000'000);
+
+    EXPECT_EQ(fixture.document.undoStack()->index(), index);
+    EXPECT_EQ(fixture.videoTrack().clips.first(), before);
+}
+
