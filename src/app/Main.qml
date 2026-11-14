@@ -81,11 +81,11 @@ ApplicationWindow {
         RowLayout {
             Button {
                 text: "恢复"
-                onClicked: { App.restoreRecovery(); recoveryDialog.close() }
+                onClicked: App.restoreRecovery()
             }
             Button {
                 text: "丢弃"
-                onClicked: { App.discardRecovery(); recoveryDialog.close() }
+                onClicked: App.discardRecovery()
             }
         }
     }

@@ -20,7 +20,7 @@ class AppController : public QObject {
     Q_PROPERTY(bool recoveryAvailable READ recoveryAvailable NOTIFY recoveryAvailableChanged)
 
 public:
-    explicit AppController(QObject *parent = nullptr);
+    explicit AppController(QObject *parent = nullptr, QString recoveryPath = {});
     ~AppController() override;
 
     MediaListModel *mediaModel() const { return m_mediaModel; }
@@ -50,7 +50,7 @@ signals:
 private:
     void setLastError(const QString &message);
     void refreshModel();
-    void refreshRecoveryState();
+    void setRecoveryAvailable(bool available);
     void autosave();
 
     ProjectDocument *m_document = nullptr;

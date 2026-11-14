@@ -11,15 +11,17 @@
 
 namespace VideoEditor {
 
-AppController::AppController(QObject *parent)
+AppController::AppController(QObject *parent, QString recoveryPath)
     : QObject(parent)
     , m_document(new ProjectDocument(this))
     , m_mediaModel(new MediaListModel(this))
 {
-    const QString appData = QStandardPaths::writableLocation(
-        QStandardPaths::AppLocalDataLocation);
-    const QString recoveryPath = QDir(appData).filePath(
-        QStringLiteral("recovery/project.autosave.json"));
+    if (recoveryPath.isEmpty()) {
+        const QString appData = QStandardPaths::writableLocation(
+            QStandardPaths::AppLocalDataLocation);
+        recoveryPath = QDir(appData).filePath(
+            QStringLiteral("recovery/project.autosave.json"));
+    }
     m_store = std::make_unique<ProjectStore>(recoveryPath);
 
     connect(m_document, &ProjectDocument::assetsChanged,
@@ -34,7 +36,9 @@ AppController::AppController(QObject *parent)
     m_autosaveTimer.start();
 
     refreshModel();
-    refreshRecoveryState();
+    // Prompt only once, at startup, for a recovery file left by a prior session.
+    // Autosaving during this session must not raise the prompt.
+    m_recoveryAvailable = QFileInfo::exists(m_store->recoveryFilePath());
 }
 
 AppController::~AppController() = default;
@@ -107,14 +111,14 @@ void AppController::restoreRecovery()
     }
     m_document->setProject(std::move(*project));
     m_store->discardRecovery();
-    refreshRecoveryState();
+    setRecoveryAvailable(false);
     clearError();
 }
 
 void AppController::discardRecovery()
 {
     m_store->discardRecovery();
-    refreshRecoveryState();
+    setRecoveryAvailable(false);
 }
 
 void AppController::saveProject(const QUrl &url)
@@ -148,9 +152,8 @@ void AppController::refreshModel()
     m_mediaModel->setAssets(m_document->project().assets);
 }
 
-void AppController::refreshRecoveryState()
+void AppController::setRecoveryAvailable(bool available)
 {
-    const bool available = QFileInfo::exists(m_store->recoveryFilePath());
     if (available == m_recoveryAvailable)
         return;
     m_recoveryAvailable = available;
@@ -162,11 +165,8 @@ void AppController::autosave()
     if (!m_document->isDirty())
         return;
     QString error;
-    if (!m_store->saveRecovery(m_document->project(), &error)) {
+    if (!m_store->saveRecovery(m_document->project(), &error))
         setLastError(error);
-        return;
-    }
-    refreshRecoveryState();
 }
 
 } // namespace VideoEditor
