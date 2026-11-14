@@ -9,6 +9,7 @@ namespace VideoEditor {
 ProjectDocument::ProjectDocument(QObject *parent)
     : QObject(parent)
 {
+    m_project.ensureDefaultTracks();
     m_undoStack.setUndoLimit(100);
     connect(&m_undoStack, &QUndoStack::indexChanged, this, [this] {
         emit changed();
@@ -24,6 +25,7 @@ ProjectDocument::ProjectDocument(QObject *parent)
 void ProjectDocument::setProject(Project project, const QString &filePath)
 {
     m_project = std::move(project);
+    m_project.ensureDefaultTracks();
     m_filePath = filePath;
     m_undoStack.clear();
     m_undoStack.setClean();

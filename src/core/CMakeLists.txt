@@ -6,7 +6,10 @@ add_library(videoeditor_core STATIC
   MediaInfo.h
   CodecSupport.h
   CodecSupport.cpp
+  Timeline.h
+  Timeline.cpp
   Project.h
+  Project.cpp
   ProjectSerializer.h
   ProjectSerializer.cpp
   ProjectStore.h
