@@ -1,6 +1,12 @@
 add_library(videoeditor_ui STATIC
   MediaListModel.h
   MediaListModel.cpp
+  TimelineModel.h
+  TimelineModel.cpp
+  TrackListModel.h
+  TrackListModel.cpp
+  TimelineController.h
+  TimelineController.cpp
   FrameBridge.h
   FrameBridge.cpp
   VideoPreviewItem.h

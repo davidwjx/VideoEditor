@@ -41,6 +41,15 @@ target_compile_definitions(media_tests PRIVATE
 gtest_discover_tests(media_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 
+add_executable(ui_tests
+  ui/TimelineModelTest.cpp
+  ui/TimelineControllerTest.cpp
+  TestGuiMain.cpp)
+target_link_libraries(ui_tests PRIVATE
+  videoeditor_ui GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
+gtest_discover_tests(ui_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+                          DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
+
 add_executable(app_tests app/AppControllerTest.cpp TestMain.cpp)
 target_link_libraries(app_tests PRIVATE videoeditor_app GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(app_tests PRIVATE
