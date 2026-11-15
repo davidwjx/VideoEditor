@@ -4,12 +4,23 @@ add_library(videoeditor_app STATIC
 )
 target_include_directories(videoeditor_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(videoeditor_app PUBLIC videoeditor_core videoeditor_media videoeditor_ui Qt6::Core)
+# The command-line timeline self-tests build their project from the checked-in
+# fixtures; tests/CMakeLists.txt invokes the same binary from the build tree.
+target_compile_definitions(videoeditor_app PRIVATE
+  VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 
 qt_add_executable(VideoEditor main.cpp)
 qt_add_qml_module(VideoEditor
   URI VideoEditor
   VERSION 1.0
-  QML_FILES Main.qml
+  QML_FILES
+    Main.qml
+    TimelinePanel.qml
+    TimelineClipDelegate.qml
+    TimelineCueDelegate.qml
+    TrackHeaderDelegate.qml
+    InspectorPanel.qml
+    SubtitlePanel.qml
 )
 target_link_libraries(VideoEditor PRIVATE Qt6::Quick Qt6::QuickControls2 videoeditor_app)
 

@@ -79,6 +79,11 @@ public:
     Q_INVOKABLE void setTrackSolo(const QString &trackId, bool solo);
     Q_INVOKABLE void setTrackLocked(const QString &trackId, bool locked);
 
+    // Self-test/test hook: adds a fully specified clip without the asset-based
+    // linked-pair logic. Public for AppController self-tests; not usable from
+    // QML because it is deliberately not Q_INVOKABLE.
+    QString addClipForTest(const QString &trackId, const Clip &clip);
+
 signals:
     void positionChanged();
     void durationChanged();

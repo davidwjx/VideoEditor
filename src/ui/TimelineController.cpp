@@ -350,6 +350,12 @@ QString TimelineController::addAssetToTimeline(const QString &assetId,
     return {};
 }
 
+QString TimelineController::addClipForTest(const QString &trackId,
+                                           const Clip &clip)
+{
+    return m_editor.addClip(trackId, clip);
+}
+
 void TimelineController::moveClip(const QString &clipId, qint64 newStartUs)
 {
     QString trackId;

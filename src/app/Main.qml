@@ -6,27 +6,62 @@ import VideoEditor 1.0
 
 ApplicationWindow {
     id: root
-    width: 1280
-    height: 800
+    width: 1440
+    height: 900
     visible: true
     title: "VideoEditor " + appVersion
     color: "#111111"
 
+    function zoomBy(factor) {
+        Timeline.pixelsPerSecond = Math.max(20, Math.min(400,
+                                            Timeline.pixelsPerSecond * factor))
+    }
+
     header: ToolBar {
         RowLayout {
             anchors.fill: parent
-            Button { text: "导入视频"; onClicked: fileDialog.open() }
+            spacing: 2
+
+            Button { text: "导入素材"; onClicked: fileDialog.open() }
             Button { text: "打开工程"; onClicked: openProjectDialog.open() }
             Button { text: "保存工程"; onClicked: saveProjectDialog.open() }
             Button { text: "撤销"; enabled: App.canUndo; onClicked: App.undo() }
             Button { text: "重做"; enabled: App.canRedo; onClicked: App.redo() }
+
+            ToolSeparator {}
+            Button { text: "分割"; onClicked: Timeline.splitAtPlayhead() }
+            Button { text: "删除"; onClicked: Timeline.deleteSelected(false) }
+            Button { text: "波纹删除"; onClicked: Timeline.deleteSelected(true) }
+            Button { text: "复制"; onClicked: Timeline.copySelected() }
+            Button { text: "粘贴"; onClicked: Timeline.pasteAtPlayhead() }
+
+            ToolSeparator {}
+            CheckBox {
+                text: "吸附"
+                checked: Timeline.snapEnabled
+                onToggled: Timeline.snapEnabled = checked
+            }
+            Slider {
+                id: zoomSlider
+                Layout.preferredWidth: 130
+                from: 20
+                to: 400
+                onMoved: Timeline.pixelsPerSecond = value
+            }
+
             Item { Layout.fillWidth: true }
-            Label { text: "M1 媒体基础"; color: "#cccccc" }
+            Label {
+                text: Preview.timelineMode ? Preview.decodeMode
+                                           : (Preview.decodeMode.length > 0
+                                              ? Preview.decodeMode : "M2 时间线编辑")
+                color: "#cccccc"
+            }
         }
     }
 
     footer: RowLayout {
         spacing: 8
+
         ToolButton {
             text: Preview.playing ? "暂停" : "播放"
             onClicked: Preview.togglePlay()
@@ -34,31 +69,39 @@ ApplicationWindow {
         ToolButton { text: "◀"; onClicked: Preview.stepFrames(-1) }
         ToolButton { text: "▶"; onClicked: Preview.stepFrames(1) }
         Label {
-            text: Preview.timecode
+            text: Preview.timelineMode ? Timeline.timecode : Preview.timecode
             color: "white"
             font.family: "Consolas"
         }
         Slider {
+            id: transport
             Layout.fillWidth: true
             from: 0
-            to: Math.max(1, Preview.durationMs)
-            value: Preview.positionMs
-            onMoved: Preview.seekMs(value)
+            to: Math.max(1, Preview.timelineMode ? Timeline.durationUs / 1000
+                                                 : Preview.durationMs)
+            value: Preview.timelineMode ? Timeline.positionUs / 1000
+                                        : Preview.positionMs
+            onMoved: {
+                if (Preview.timelineMode)
+                    App.seekTimeline(Math.round(value) * 1000)
+                else
+                    Preview.seekMs(value)
+            }
         }
         CheckBox {
             text: "使用代理"
             checked: App.useProxy
             onToggled: App.useProxy = checked
         }
-        Label { text: Preview.decodeMode; color: "#cccccc" }
     }
 
     RowLayout {
         anchors.fill: parent
         spacing: 1
 
+        // Media library.
         Rectangle {
-            Layout.preferredWidth: 320
+            Layout.preferredWidth: 250
             Layout.fillHeight: true
             color: "#1b1b1b"
 
@@ -71,40 +114,117 @@ ApplicationWindow {
                     text: model.name + "\n" + model.codec + " · " + model.resolution
                           + " · " + model.duration
                     onClicked: App.openAsset(model.id)
+                    onDoubleClicked: App.addAssetToTimeline(model.id)
                 }
 
                 Label {
                     anchors.centerIn: parent
+                    width: parent.width - 16
                     visible: mediaList.count === 0
-                    text: "媒体库为空，点击“导入视频”开始"
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: "媒体库为空\n点击“导入素材”开始\n双击素材添加到时间线"
                     color: "#888888"
                 }
             }
         }
 
-        Item {
+        // Preview on top, timeline below.
+        ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            spacing: 1
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: "black"
+                }
+                VideoPreview {
+                    id: previewItem
+                    anchors.fill: parent
+                }
+                Label {
+                    anchors.centerIn: parent
+                    visible: !Preview.mediaName
+                    text: "选择左侧素材开始预览"
+                    color: "#888888"
+                }
+                Component.onCompleted: Preview.item = previewItem
+            }
 
             Rectangle {
-                anchors.fill: parent
-                color: "black"
-            }
-
-            VideoPreview {
-                id: previewItem
-                anchors.fill: parent
-            }
-
-            Component.onCompleted: Preview.item = previewItem
-
-            Label {
-                anchors.centerIn: parent
-                visible: !Preview.mediaName
-                text: "选择左侧素材开始预览"
-                color: "#888888"
+                Layout.preferredHeight: 300
+                Layout.fillWidth: true
+                color: "#151515"
+                TimelinePanel { anchors.fill: parent }
             }
         }
+
+        // Inspector + subtitles.
+        Rectangle {
+            Layout.preferredWidth: 310
+            Layout.fillHeight: true
+            color: "#1b1b1b"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 6
+
+                InspectorPanel {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 470
+                }
+                SubtitlePanel {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                }
+            }
+        }
+    }
+
+    Binding {
+        target: zoomSlider
+        property: "value"
+        value: Timeline.pixelsPerSecond
+        when: !zoomSlider.pressed
+    }
+
+    Shortcut {
+        sequence: "S"
+        onActivated: Timeline.splitAtPlayhead()
+    }
+    Shortcut {
+        sequence: "Delete"
+        onActivated: Timeline.deleteSelected(false)
+    }
+    Shortcut {
+        sequence: "Shift+Delete"
+        onActivated: Timeline.deleteSelected(true)
+    }
+    Shortcut {
+        sequence: "Ctrl+C"
+        onActivated: Timeline.copySelected()
+    }
+    Shortcut {
+        sequence: "Ctrl+V"
+        onActivated: Timeline.pasteAtPlayhead()
+    }
+    Shortcut {
+        sequence: "+"
+        onActivated: root.zoomBy(1.25)
+    }
+    Shortcut {
+        sequence: "="
+        onActivated: root.zoomBy(1.25)
+    }
+    Shortcut {
+        sequence: "-"
+        onActivated: root.zoomBy(0.8)
     }
 
     Rectangle {
@@ -132,8 +252,9 @@ ApplicationWindow {
 
     FileDialog {
         id: fileDialog
-        title: "导入视频"
-        nameFilters: ["视频文件 (*.mp4 *.wmv)", "所有文件 (*)"]
+        title: "导入素材"
+        nameFilters: ["媒体文件 (*.mp4 *.wmv *.mov *.mkv *.mp3 *.wav *.flac *.m4a)",
+                      "所有文件 (*)"]
         fileMode: FileDialog.OpenFiles
         onAccepted: App.importUrls(selectedFiles)
     }

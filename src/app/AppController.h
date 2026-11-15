@@ -4,10 +4,14 @@
 #include <QObject>
 #include <QTimer>
 #include <QUrl>
+#include <QVariantList>
 
+#include "AudioEngine.h"
 #include "MediaListModel.h"
 #include "ProjectDocument.h"
 #include "ProjectStore.h"
+#include "TimelineController.h"
+#include "WaveformService.h"
 
 namespace VideoEditor {
 
@@ -17,6 +21,9 @@ class ProxyService;
 class AppController : public QObject {
     Q_OBJECT
     Q_PROPERTY(MediaListModel *mediaModel READ mediaModel CONSTANT)
+    Q_PROPERTY(VideoEditor::TimelineController *timeline READ timeline CONSTANT)
+    Q_PROPERTY(VideoEditor::AudioEngine *audioEngine READ audioEngine CONSTANT)
+    Q_PROPERTY(VideoEditor::WaveformService *waveforms READ waveforms CONSTANT)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoStateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoStateChanged)
@@ -28,6 +35,9 @@ public:
     ~AppController() override;
 
     MediaListModel *mediaModel() const { return m_mediaModel; }
+    TimelineController *timeline() const { return m_timeline; }
+    AudioEngine *audioEngine() const { return m_audio.get(); }
+    WaveformService *waveforms() const { return m_waveforms; }
     QString lastError() const { return m_lastError; }
     bool canUndo() const;
     bool canRedo() const;
@@ -37,6 +47,7 @@ public:
 
     Q_INVOKABLE void importUrls(const QList<QUrl> &urls);
     Q_INVOKABLE void openAsset(const QString &id);
+    Q_INVOKABLE void addAssetToTimeline(const QString &assetId);
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE void clearError();
@@ -45,6 +56,17 @@ public:
     Q_INVOKABLE void saveProject(const QUrl &url);
     Q_INVOKABLE void openProject(const QUrl &url);
     Q_INVOKABLE void selftest(const QString &path);
+    // Moves both the edit playhead and the timeline preview to one position.
+    Q_INVOKABLE void seekTimeline(qint64 positionUs);
+    // Style presets as a list of {id, name} maps for the subtitle ComboBox.
+    Q_INVOKABLE QVariantList subtitleStyles() const;
+
+    // Re-opens the preview on the current project and resets the playhead.
+    void refreshTimelinePreview();
+    // Multi-track fixture projects used by the command-line self-tests. The
+    // frame/FPS thresholds themselves are wired up in Task 12.
+    void selftestTimeline();
+    void selftestPerf();
 
     // Called on clean shutdown: removes a stale autosave only when the open
     // document is clean and no startup recovery prompt is still pending.
@@ -62,23 +84,30 @@ signals:
     void useProxyChanged();
     void projectChanged();
     void selftestFramePresented();
+    void timelineFramePresented();
 
 private:
     void setLastError(const QString &message);
     void refreshModel();
     void setRecoveryAvailable(bool available);
     void autosave();
+    void requestWaveforms();
+    void buildTimelineSelftestProject();
 
     ProjectDocument *m_document = nullptr;
     MediaListModel *m_mediaModel = nullptr;
     PreviewController *m_preview = nullptr;
     ProxyService *m_proxyService = nullptr;
+    TimelineController *m_timeline = nullptr;
+    WaveformService *m_waveforms = nullptr;
+    std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<ProjectStore> m_store;
     QTimer m_autosaveTimer;
     QString m_lastError;
     QString m_currentAssetId;
     bool m_recoveryAvailable = false;
     bool m_useProxy = true;
+    bool m_syncingPlayhead = false;
 };
 
 } // namespace VideoEditor

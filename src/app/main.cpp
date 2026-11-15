@@ -9,8 +9,11 @@
 
 #include "AppController.h"
 #include "AppInfo.h"
+#include "AudioEngine.h"
 #include "PreviewController.h"
+#include "TimelineController.h"
 #include "VideoPreviewItem.h"
+#include "WaveformImageProvider.h"
 
 int main(int argc, char *argv[])
 {
@@ -37,9 +40,16 @@ int main(int argc, char *argv[])
                                                   "VideoPreview");
 
     QQmlApplicationEngine engine;
+    engine.addImageProvider(
+        QStringLiteral("waveform"),
+        new VideoEditor::WaveformImageProvider(controller.waveforms()));
     engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
     engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
                                              controller.preview());
+    engine.rootContext()->setContextProperty(QStringLiteral("Timeline"),
+                                             controller.timeline());
+    engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
+                                             controller.audioEngine());
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              VideoEditor::appVersion());
     engine.loadFromModule(QStringLiteral("VideoEditor"), QStringLiteral("Main"));
