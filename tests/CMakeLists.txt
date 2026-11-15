@@ -70,6 +70,7 @@ add_executable(render_tests
   media/ClipVideoSourceTest.cpp
   media/TimelineCoalescerTest.cpp
   media/SourceCachePolicyTest.cpp
+  media/OfflineRendererTest.cpp
   TestGuiMain.cpp)
 target_link_libraries(render_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)

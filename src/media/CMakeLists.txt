@@ -68,8 +68,12 @@ add_library(videoeditor_media STATIC
   render/LayerCompositor.cpp
   render/ClipVideoSource.h
   render/ClipVideoSource.cpp
+  render/TimelineCompositor.h
+  render/TimelineCompositor.cpp
   render/TimelineRenderWorker.h
   render/TimelineRenderWorker.cpp
+  render/OfflineFrameRenderer.h
+  render/OfflineFrameRenderer.cpp
   export/ExportEncoderCatalog.h
   export/ExportEncoderCatalog.cpp
 )
