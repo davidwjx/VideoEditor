@@ -523,7 +523,7 @@ TrackingRunResult TrackingPipeline::run(const AiJobSpec &spec,
         result.error = QStringLiteral("跟踪帧率无效。");
         return result;
     }
-    const int totalFrames =
+    int totalFrames =
         int(microsToFrames(spec.sourceOutUs - spec.sourceInUs, spec.fps));
     if (totalFrames <= 0) {
         result.error = QStringLiteral("跟踪时间范围不足一帧。");
@@ -535,20 +535,37 @@ TrackingRunResult TrackingPipeline::run(const AiJobSpec &spec,
         return result;
     }
 
+    // Reject a keyframe outside the requested range before touching the asset
+    // so the caller always gets the precise keyframe error.
+    for (const MaskKeyframe &keyframe : spec.maskKeyframes) {
+        if (keyframe.sourceTimeUs < spec.sourceInUs
+            || keyframe.sourceTimeUs >= spec.sourceOutUs) {
+            result.error = QStringLiteral("遮罩关键帧时间必须位于跟踪区间内。");
+            return result;
+        }
+    }
+
     QString error;
+    FrameReader reader;
+    if (!reader.open(spec.assetPath, spec.fps, spec.sourceInUs,
+                     spec.sourceOutUs, displaySize, &error)) {
+        result.error = error;
+        return result;
+    }
+    // FrameReader clamps the range to the stream duration/nb_frames. The
+    // pipeline must use the same bound or it will request a frame past EOF.
+    totalFrames = std::min(totalFrames, reader.frameCount());
+    if (totalFrames <= 0) {
+        result.error = QStringLiteral("跟踪时间范围不足一帧。");
+        return result;
+    }
+
     const QList<Impl::Anchor> anchors =
         m_impl->loadAnchors(spec, totalFrames, displaySize, &error);
     if (anchors.isEmpty()) {
         result.error = error.isEmpty()
             ? QStringLiteral("缺少遮罩关键帧。")
             : error;
-        return result;
-    }
-
-    FrameReader reader;
-    if (!reader.open(spec.assetPath, spec.fps, spec.sourceInUs,
-                     spec.sourceOutUs, displaySize, &error)) {
-        result.error = error;
         return result;
     }
 

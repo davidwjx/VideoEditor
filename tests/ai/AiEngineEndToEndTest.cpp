@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#if defined(VIDEOEDITOR_HAVE_ORT) && VIDEOEDITOR_HAVE_ORT
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -321,3 +323,5 @@ TEST(AiEngineEndToEnd, PauseResumeThenCancelYieldsPartial)
     EXPECT_EQ(finishedArgs.at(1).value<QProcess::ExitStatus>(),
               QProcess::NormalExit);
 }
+
+#endif // VIDEOEDITOR_HAVE_ORT

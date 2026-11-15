@@ -392,6 +392,47 @@ TEST(TrackingPipeline, CancelPreservesCompletedMasks)
     EXPECT_FALSE(fileExists(notWritten));
 }
 
+TEST(TrackingPipeline, ClampsOvershootingSourceOutToStream)
+{
+    const QString fixture = QStringLiteral(VIDEOEDITOR_FIXTURE_DIR)
+        + QStringLiteral("/h264.mp4");
+    if (!QFileInfo::exists(fixture))
+        GTEST_SKIP() << "tests/fixtures/h264.mp4 is missing";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    AiJobSpec spec = makeSpec(1, 640, 360);
+    spec.assetPath = fixture;
+    spec.sourceInUs = 0;
+    // h264.mp4 is 2 s / 60 frames; the job asks for 3 s.
+    spec.sourceOutUs = 3'000'000;
+    spec.cacheDir = temp.filePath(QStringLiteral("cache"));
+    spec.sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString maskHash = writeMaskSidecar(
+        spec.sidecarRoot, makeMask(QRect(200, 120, 120, 90), 640, 360));
+    ASSERT_EQ(maskHash.size(), 64);
+    spec.maskKeyframes.append(
+        MaskKeyframe{QStringLiteral("mk-1"), 0, maskHash, 4, 1});
+
+    TrackingPipeline pipeline;
+    const TrackingRunResult result = pipeline.run(spec);
+    ASSERT_TRUE(result.ok) << result.error.toStdString();
+    EXPECT_EQ(result.completedFrames, 60);
+    ASSERT_EQ(result.confidenceHash.size(), 64);
+
+    // A keyframe past the clamped frame count keeps the clear range error.
+    AiJobSpec late = spec;
+    late.maskKeyframes.clear();
+    const QString lateHash = writeMaskSidecar(
+        late.sidecarRoot, makeMask(QRect(200, 120, 120, 90), 640, 360));
+    late.maskKeyframes.append(MaskKeyframe{QStringLiteral("mk-late"), 2'500'000,
+                                           lateHash, 4, 1});
+    const TrackingRunResult lateResult = pipeline.run(late);
+    EXPECT_FALSE(lateResult.ok);
+    EXPECT_NE(lateResult.error.indexOf(QStringLiteral("超出跟踪帧范围")), -1)
+        << lateResult.error.toStdString();
+}
+
 TEST(TrackingPipeline, CancelDuringBackwardPreservesSamples)
 {
     QTemporaryDir temp;

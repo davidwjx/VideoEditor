@@ -74,6 +74,26 @@ TEST(ModelRegistry, DefaultTrackingModelPrefersOfflineCapableFp32)
     EXPECT_EQ(record->id, QStringLiteral("efficienttam-ti-512-fp32"));
 }
 
+TEST(ModelRegistry, DefaultTrackingModelNeverPicksApprovedFp16)
+{
+    ModelManifest manifest;
+    manifest.schemaVersion = 1;
+    AiModelRecord approvedFp16 =
+        trackingRecord(QStringLiteral("efficienttam-ti-512-fp16"), true);
+    approvedFp16.commercialApproved = true;
+    AiModelRecord unapprovedFp32 =
+        trackingRecord(QStringLiteral("efficienttam-ti-512-fp32"), true);
+    unapprovedFp32.commercialApproved = false;
+    manifest.models = {approvedFp16, unapprovedFp32};
+
+    const ModelRegistry registry =
+        ModelRegistry::forTest(manifest, QStringLiteral("C:/models"));
+    const AiModelRecord *record = registry.defaultTrackingModel();
+    ASSERT_NE(record, nullptr);
+    // "fp16 must not be used" wins over commercial approval.
+    EXPECT_EQ(record->id, QStringLiteral("efficienttam-ti-512-fp32"));
+}
+
 TEST(ModelRegistry, VerifyFilesByIdOnlyHashesRequestedModels)
 {
     QTemporaryDir temp;

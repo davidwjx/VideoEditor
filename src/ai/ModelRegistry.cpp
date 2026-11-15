@@ -436,9 +436,10 @@ const AiModelRecord *ModelRegistry::defaultTrackingModel() const
             && record.files.contains(QStringLiteral("mask_decoder"));
     };
 
+    const AiModelRecord *approvedFp32 = nullptr;
+    const AiModelRecord *unapprovedFp32 = nullptr;
     const AiModelRecord *approvedCompatible = nullptr;
-    const AiModelRecord *compatibleFp32 = nullptr;
-    const AiModelRecord *compatibleFallback = nullptr;
+    const AiModelRecord *compatible = nullptr;
     const AiModelRecord *fallback = nullptr;
     for (const AiModelRecord &record : m_manifest.models) {
         if (!record.isTracking())
@@ -447,27 +448,38 @@ const AiModelRecord *ModelRegistry::defaultTrackingModel() const
             fallback = &record;
         if (!offlineCapable(record))
             continue;
+        const bool fp16 = record.id.contains(QStringLiteral("fp16"),
+                                             Qt::CaseInsensitive)
+            || record.version.contains(QStringLiteral("fp16"),
+                                       Qt::CaseInsensitive);
+        // The fp16 EfficientTAM bundle is explicitly rejected, so never make
+        // it the default even if it later becomes commercially approved.
+        if (fp16)
+            continue;
         const bool fp32 = record.id.contains(QStringLiteral("fp32"),
                                              Qt::CaseInsensitive)
             || record.version.contains(QStringLiteral("fp32"),
                                        Qt::CaseInsensitive);
-        if (!compatibleFallback)
-            compatibleFallback = &record;
-        if (fp32 && !compatibleFp32)
-            compatibleFp32 = &record;
-        if (!record.commercialApproved)
-            continue;
-        if (fp32)
-            return &record;
-        if (!approvedCompatible)
-            approvedCompatible = &record;
+        if (fp32) {
+            if (record.commercialApproved && !approvedFp32)
+                approvedFp32 = &record;
+            if (!record.commercialApproved && !unapprovedFp32)
+                unapprovedFp32 = &record;
+        } else {
+            if (record.commercialApproved && !approvedCompatible)
+                approvedCompatible = &record;
+            if (!compatible)
+                compatible = &record;
+        }
     }
+    if (approvedFp32)
+        return approvedFp32;
+    if (unapprovedFp32)
+        return unapprovedFp32;
     if (approvedCompatible)
         return approvedCompatible;
-    if (compatibleFp32)
-        return compatibleFp32;
-    if (compatibleFallback)
-        return compatibleFallback;
+    if (compatible)
+        return compatible;
     return fallback;
 }
 
