@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -75,6 +76,95 @@ TEST(AppController, ImportsAudioOnlyAsset)
     const QVariant codec = controller.mediaModel()->data(
         controller.mediaModel()->index(0, 0), MediaListModel::CodecRole);
     EXPECT_TRUE(codec.toString().contains(QStringLiteral("音频")));
+}
+
+TEST(AppController, SelftestTimelineBuildsThreeVideoTwoAudioOneSubtitleProject)
+{
+    const QString video = fixture(QStringLiteral("h264.mp4"));
+    const QString tone = fixture(QStringLiteral("tone.wav"));
+    const QString bgm = fixture(QStringLiteral("bgm.mp3"));
+    if (!QFileInfo::exists(video) || !QFileInfo::exists(tone)
+        || !QFileInfo::exists(bgm)) {
+        GTEST_SKIP() << "missing fixtures";
+    }
+
+    // No VideoPreviewItem is attached in a unit test, so this builds the
+    // fixture project without opening the 1080p preview compositor.
+    AppController controller(nullptr, {}, nullSinkFactory());
+    controller.selftestTimeline();
+
+    const Project &project = controller.document()->project();
+    int videoTracks = 0;
+    int audioTracks = 0;
+    int subtitleTracks = 0;
+    int videoClips = 0;
+    int audioClips = 0;
+    int64_t videoCoverageEndUs = 0;
+    for (const Track &track : project.tracks) {
+        switch (track.type) {
+        case TrackType::Video:
+            ++videoTracks;
+            videoClips += int(track.clips.size());
+            // Each video track repeats the two-second fixture so the perf gate
+            // never measures empty gaps with no video layers active.
+            for (const Clip &clip : track.clips)
+                videoCoverageEndUs = qMax(videoCoverageEndUs, clip.timelineEndUs());
+            break;
+        case TrackType::Audio:
+            ++audioTracks;
+            audioClips += int(track.clips.size());
+            break;
+        case TrackType::Subtitle:
+            ++subtitleTracks;
+            break;
+        }
+    }
+
+    EXPECT_EQ(videoTracks, 3);
+    EXPECT_EQ(audioTracks, 2);
+    EXPECT_EQ(subtitleTracks, 1);
+    EXPECT_EQ(videoClips, 9);
+    EXPECT_GE(audioClips, 3);
+    EXPECT_GE(videoCoverageEndUs, 6'000'000);
+    const Track *subtitle =
+        controller.document()->trackById(QStringLiteral("track-s1"));
+    ASSERT_NE(subtitle, nullptr);
+    EXPECT_EQ(subtitle->cues.size(), 3);
+}
+
+TEST(AppController, ReportsMissingAudioOutputForSilentPreview)
+{
+    // Device open failure must surface the spec's silent-preview message
+    // instead of leaving the timeline mysteriously quiet.
+    const auto failingSink =
+        [](int, int, QString *error) -> std::unique_ptr<IAudioSink> {
+        if (error)
+            *error = QStringLiteral("测试输出设备不可用。");
+        return {};
+    };
+    AppController controller(nullptr, {}, failingSink);
+
+    EXPECT_FALSE(controller.audioEngine()->hasOutputDevice());
+    EXPECT_TRUE(controller.lastError().contains(QStringLiteral("无音频输出")));
+    EXPECT_TRUE(controller.lastError().contains(QStringLiteral("静音预览")));
+}
+
+TEST(AppController, ReportsAudioDeviceLostDuringSession)
+{
+    AppController controller(nullptr, {}, nullSinkFactory());
+    EXPECT_TRUE(controller.audioEngine()->hasOutputDevice());
+    EXPECT_TRUE(controller.lastError().isEmpty());
+
+    controller.audioEngine()->setSinkFactoryForTest(
+        [](int, int, QString *error) -> std::unique_ptr<IAudioSink> {
+            if (error)
+                *error = QStringLiteral("设备已断开。");
+            return {};
+        });
+    QCoreApplication::processEvents();
+
+    EXPECT_TRUE(controller.lastError().contains(QStringLiteral("无音频输出")));
+    EXPECT_TRUE(controller.lastError().contains(QStringLiteral("静音预览")));
 }
 
 TEST(AppController, ReportsUnsupportedOrMissingFile)

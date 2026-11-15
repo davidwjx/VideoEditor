@@ -81,6 +81,7 @@ gtest_discover_tests(render_tests PROPERTIES
 add_executable(app_tests
   app/AppControllerTest.cpp
   app/TimelineUiTest.cpp
+  app/TimelineIntegrationTest.cpp
   TestMain.cpp)
 target_link_libraries(app_tests PRIVATE videoeditor_app GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(app_tests PRIVATE
@@ -132,3 +133,25 @@ foreach(_fixture IN ITEMS
     LABELS "gpu"
   )
 endforeach()
+
+# Multi-track timeline self-test: 3 video layers, 2 audio tracks and a subtitle
+# track composited at 1920x1080. Exits 0 after 30 presented frames, 2 on the
+# internal 15 s timeout.
+add_test(NAME timeline_selftest
+         COMMAND VideoEditor --selftest-timeline)
+set_tests_properties(timeline_selftest PROPERTIES
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  TIMEOUT 30
+  LABELS "gpu")
+
+# Performance gate (Release only): the same project must present at least
+# 24 fps over five seconds. The app exits 3 when the threshold is missed.
+add_test(NAME timeline_perf
+         COMMAND VideoEditor --selftest-perf)
+set_tests_properties(timeline_perf PROPERTIES
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  TIMEOUT 60
+  CONFIGURATIONS Release
+  LABELS "gpu;performance")

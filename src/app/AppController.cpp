@@ -84,7 +84,11 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     connect(m_preview, &PreviewController::framePresented, this,
             [this](qint64) { emit selftestFramePresented(); });
     connect(m_preview, &PreviewController::timelineFramePresented, this,
-            [this](qint64) { emit timelineFramePresented(); });
+            [this](qint64) {
+                emit timelineFramePresented();
+                if (m_perfClock.isValid())
+                    ++m_perfFrames;
+            });
     connect(m_preview, &PreviewController::error, this,
             &AppController::setLastError);
     // The preview clock is the timeline playhead while playing. seekUs() only
@@ -100,6 +104,25 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     m_waveforms = new WaveformService(
         QDir(appData).filePath(QStringLiteral("cache")), this);
     m_audio = std::make_unique<AudioEngine>(nullptr, std::move(audioSinkFactory));
+    // A missing or unplugged output device must not stop the preview: playback
+    // falls back to the wall clock, but the user still needs to know why the
+    // timeline is silent.
+    connect(m_audio.get(), &AudioEngine::deviceFailed, this,
+            [this](const QString &message) {
+                setLastError(message.isEmpty()
+                                 ? QStringLiteral("无音频输出，静音预览。")
+                                 : QStringLiteral("无音频输出，静音预览（%1）")
+                                       .arg(message));
+            });
+    // The device is opened in the AudioEngine constructor, before the signal
+    // above can be connected, so surface an initial failure explicitly.
+    if (!m_audio->hasOutputDevice()) {
+        const QString deviceError = m_audio->lastDeviceError();
+        setLastError(deviceError.isEmpty()
+                         ? QStringLiteral("无音频输出，静音预览。")
+                         : QStringLiteral("无音频输出，静音预览（%1）")
+                               .arg(deviceError));
+    }
     m_preview->setAudioEngine(m_audio.get());
 
     // Keep the compositor and audio mixer snapshots in sync with edits without
@@ -416,42 +439,62 @@ void AppController::buildTimelineSelftestProject()
 
     m_timeline->addAssetToTimeline(videoId, QStringLiteral("track-v1"), 0);
 
-    // Two extra video tracks so the self-test covers three video layers.
+    // Two extra video tracks and a second audio track so the self-test covers
+    // the spec's 3V/2A/1S 1080p timeline instead of a single-layer project.
     m_timeline->addTrack(0);
     m_timeline->addTrack(0);
+    m_timeline->addTrack(1);
+
     QStringList videoTracks;
+    QStringList audioTracks;
+    QString subtitleTrackId;
     for (const Track &track : m_document->project().tracks) {
         if (track.type == TrackType::Video)
             videoTracks.append(track.id);
-    }
-    if (videoTracks.size() >= 2) {
-        const QString v2 = videoTracks.at(videoTracks.size() - 2);
-        const QString v3 = videoTracks.last();
-
-        Clip overlay;
-        overlay.id = QStringLiteral("perf-v2");
-        overlay.assetId = videoId;
-        overlay.sourceInUs = 0;
-        overlay.sourceOutUs = 2'000'000;
-        overlay.timelineStartUs = 0;
-        overlay.transform.scaleMilli = 500;
-        overlay.transform.offsetXPermille = 300;
-        m_timeline->addClipForTest(v2, overlay);
-
-        Clip overlay2 = overlay;
-        overlay2.id = QStringLiteral("perf-v3");
-        overlay2.transform.offsetXPermille = -300;
-        m_timeline->addClipForTest(v3, overlay2);
-    }
-
-    m_timeline->addAssetToTimeline(toneId, QStringLiteral("track-a1"), 0);
-    m_timeline->addAssetToTimeline(bgmId, QStringLiteral("track-a1"), 0);
-
-    QString subtitleTrackId;
-    for (const Track &track : m_document->project().tracks) {
-        if (track.type == TrackType::Subtitle)
+        else if (track.type == TrackType::Audio)
+            audioTracks.append(track.id);
+        else if (track.type == TrackType::Subtitle)
             subtitleTrackId = track.id;
     }
+
+    // h264.mp4 is two seconds long. Repeat the source on every video track so
+    // all three layers stay active for the whole five-second perf window; a
+    // gate that only sees three layers for two seconds could average a bad
+    // three-layer frame rate away with fast empty frames.
+    const auto addVideoClip = [this, &videoId](const QString &trackId,
+                                               const QString &id, int index,
+                                               int scaleMilli, int offsetX) {
+        Clip clip;
+        clip.id = id;
+        clip.assetId = videoId;
+        clip.sourceInUs = 0;
+        clip.sourceOutUs = 2'000'000;
+        clip.timelineStartUs = index * 2'000'000;
+        clip.transform.scaleMilli = scaleMilli;
+        clip.transform.offsetXPermille = offsetX;
+        m_timeline->addClipForTest(trackId, clip);
+    };
+
+    if (videoTracks.size() >= 3) {
+        const QString v1 = videoTracks.at(videoTracks.size() - 3);
+        const QString v2 = videoTracks.at(videoTracks.size() - 2);
+        const QString v3 = videoTracks.last();
+        for (int i = 1; i < 3; ++i)
+            addVideoClip(v1, QStringLiteral("perf-v1-%1").arg(i), i, 1000, 0);
+        for (int i = 0; i < 3; ++i) {
+            addVideoClip(v2, QStringLiteral("perf-v2-%1").arg(i), i, 500, 300);
+            addVideoClip(v3, QStringLiteral("perf-v3-%1").arg(i), i, 500, -300);
+        }
+    }
+
+    // A1 carries the original h264 audio (linked by addAssetToTimeline) plus
+    // the tone fixture; A2 carries the BGM so both can be mixed independently.
+    m_timeline->addAssetToTimeline(toneId, QStringLiteral("track-a1"), 0);
+    if (audioTracks.size() >= 2)
+        m_timeline->addAssetToTimeline(bgmId, audioTracks.last(), 0);
+    else
+        m_timeline->addAssetToTimeline(bgmId, QStringLiteral("track-a1"), 0);
+
     for (int i = 0; i < 3; ++i) {
         m_timeline->seekUs(i * 1'000'000);
         m_timeline->addCueAtPlayhead();
@@ -462,11 +505,47 @@ void AppController::buildTimelineSelftestProject()
         m_timeline->setCueText(
             cueId, QStringLiteral("多轨自检字幕 %1").arg(i + 1));
     }
+
+    int videoClipCount = 0;
+    int audioClipCount = 0;
+    int cueCount = 0;
+    int videoTrackCount = 0;
+    int audioTrackCount = 0;
+    int subtitleTrackCount = 0;
+    for (const Track &track : m_document->project().tracks) {
+        switch (track.type) {
+        case TrackType::Video:
+            ++videoTrackCount;
+            videoClipCount += int(track.clips.size());
+            break;
+        case TrackType::Audio:
+            ++audioTrackCount;
+            audioClipCount += int(track.clips.size());
+            break;
+        case TrackType::Subtitle:
+            ++subtitleTrackCount;
+            cueCount += int(track.cues.size());
+            break;
+        }
+    }
+    const TimelineSettings &settings = m_document->project().timeline;
+    qInfo("TIMELINE_SELFTEST_PROJECT resolution=%dx%d fps=%d/%d videoTracks=%d "
+          "audioTracks=%d subtitleTracks=%d videoClips=%d audioClips=%d cues=%d",
+          settings.width, settings.height, settings.fps.num, settings.fps.den,
+          videoTrackCount, audioTrackCount, subtitleTrackCount, videoClipCount,
+          audioClipCount, cueCount);
 }
 
 void AppController::selftestTimeline()
 {
     buildTimelineSelftestProject();
+    if (m_document->project().assets.size() < 3)
+        return;
+    // Unit tests build the fixture project without a QML preview item. With
+    // no scene-graph target there is nothing to present, so only the command-
+    // line self-tests (which load Main.qml first) open the timeline preview.
+    if (!m_preview->item())
+        return;
     refreshTimelinePreview();
     m_timeline->seekUs(0);
     m_preview->play();
@@ -474,10 +553,27 @@ void AppController::selftestTimeline()
 
 void AppController::selftestPerf()
 {
-    // Task 12 adds the frame/FPS threshold around this playback. Building the
-    // same three-video/two-audio/one-subtitle project here keeps the timing
-    // gate representative.
+    // Same 3V/2A/1S project as --selftest-timeline. The gate counts frames the
+    // scene graph actually presented over five seconds; compositor throughput,
+    // decode and audio mixing all run for real.
+    m_perfFrames = 0;
     selftestTimeline();
+    if (m_document->project().assets.size() < 3) {
+        qCritical("TIMELINE_PERF_MISSING_FIXTURES");
+        QCoreApplication::exit(3);
+        return;
+    }
+
+    m_perfClock.start();
+    QTimer::singleShot(5000, this, [this] {
+        const qint64 elapsedMs = m_perfClock.elapsed();
+        m_perfClock.invalidate();
+        const double seconds = elapsedMs > 0 ? elapsedMs / 1000.0 : 0.0;
+        const double fps = seconds > 0.0 ? m_perfFrames / seconds : 0.0;
+        qInfo("TIMELINE_FPS=%.1f FRAMES=%d ELAPSED_MS=%lld", fps, m_perfFrames,
+              static_cast<long long>(elapsedMs));
+        QCoreApplication::exit(fps >= 24.0 ? 0 : 3);
+    });
 }
 
 void AppController::setLastError(const QString &message)

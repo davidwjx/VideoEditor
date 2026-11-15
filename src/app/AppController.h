@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QTimer>
 #include <QUrl>
@@ -66,8 +67,9 @@ public:
 
     // Re-opens the preview on the current project and resets the playhead.
     void refreshTimelinePreview();
-    // Multi-track fixture projects used by the command-line self-tests. The
-    // frame/FPS thresholds themselves are wired up in Task 12.
+    // Multi-track fixture projects used by the command-line self-tests.
+    // --selftest-timeline exits after 30 presented frames in main.cpp;
+    // --selftest-perf measures the presented-frame rate here.
     void selftestTimeline();
     void selftestPerf();
 
@@ -109,6 +111,9 @@ private:
     // Coalesces rapid edits into one preview/audio snapshot update so a drag
     // release or command burst does not queue a recomposition per command.
     QTimer m_timelineUpdateTimer;
+    // --selftest-perf counts presented timeline frames while the clock runs.
+    QElapsedTimer m_perfClock;
+    int m_perfFrames = 0;
     QString m_lastError;
     QString m_currentAssetId;
     bool m_recoveryAvailable = false;

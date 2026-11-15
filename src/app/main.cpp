@@ -27,6 +27,14 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("selftest"),
                       QStringLiteral("Open a file and exit after first frame"),
                       QStringLiteral("path")});
+    parser.addOption(
+        {QStringLiteral("selftest-timeline"),
+         QStringLiteral("Play the multi-track timeline fixture and exit after "
+                        "30 presented frames")});
+    parser.addOption(
+        {QStringLiteral("selftest-perf"),
+         QStringLiteral("Measure presented timeline frames per second for five "
+                        "seconds; exit 0 when at least 24 fps")});
     parser.process(app);
 
     VideoEditor::AppController controller;
@@ -69,6 +77,34 @@ int main(int argc, char *argv[])
         QTimer::singleShot(15000, &app, [] {
             qCritical("SELFTEST_TIMEOUT");
             QCoreApplication::exit(2);
+        });
+    }
+
+    if (parser.isSet(QStringLiteral("selftest-timeline"))) {
+        int presentedFrames = 0;
+        QObject::connect(&controller,
+                         &VideoEditor::AppController::timelineFramePresented,
+                         &app, [&app, &presentedFrames] {
+                             if (++presentedFrames >= 30) {
+                                 qInfo("TIMELINE_SELFTEST_OK frames=%d",
+                                       presentedFrames);
+                                 QCoreApplication::exit(0);
+                             }
+                         });
+        QTimer::singleShot(0, &controller, [&controller] {
+            controller.selftestTimeline();
+        });
+        QTimer::singleShot(15000, &app, [] {
+            qCritical("TIMELINE_SELFTEST_TIMEOUT");
+            QCoreApplication::exit(2);
+        });
+    }
+
+    if (parser.isSet(QStringLiteral("selftest-perf"))) {
+        // AppController::selftestPerf owns the clock, frame count, threshold
+        // and exit code so the gate can also be driven from tests.
+        QTimer::singleShot(0, &controller, [&controller] {
+            controller.selftestPerf();
         });
     }
 
