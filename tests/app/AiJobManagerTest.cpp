@@ -4,6 +4,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <utility>
 
 #include <QByteArray>
 #include <QCoreApplication>
@@ -229,6 +230,29 @@ public:
     }
 
 private:
+    QByteArray m_previous;
+};
+
+// Sets/restores one environment variable for the lifetime of the guard.
+class EnvOverride {
+public:
+    EnvOverride(const char *name, const QByteArray &value)
+        : m_name(name)
+        , m_previous(qgetenv(name))
+    {
+        set(value);
+    }
+    ~EnvOverride() { set(m_previous); }
+    void set(const QByteArray &value)
+    {
+        if (value.isNull())
+            qunsetenv(m_name);
+        else
+            qputenv(m_name, value);
+    }
+
+private:
+    const char *m_name;
     QByteArray m_previous;
 };
 
@@ -705,6 +729,76 @@ TEST(AiFeatureGate, ReloadFailsClosedWithoutApproval)
     EXPECT_FALSE(gate.enabled());
     EXPECT_TRUE(gate.disabledReason().contains(QStringLiteral("许可证")));
     ASSERT_NE(gate.registry(), nullptr);
+}
+
+TEST(AiFeatureGate, TechnicalPreviewRequiresEnvAndShowsDisclaimer)
+{
+    EnvOverride env("VIDEOEDITOR_M4_TECHNICAL", QByteArray());
+    ModelManifest manifest = approvedManifest();
+    manifest.commercialApproved = false;
+    manifest.legalSignOffBy.clear();
+    manifest.models = {
+        modelRecord(QStringLiteral("efficienttam-ti-512-fp32"),
+                    QStringLiteral("tracking"), false),
+        modelRecord(QStringLiteral("migan-512"), QStringLiteral("inpainting"),
+                    false),
+        modelRecord(QStringLiteral("lama-512-int8-allowzero0"),
+                    QStringLiteral("inpainting"), false)};
+
+    AiFeatureGate gate;
+    gate.setRegistryForTest(ModelRegistry::forTest(manifest));
+    QString error;
+    EXPECT_FALSE(gate.enableTechnicalPreview(&error));
+    EXPECT_TRUE(error.contains(QStringLiteral("VIDEOEDITOR_M4_TECHNICAL")))
+        << error.toStdString();
+    EXPECT_FALSE(gate.enabled());
+    EXPECT_FALSE(gate.technicalPreview());
+
+    env.set("1");
+    error.clear();
+    ASSERT_TRUE(gate.enableTechnicalPreview(&error)) << error.toStdString();
+    EXPECT_TRUE(gate.enabled());
+    EXPECT_TRUE(gate.technicalPreview());
+    EXPECT_EQ(gate.disabledReason(),
+              AiFeatureGate::technicalPreviewDisclaimer());
+    EXPECT_EQ(AiFeatureGate::technicalPreviewDisclaimer(),
+              QStringLiteral(
+                  "内部技术预览：模型未取得商业许可，仅用于内部技术验证，禁止分发。"));
+
+    // A normal reload must clear the technical flag again.
+    env.set(QByteArray());
+    EXPECT_FALSE(gate.enableTechnicalPreview(&error));
+    EXPECT_FALSE(gate.technicalPreview());
+    EXPECT_FALSE(gate.enabled());
+}
+
+TEST(AiFeatureGate, TechnicalPreviewRejectsMissingModelFiles)
+{
+    EnvOverride env("VIDEOEDITOR_M4_TECHNICAL", "1");
+    QTemporaryDir dir;
+    const QJsonArray models{
+        modelEntry(QStringLiteral("tracker"), QStringLiteral("tracking"), false,
+                   fileEntry(QStringLiteral("missing/tracking.onnx"),
+                             QString(64, QLatin1Char('a')))),
+        modelEntry(QStringLiteral("migan-512"), QStringLiteral("inpainting"),
+                   false,
+                   fileEntry(QStringLiteral("missing/inpaint.onnx"),
+                             QString(64, QLatin1Char('b'))))};
+    const QString manifestPath = writeManifest(dir, manifestEntry(false, models));
+    ASSERT_FALSE(manifestPath.isEmpty());
+
+    QString loadError;
+    const auto registry = ModelRegistry::load(manifestPath, &loadError);
+    ASSERT_TRUE(registry.has_value()) << loadError.toStdString();
+
+    AiFeatureGate gate;
+    gate.setRegistryForTest(std::move(*registry));
+    QString error;
+    EXPECT_FALSE(gate.enableTechnicalPreview(&error));
+    EXPECT_TRUE(error.contains(QStringLiteral("模型文件缺失")))
+        << error.toStdString();
+    EXPECT_FALSE(gate.enabled());
+    EXPECT_FALSE(gate.technicalPreview());
 }
 
 TEST(AiFeatureGate, ApprovedManifestWithMissingFilesFailsVerification)

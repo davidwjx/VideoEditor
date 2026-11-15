@@ -26,10 +26,14 @@ public:
 
     // modelsAlreadyVerified skips featureEnabled()'s model-file hashing when
     // AiFeatureGate::enabled() already proved the files for this session.
+    // technicalPreview skips the commercial approval/legal gate for the
+    // internal technical run but still requires resolved tracking+inpaint roles
+    // and (unless modelsAlreadyVerified) a valid model bundle.
     static RemovalPreflightResult check(const Project &project,
                                         const RemovalCache &cache,
                                         const ModelRegistry &models,
-                                        bool modelsAlreadyVerified = false);
+                                        bool modelsAlreadyVerified = false,
+                                        bool technicalPreview = false);
 
     // Null-registry path: the model manifest could not be loaded, so there is
     // no registry to inspect. Still honours track/clip/layer enablement and

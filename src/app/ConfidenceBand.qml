@@ -17,17 +17,46 @@ Item {
     readonly property real spanStart: band.length > 0 ? band[0].timelineUs : 0
     readonly property real spanEnd: band.length > 1
                                     ? band[band.length - 1].timelineUs
+                                      + Math.max(1,
+                                                 band[band.length - 1].timelineUs
+                                                 - band[band.length - 2].timelineUs)
                                     : spanStart + 1
 
     implicitHeight: bar.height
                     + (lowJump.visible ? lowJump.implicitHeight + 4 : 0)
     Layout.fillWidth: true
 
+    // Segment i spans [band[i].timelineUs, band[i+1].timelineUs); the last
+    // segment runs to the bar end.
     function segmentStart(i) {
-        if (i <= 0)
+        if (i <= 0 || band.length <= 1)
             return 0
-        return (band[i - 1].timelineUs - spanStart)
+        return (band[i].timelineUs - spanStart)
                 / Math.max(1, spanEnd - spanStart) * bar.width
+    }
+
+    function segmentEnd(i) {
+        if (i >= band.length - 1)
+            return bar.width
+        return segmentStart(i + 1)
+    }
+
+    // Converts a click x to the segment containing that time. The mapping is
+    // time-based, not a uniform index, so non-uniform keyframe spacing works.
+    function indexAtX(x) {
+        if (band.length === 0)
+            return -1
+        const clamped = Math.max(0, Math.min(bar.width, x))
+        const t = spanStart + (clamped / Math.max(1, bar.width))
+                               * Math.max(1, spanEnd - spanStart)
+        let index = 0
+        for (let i = 0; i < band.length; ++i) {
+            if (t >= band[i].timelineUs)
+                index = i
+            else
+                break
+        }
+        return index
     }
 
     Rectangle {
@@ -45,13 +74,11 @@ Item {
             delegate: Rectangle {
                 required property int index
                 required property var modelData
+                objectName: "confidence-segment-" + index
                 x: root.segmentStart(index)
-                width: index === root.band.length - 1
-                       ? Math.max(1, bar.width - x)
-                       : Math.max(1,
-                                  (modelData.timelineUs - root.spanStart)
-                                  / Math.max(1, root.spanEnd - root.spanStart)
-                                  * bar.width - x)
+                width: Math.max(1,
+                                root.segmentEnd(index)
+                                - root.segmentStart(index))
                 height: bar.height
                 color: modelData.color
             }
@@ -62,11 +89,9 @@ Item {
             onClicked: (mouse) => {
                 if (root.removal === null || root.band.length === 0)
                     return
-                const idx = Math.max(0, Math.min(
-                    root.band.length - 1,
-                    Math.floor(mouse.x / Math.max(1, width)
-                               * root.band.length)))
-                root.removal.jumpToConfidence(idx)
+                const idx = root.indexAtX(mouse.x)
+                if (idx >= 0)
+                    root.removal.jumpToConfidence(idx)
             }
         }
     }

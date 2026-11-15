@@ -56,8 +56,23 @@ void registerPreviewType()
     Q_UNUSED(registered);
 }
 
+QQuickItem *findVisualItem(QQuickItem *parent, const QString &name)
+{
+    if (!parent)
+        return nullptr;
+    if (parent->objectName() == name)
+        return parent;
+    for (QQuickItem *child : parent->childItems()) {
+        if (QQuickItem *found = findVisualItem(child, name))
+            return found;
+    }
+    return nullptr;
+}
+
 QQuickItem *findItem(QQuickWindow *window, const QString &name)
 {
+    if (QQuickItem *found = findVisualItem(window->contentItem(), name))
+        return found;
     return window->findChild<QQuickItem *>(name);
 }
 
@@ -141,14 +156,15 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     mask.set(300, 160, true);
     QString maskHash;
     ASSERT_TRUE(store.writeMask(mask, &maskHash, nullptr));
+    // Non-uniform spacing exercises the time-proportional segment mapping.
     QJsonArray frames{
         QJsonObject{{QStringLiteral("timeUs"), 0},
                     {QStringLiteral("state"), QStringLiteral("good")}},
         QJsonObject{{QStringLiteral("timeUs"), 500'000},
                     {QStringLiteral("state"), QStringLiteral("low")}},
-        QJsonObject{{QStringLiteral("timeUs"), 1'000'000},
-                    {QStringLiteral("state"), QStringLiteral("fair")}},
         QJsonObject{{QStringLiteral("timeUs"), 1'500'000},
+                    {QStringLiteral("state"), QStringLiteral("fair")}},
+        QJsonObject{{QStringLiteral("timeUs"), 2'000'000},
                     {QStringLiteral("state"), QStringLiteral("missing")}}};
     QString trackingHash;
     ASSERT_TRUE(store.writeTracking(QJsonObject{{QStringLiteral("frames"),
@@ -210,7 +226,8 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
              QStringLiteral("removal-compare-toggle"),
              QStringLiteral("removal-advanced-toggle"),
              QStringLiteral("removal-advanced-panel"),
-             QStringLiteral("removal-low-confidence-count")}) {
+             QStringLiteral("removal-low-confidence-count"),
+             QStringLiteral("removal-redo-button")}) {
         EXPECT_NE(findItem(window, name), nullptr) << name.toStdString();
     }
 
@@ -254,9 +271,20 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     ASSERT_NE(lowJump, nullptr);
     EXPECT_TRUE(lowJump->isVisible());
 
-    // Clicking the confidence strip seeks to the clicked frame and pauses.
+    // Time-proportional widths: 0..0.5 s, 0.5..1.5 s, 1.5..2.0 s, 2.0..2.5 s.
+    QQuickItem *seg0 =
+        findItem(window, QStringLiteral("confidence-segment-0"));
+    QQuickItem *seg1 =
+        findItem(window, QStringLiteral("confidence-segment-1"));
+    ASSERT_NE(seg0, nullptr);
+    ASSERT_NE(seg1, nullptr);
+    EXPECT_GT(seg0->width(), 1.0) << "first segment must not be 1px";
+    EXPECT_GT(seg1->width(), seg0->width())
+        << "the 1 s segment must be wider than the 0.5 s segment";
+
+    // Click at 70% (1.75 s) seeks to the 1.5 s segment, not a uniform index.
     const QPointF bandPoint = band->mapToScene(
-        QPointF(band->width() * 0.8, band->height() / 2.0));
+        QPointF(band->width() * 0.7, band->height() / 2.0));
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                       bandPoint.toPoint());
     QTest::qWait(120);
@@ -264,7 +292,19 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
                 50'000.0);
     EXPECT_FALSE(controller.preview()->playing());
 
-    // Advanced panel opens through the toggle.
+    // The compare control must reach the preview renderer.
+    QQuickItem *compare =
+        findItem(window, QStringLiteral("removal-compare-toggle"));
+    ASSERT_NE(compare, nullptr);
+    compare->setProperty("currentIndex", 2);
+    QMetaObject::invokeMethod(compare, "activated", Q_ARG(int, 2));
+    QTest::qWait(80);
+    EXPECT_EQ(controller.preview()->removalCompareMode(),
+              QStringLiteral("split"));
+    controller.removal()->setSplitPermille(250);
+    EXPECT_EQ(controller.preview()->removalSplitPermille(), 250);
+
+    // Advanced panel opens through the toggle; controls are enabled when idle.
     QQuickItem *advancedToggle =
         findItem(window, QStringLiteral("removal-advanced-toggle"));
     QQuickItem *advancedPanel =
@@ -274,12 +314,18 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     EXPECT_FALSE(advancedPanel->isVisible());
     clickItem(window, advancedToggle);
     EXPECT_TRUE(advancedPanel->isVisible());
+    QQuickItem *advancedMode =
+        findItem(window, QStringLiteral("removal-advanced-mode"));
+    ASSERT_NE(advancedMode, nullptr);
+    EXPECT_TRUE(advancedMode->isEnabled());
 
-    // Leaving mask mode hides the generation controls.
+    // Leaving mask mode hides the generation controls but keeps the
+    // confidence band visible because the selected clip still has a layer.
     controller.removal()->endMask();
     QTest::qWait(120);
     EXPECT_FALSE(trackButton->isVisible());
     EXPECT_FALSE(generateButton->isVisible());
+    EXPECT_TRUE(band->isVisible());
 
     // Export dialog content is created lazily; open it with a deterministic
     // encoder catalog and check the missing-cache prompt actions.
@@ -304,6 +350,19 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     EXPECT_TRUE(cancelExport->isVisible());
     EXPECT_TRUE(generateExport->property("text").toString()
                     .contains(QStringLiteral("先生成")));
-    EXPECT_TRUE(findItem(window, QStringLiteral("export-removal-message"))
-                    ->isVisible());
+    QQuickItem *promptMessage =
+        findItem(window, QStringLiteral("export-removal-message"));
+    ASSERT_NE(promptMessage, nullptr);
+    EXPECT_TRUE(promptMessage->isVisible());
+
+    // Dismissing the prompt hides it; reopening the dialog shows it again.
+    clickItem(window, cancelExport);
+    QTest::qWait(100);
+    EXPECT_FALSE(promptMessage->isVisible());
+    ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+    QTest::qWait(150);
+    ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "openDialog"));
+    QTest::qWait(300);
+    ASSERT_TRUE(dialog->property("opened").toBool());
+    EXPECT_TRUE(promptMessage->isVisible());
 }

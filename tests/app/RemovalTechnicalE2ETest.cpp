@@ -15,6 +15,8 @@
 #include "AiProtocol.h"
 #include "AppController.h"
 #include "AudioSink.h"
+#include "ExportController.h"
+#include "ExportEncoderCatalog.h"
 #include "ProjectDocument.h"
 #include "RemovalController.h"
 #include "TimelineController.h"
@@ -133,4 +135,20 @@ TEST(RemovalTechnicalE2E, TracksAndGeneratesWithInstalledModels)
                        == RemovalTrackingState::LowConfidence);
     EXPECT_TRUE(removal->cacheStatusText() == QStringLiteral("已生成"))
         << removal->cacheStatusText().toStdString();
+
+    // The technical preview must not loop: export preflight still bypasses the
+    // commercial license gate and now accepts the freshly generated cache.
+    ExportController *exportController = controller.exportController();
+    exportController->setCatalogForTest(
+        EncoderCatalog::withoutHardwareForTest());
+    exportController->refreshCapabilities();
+    const QString validation = exportController->validate();
+    EXPECT_FALSE(exportController->removalRequired())
+        << exportController->removalMessage().toStdString();
+    EXPECT_FALSE(exportController->removalMessage().contains(
+        QStringLiteral("许可证")))
+        << exportController->removalMessage().toStdString();
+    EXPECT_FALSE(validation.contains(QStringLiteral("许可证")))
+        << validation.toStdString();
+    EXPECT_TRUE(validation.isEmpty()) << validation.toStdString();
 }

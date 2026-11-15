@@ -79,6 +79,10 @@ class RemovalController : public QObject {
                    NOTIFY compareModeChanged)
     Q_PROPERTY(int splitPermille READ splitPermille
                    NOTIFY splitPermilleChanged)
+    // True from generateForExport() until the job succeeds/fails or the user
+    // cancels the export-driven generation.
+    Q_PROPERTY(bool exportGenerationPending READ exportGenerationPending
+                   NOTIFY exportGenerationPendingChanged)
 
 public:
     explicit RemovalController(ProjectDocument &document,
@@ -93,7 +97,7 @@ public:
     QString currentMaskHash() const;
     int maskRevision() const { return m_maskRevision; }
     QVariantList maskKeyframes() const;
-    bool hasLayer() const { return m_hasLayer; }
+    bool hasLayer() const { return activeRemovalLayer() != nullptr; }
     bool layerEnabled() const { return m_layerEnabled; }
     QString error() const { return m_error; }
     bool boxMode() const { return m_boxMode; }
@@ -120,6 +124,7 @@ public:
     int stabilizationStrength() const;
     QString compareMode() const { return m_compareMode; }
     int splitPermille() const { return m_splitPermille; }
+    bool exportGenerationPending() const { return m_exportGenerationPending; }
 
     // Injected by AppController: Preview.positionMs * 1000 in timeline mode,
     // with the timeline playhead as the authoritative fallback. Tests inject a
@@ -131,6 +136,9 @@ public:
     // Selected clip id provider so export-driven generation and the confidence
     // strip work without entering mask mode first.
     void setSelectedClipProvider(std::function<QString()> provider);
+    // Forwards compare mode/split to the preview renderer. AppController wires
+    // this to PreviewController::setRemovalCompareMode; tests capture it.
+    void setCompareSink(std::function<void(const QString &, int)> sink);
     // Not owned: QQmlEngine::addImageProvider takes ownership.
     void setMaskImageProvider(MaskImageProvider *provider);
     MaskImageProvider *maskImageProvider() const { return m_provider; }
@@ -176,6 +184,11 @@ public:
     // Receives ExportController::removalGenerationRequired so the panel can
     // explain a blocked export even before the user opens the prompt.
     Q_INVOKABLE void setExportRequiredMessage(const QString &message);
+    // Cancels the export-driven generation and disarms the post-success
+    // export start (used when the export dialog closes mid-generation).
+    Q_INVOKABLE void cancelExportGeneration();
+    // Re-emits analysis-derived signals when the timeline selection changes.
+    void notifySelectionChanged();
 
     // Test/timeline-delegate entry points. sourceTimeUs is relative to the
     // clip's source media, not the timeline.
@@ -205,6 +218,7 @@ signals:
     void advancedOpenChanged();
     void compareModeChanged();
     void splitPermilleChanged();
+    void exportGenerationPendingChanged();
     // Emitted after a generation started via generateForExport() succeeds.
     void generationFinishedForExport();
 
@@ -261,7 +275,8 @@ private:
     void applyLayerUpdate(const RemovalLayer &after, const QString &text);
     bool updateParameters(const std::function<void(RemovalParameters &)> &mutate,
                           const QString &text);
-    void updateLayerCacheKey(const QString &cacheKey, const QString &text);
+    void applyCompareMode();
+    void setExportGenerationPending(bool pending);
     QString mapStageText(const QString &stage) const;
     QString cacheStatusFor(const RemovalLayer *layer) const;
     void notifyAnalysisChanged();
@@ -279,6 +294,7 @@ private:
     std::function<qint64()> m_playheadProvider;
     std::function<void(qint64)> m_seekCallback;
     std::function<QString()> m_selectedClipProvider;
+    std::function<void(const QString &, int)> m_compareSink;
     WorkingState m_working;
     bool m_maskMode = false;
     QString m_activeClipId;
@@ -297,6 +313,7 @@ private:
     bool m_pendingExportAfter = false;
     bool m_generating = false;
     bool m_exportAfterGeneration = false;
+    bool m_exportGenerationPending = false;
     bool m_advancedOpen = false;
     QString m_compareMode = QStringLiteral("repair");
     int m_splitPermille = 500;

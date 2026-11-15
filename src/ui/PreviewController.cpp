@@ -335,10 +335,21 @@ void PreviewController::setRemovalCompareMode(const QString &mode,
                                               int splitPermille)
 {
     int value = 0; // RemovalCompareMode::Repair
-    if (mode == QStringLiteral("original"))
+    QString normalized = QStringLiteral("repair");
+    if (mode == QStringLiteral("original")) {
         value = 1;
-    else if (mode == QStringLiteral("split"))
+        normalized = QStringLiteral("original");
+    } else if (mode == QStringLiteral("split")) {
         value = 2;
+        normalized = QStringLiteral("split");
+    }
+    splitPermille = qBound(0, splitPermille, 1000);
+    if (normalized != m_removalCompareMode
+        || splitPermille != m_removalSplitPermille) {
+        m_removalCompareMode = normalized;
+        m_removalSplitPermille = splitPermille;
+        emit removalCompareModeChanged();
+    }
 
     if (m_timelineWorker) {
         QMetaObject::invokeMethod(m_timelineWorker, "setRemovalCompare",

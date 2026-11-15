@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include <QCryptographicHash>
+#include <QSet>
+#include <QStringList>
 
 #include "AssetFingerprint.h"
 
@@ -144,7 +146,8 @@ RemovalKeyInput RemovalPreflight::keyInputFor(const Project &project,
 RemovalPreflightResult RemovalPreflight::check(const Project &project,
                                                const RemovalCache &cache,
                                                const ModelRegistry &models,
-                                               bool modelsAlreadyVerified)
+                                               bool modelsAlreadyVerified,
+                                               bool technicalPreview)
 {
     RemovalPreflightResult result;
     // Cheap first pass: export dialogs call this on every setting change.
@@ -154,11 +157,45 @@ RemovalPreflightResult RemovalPreflight::check(const Project &project,
     if (targets.isEmpty())
         return result;
 
-    QString gateReason;
-    const bool enabled =
-        models.featureEnabled(&gateReason, !modelsAlreadyVerified);
-    if (!enabled)
-        return gateFailure(targets, gateReason);
+    if (technicalPreview) {
+        // The internal technical run intentionally ignores commercial approval
+        // and legal sign-off, but it still needs the roles the engine loads.
+        const AiModelRecord *tracking = models.defaultTrackingModel();
+        if (!tracking) {
+            return gateFailure(
+                targets,
+                QStringLiteral(
+                    "内部技术预览不可用：模型清单中没有可用的跟踪模型。"));
+        }
+        if (!modelsAlreadyVerified) {
+            QStringList verifyIds{tracking->id};
+            QSet<QString> seen{tracking->id};
+            for (const RemovalTarget &target : targets) {
+                if (!target.layer)
+                    continue;
+                const AiModelRecord *inpaint =
+                    models.preferredInpaintModel(target.layer->parameters.mode);
+                if (!inpaint || seen.contains(inpaint->id))
+                    continue;
+                seen.insert(inpaint->id);
+                verifyIds.append(inpaint->id);
+            }
+            QString verifyError;
+            if (!models.verifyFiles(verifyIds, &verifyError)) {
+                return gateFailure(
+                    targets,
+                    QStringLiteral(
+                        "内部技术预览不可用：模型文件缺失或校验失败（%1）。")
+                        .arg(verifyError));
+            }
+        }
+    } else {
+        QString gateReason;
+        const bool enabled =
+            models.featureEnabled(&gateReason, !modelsAlreadyVerified);
+        if (!enabled)
+            return gateFailure(targets, gateReason);
+    }
 
     QStringList messageLines;
     for (const RemovalTarget &target : targets) {

@@ -432,6 +432,70 @@ TEST(RemovalPreflight, ModelsAlreadyVerifiedSkipsModelFileHashing)
         << verified.issues.first().reason.toStdString();
 }
 
+TEST(RemovalPreflight, TechnicalPreviewBypassesApprovalButStillChecksCache)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+
+    ModelManifest manifest = approvedManifest();
+    manifest.commercialApproved = false;
+    manifest.legalSignOffBy.clear();
+    const ModelRegistry registry = ModelRegistry::forTest(manifest);
+
+    Project project;
+    RemovalLayer layer;
+    const QString key = projectWithRemovalLayer(registry, &project, &layer);
+    const RemovalKeyInput input = RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], layer, registry);
+    writeCompleteCache(dir.path(), key, input);
+    project.removalLayers[0].cacheKey = key;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+
+    const RemovalPreflightResult normal =
+        RemovalPreflight::check(project, cache, registry);
+    EXPECT_FALSE(normal.ok);
+    ASSERT_FALSE(normal.issues.isEmpty());
+    EXPECT_TRUE(normal.issues.first().reason.contains(
+        QStringLiteral("许可证")))
+        << normal.issues.first().reason.toStdString();
+
+    const RemovalPreflightResult technical =
+        RemovalPreflight::check(project, cache, registry, true, true);
+    EXPECT_TRUE(technical.ok) << technical.message.toStdString();
+    EXPECT_TRUE(technical.issues.isEmpty());
+}
+
+TEST(RemovalPreflight, TechnicalPreviewStillRequiresTheModeInpaintModel)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+
+    ModelManifest manifest = approvedManifest();
+    manifest.commercialApproved = false;
+    for (int i = manifest.models.size() - 1; i >= 0; --i) {
+        if (manifest.models[i].id
+            == QStringLiteral("lama-512-int8-allowzero0")) {
+            manifest.models.removeAt(i);
+        }
+    }
+    const ModelRegistry registry = ModelRegistry::forTest(manifest);
+
+    Project project;
+    RemovalLayer layer;
+    projectWithRemovalLayer(registry, &project, &layer);
+    project.removalLayers[0].parameters.mode = RepairMode::Quality;
+
+    const RemovalPreflightResult result =
+        RemovalPreflight::check(project, cache, registry, true, true);
+    EXPECT_FALSE(result.ok);
+    ASSERT_FALSE(result.issues.isEmpty());
+    EXPECT_TRUE(result.issues.first().reason.contains(
+        QStringLiteral("没有可用的修复模型")))
+        << result.issues.first().reason.toStdString();
+}
+
 TEST(RemovalPreflight, IncompleteTrackingBlocksButLowConfidenceOnlyWarns)
 {
     QTemporaryDir dir;

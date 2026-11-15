@@ -18,8 +18,13 @@ Dialog {
     closePolicy: Export.running ? Popup.NoAutoClose : Popup.CloseOnEscape
     // A start clicked while the async encoder probe was still running is
     // deferred; closing the dialog must abandon it instead of starting an
-    // export in the background.
-    onClosed: Export.cancelExport()
+    // export in the background. Closing while "先生成再导出" is running also
+    // cancels that generation so no export can start without a dialog.
+    onClosed: {
+        Export.cancelExport()
+        if (root.removal !== null && root.removal.exportGenerationPending)
+            root.removal.cancelExportGeneration()
+    }
 
     property bool advancedOpen: false
     // The Removal context property only exists when the app installs it.
@@ -35,6 +40,9 @@ Dialog {
     }
 
     function openDialog() {
+        // A prompt dismissed during a previous visit must reappear when the
+        // user reopens the dialog with the cache still missing.
+        root.removalPromptDismissed = false
         Export.refreshCapabilities()
         open()
     }

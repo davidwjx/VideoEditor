@@ -32,7 +32,7 @@ namespace {
 
 class FakeTransport : public AiTransport {
 public:
-    enum class Mode { Complete, Silent, Error };
+    enum class Mode { Complete, Silent, Error, ProgressHold };
 
     explicit FakeTransport(Mode mode, AiJobSpec *captured)
         : m_mode(mode)
@@ -46,7 +46,15 @@ public:
         m_spec = spec;
         if (m_captured)
             *m_captured = spec;
-        if (m_mode == Mode::Complete) {
+        if (m_mode == Mode::ProgressHold) {
+            QTimer::singleShot(0, this, [this] {
+                emit message(QJsonObject{
+                    {QStringLiteral("event"), QStringLiteral("progress")},
+                    {QStringLiteral("stage"), QStringLiteral("tracking")},
+                    {QStringLiteral("percent"), 42.0},
+                    {QStringLiteral("etaText"), QStringLiteral("10 秒")}});
+            });
+        } else if (m_mode == Mode::Complete) {
             QTimer::singleShot(0, this, [this] {
                 emit message(QJsonObject{
                     {QStringLiteral("event"), QStringLiteral("done")},
@@ -87,6 +95,17 @@ public:
 private:
     Mode m_mode;
     AiJobSpec *m_captured;
+};
+
+class RejectingTransport : public AiTransport {
+public:
+    bool start(const AiJobSpec &, QString *error) override
+    {
+        if (error)
+            *error = QStringLiteral("无法启动 AI 推理引擎。");
+        return false;
+    }
+    void cancel() override {}
 };
 
 ModelRegistry testRegistry(const QString &rootDir)
@@ -428,8 +447,11 @@ TEST(RemovalControllerProgress, GenerateCacheKeyMatchesPreflightPerMode)
 {
     for (const RepairMode mode : {RepairMode::Fast, RepairMode::Quality}) {
         Harness harness;
+        harness.mode = FakeTransport::Mode::Complete;
         Project project = projectWithRemovalLayer();
         project.removalLayers[0].parameters.mode = mode;
+        project.removalLayers[0].cacheKey.clear();
+        project.removalLayers[0].cachePath.clear();
         harness.doc.setProject(project);
 
         const Project &stored = harness.doc.project();
@@ -439,14 +461,19 @@ TEST(RemovalControllerProgress, GenerateCacheKeyMatchesPreflightPerMode)
                 *harness.gate.registry()));
 
         harness.controller.beginMask(QStringLiteral("clip-1"));
+        const int undoBefore = harness.doc.undoStack()->index();
         ASSERT_TRUE(harness.controller.generate());
+        // A job start must not mutate the project; the completion command writes
+        // the key exactly once.
+        EXPECT_TRUE(harness.doc.project().removalLayers[0].cacheKey.isEmpty());
+        EXPECT_EQ(harness.doc.undoStack()->index(), undoBefore);
         EXPECT_EQ(harness.captured.cacheKey, expected);
+
+        QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
         EXPECT_EQ(harness.doc.project().removalLayers[0].cacheKey, expected);
         EXPECT_EQ(harness.doc.project().removalLayers[0].cachePath,
                   QStringLiteral("removal/") + expected);
-
-        harness.controller.cancel();
-        QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+        EXPECT_EQ(harness.doc.undoStack()->index(), undoBefore + 1);
     }
 }
 
@@ -486,4 +513,242 @@ TEST(RemovalControllerProgress, AdvancedParameterChangesClearStaleKey)
     index = harness.doc.undoStack()->index();
     harness.controller.setStabilizationStrength(100);
     EXPECT_EQ(harness.doc.undoStack()->index(), index);
+}
+
+TEST(RemovalControllerProgress, ProgressStageAndEtaAreForwardedAndCancelWorks)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::ProgressHold;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    ASSERT_TRUE(harness.controller.generate()) << harness.controller.error().toStdString();
+
+    QTRY_VERIFY_WITH_TIMEOUT(harness.controller.progress() > 41.0, 2000);
+    EXPECT_EQ(harness.controller.stageText(), QStringLiteral("正在跟踪遮罩"));
+    EXPECT_EQ(harness.controller.etaText(), QStringLiteral("10 秒"));
+
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+    EXPECT_FALSE(harness.controller.generating());
+    EXPECT_TRUE(harness.controller.error().contains(QStringLiteral("已取消")));
+}
+
+TEST(RemovalControllerProgress, ErrorResultMarksFailedAndUsesMappedMessage)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::Error;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    ASSERT_TRUE(harness.controller.generate());
+
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+    const RemovalLayer &layer = harness.doc.project().removalLayers.first();
+    EXPECT_EQ(layer.trackingState, RemovalTrackingState::Failed);
+    EXPECT_TRUE(harness.controller.error().contains(QStringLiteral("显存不足")));
+    EXPECT_FALSE(harness.controller.generating());
+}
+
+TEST(RemovalControllerProgress, CompareSinkReceivesInitialAndChangedValues)
+{
+    Harness harness;
+    harness.doc.setProject(projectWithRemovalLayer());
+
+    QString mode;
+    int split = -1;
+    harness.controller.setCompareSink(
+        [&mode, &split](const QString &value, int permille) {
+            mode = value;
+            split = permille;
+        });
+    EXPECT_EQ(mode, QStringLiteral("repair"));
+    EXPECT_EQ(split, 500);
+
+    harness.controller.setCompareMode(QStringLiteral("split"));
+    EXPECT_EQ(mode, QStringLiteral("split"));
+    harness.controller.setSplitPermille(250);
+    EXPECT_EQ(split, 250);
+}
+
+TEST(RemovalControllerProgress, ExportGenerationPendingIsCancelledCleanly)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::Silent;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    QSignalSpy exportSpy(&harness.controller,
+                         &RemovalController::generationFinishedForExport);
+
+    harness.controller.generateForExport();
+    EXPECT_TRUE(harness.controller.exportGenerationPending());
+    EXPECT_TRUE(harness.controller.generating());
+
+    harness.controller.cancelExportGeneration();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+    EXPECT_FALSE(harness.controller.exportGenerationPending());
+    EXPECT_EQ(exportSpy.count(), 0);
+    EXPECT_FALSE(harness.controller.generating());
+}
+
+TEST(RemovalControllerProgress, ExportGenerationSuccessEmitsOnce)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::Complete;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    QSignalSpy exportSpy(&harness.controller,
+                         &RemovalController::generationFinishedForExport);
+
+    harness.controller.generateForExport();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+    EXPECT_EQ(exportSpy.count(), 1);
+    EXPECT_FALSE(harness.controller.exportGenerationPending());
+}
+
+TEST(RemovalControllerProgress, StartFailureLeavesLayerAndUndoUntouched)
+{
+    Harness harness;
+    Project project = projectWithRemovalLayer();
+    project.removalLayers[0].cacheKey = QString(64, QLatin1Char('d'));
+    project.removalLayers[0].cachePath = QStringLiteral("removal/")
+                                         + project.removalLayers[0].cacheKey;
+    harness.doc.setProject(project);
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    const int undoBefore = harness.doc.undoStack()->index();
+
+    harness.manager.setTransportFactoryForTest([] {
+        return std::unique_ptr<AiTransport>(new RejectingTransport);
+    });
+    EXPECT_FALSE(harness.controller.generate());
+    EXPECT_TRUE(harness.controller.error().contains(QStringLiteral("无法启动")));
+    EXPECT_EQ(harness.doc.project().removalLayers[0].cacheKey,
+              QString(64, QLatin1Char('d')));
+    EXPECT_EQ(harness.doc.undoStack()->index(), undoBefore);
+    EXPECT_FALSE(harness.controller.generating());
+}
+
+TEST(RemovalControllerProgress, AdvancedEditsAreIgnoredWhileGenerating)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::Silent;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    const int undoBefore = harness.doc.undoStack()->index();
+    ASSERT_TRUE(harness.controller.generate());
+
+    harness.controller.setAdvancedMode(QStringLiteral("quality"));
+    EXPECT_TRUE(harness.controller.error().contains(QStringLiteral("运行中")));
+    EXPECT_EQ(harness.doc.project().removalLayers[0].parameters.mode,
+              RepairMode::Fast);
+    EXPECT_EQ(harness.doc.undoStack()->index(), undoBefore);
+
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+}
+
+TEST(RemovalControllerProgress, RedoWhileRunningKeepsEveryChunk)
+{
+    Harness harness;
+    Project project = projectWithRemovalLayer();
+    const QString key = computeRemovalCacheKey(RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], project.removalLayers[0],
+        *harness.gate.registry()));
+    RemovalCacheManifest manifest = makeManifest(
+        key, QStringLiteral("complete"), {0, 1, 2, 3, 4}, 150);
+    QString error;
+    ASSERT_TRUE(harness.cache.writeManifest(manifest, &error))
+        << error.toStdString();
+    for (int index = 0; index < 5; ++index)
+        makeChunkDir(harness.cache, key, index);
+    project.removalLayers[0].cacheKey = key;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+    harness.doc.setProject(project);
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+
+    harness.mode = FakeTransport::Mode::Silent;
+    ASSERT_TRUE(harness.controller.generate());
+    harness.controller.redoRange(frameUs(70), frameUs(80));
+    EXPECT_TRUE(harness.controller.error().contains(QStringLiteral("已有")));
+
+    const QString chunksRoot =
+        QDir(harness.cache.cacheDir(key)).filePath(QStringLiteral("chunks"));
+    for (int index = 0; index < 5; ++index) {
+        EXPECT_TRUE(QDir(QDir(chunksRoot)
+                             .filePath(QString::number(index)))
+                        .exists())
+            << index;
+    }
+    const auto survived = harness.cache.readManifest(key, &error);
+    ASSERT_TRUE(survived.has_value()) << error.toStdString();
+    EXPECT_EQ(survived->status, QStringLiteral("complete"));
+
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+}
+
+TEST(RemovalControllerProgress, RedoRangeClampsToLayerBounds)
+{
+    Harness harness;
+    Project project = projectWithRemovalLayer();
+    const QString key = computeRemovalCacheKey(RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], project.removalLayers[0],
+        *harness.gate.registry()));
+    RemovalCacheManifest manifest = makeManifest(
+        key, QStringLiteral("complete"), {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, 300);
+    QString error;
+    ASSERT_TRUE(harness.cache.writeManifest(manifest, &error))
+        << error.toStdString();
+    project.removalLayers[0].cacheKey = key;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+    harness.doc.setProject(project);
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+
+    harness.controller.redoRange(-5'000'000, 20'000'000);
+    EXPECT_EQ(harness.captured.redoFirstFrame, 0);
+    EXPECT_EQ(harness.captured.redoLastFrame, 299);
+
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+}
+
+TEST(RemovalControllerProgress, ConfidenceMappingHonoursNonUnitSpeed)
+{
+    QTemporaryDir dir;
+    ProjectDocument doc;
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    QString trackingHash;
+    {
+        QJsonArray frames{
+            QJsonObject{{QStringLiteral("timeUs"), 0},
+                        {QStringLiteral("state"), QStringLiteral("good")}},
+            QJsonObject{{QStringLiteral("timeUs"), 1'000'000},
+                        {QStringLiteral("state"), QStringLiteral("low")}}};
+        ASSERT_TRUE(sidecars.writeTracking(
+            QJsonObject{{QStringLiteral("frames"), frames}}, &trackingHash,
+            nullptr));
+    }
+    AiFeatureGate gate;
+    gate.setRegistryForTest(testRegistry(dir.path()));
+    gate.setEnabledForTest(true);
+    AiJobManager manager(gate);
+    RemovalController controller(doc, sidecars);
+    controller.setJobManager(&manager);
+    controller.setFeatureGate(&gate);
+
+    Project project = projectWithRemovalLayer(trackingHash);
+    project.tracks[0].clips[0].timelineStartUs = 1'000'000;
+    project.tracks[0].clips[0].speedMilli = 2000; // 2x: 1 s source = 0.5 s timeline
+    doc.setProject(project);
+    controller.beginMask(QStringLiteral("clip-1"));
+
+    const QVariantList band = controller.confidenceBand();
+    ASSERT_EQ(band.size(), 2);
+    EXPECT_EQ(band[1].toMap().value(QStringLiteral("timelineUs")).toLongLong(),
+              1'500'000);
+
+    qint64 sought = -1;
+    controller.setSeekCallback([&sought](qint64 timelineUs) {
+        sought = timelineUs;
+    });
+    controller.jumpToConfidence(1);
+    EXPECT_EQ(sought, 1'500'000);
 }

@@ -194,7 +194,8 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         // hash them again on every export-dialog edit.
         return RemovalPreflight::check(
             project, *m_removalCache, *registry,
-            m_aiGate && m_aiGate->enabled());
+            m_aiGate && m_aiGate->enabled(),
+            m_aiGate && m_aiGate->technicalPreview());
     });
     // The preflight result depends on the document; a cache hit must not
     // survive an edit. `changed` covers every command (including removal layer
@@ -232,6 +233,12 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     m_removal->setSelectedClipProvider([this] {
         return m_timeline ? m_timeline->selectedClipId() : QString();
     });
+    // Compare/split must reach the renderer; the preview method invalidates and
+    // re-requests the current frame.
+    m_removal->setCompareSink([this](const QString &mode, int splitPermille) {
+        if (m_preview)
+            m_preview->setRemovalCompareMode(mode, splitPermille);
+    });
     connect(m_document, &ProjectDocument::projectReplaced, this, [this] {
         m_maskSidecars->setProjectPath(m_document->filePath(),
                                        m_sidecarFallback);
@@ -240,6 +247,9 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     // the masked clip. Leaving mask mode active would let the transparent
     // overlay keep swallowing preview clicks with no visible exit control.
     connect(m_timeline, &TimelineController::selectionChanged, this, [this] {
+        // The selected clip can satisfy activeRemovalLayer()/hasLayer() without
+        // mask mode, so refresh the analysis bindings for every selection.
+        m_removal->notifySelectionChanged();
         if (!m_removal->maskMode())
             return;
         const QString selected = m_timeline->selectedClipId();

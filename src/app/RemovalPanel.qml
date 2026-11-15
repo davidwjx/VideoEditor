@@ -106,7 +106,9 @@ ColumnLayout {
     // ------------------------------------------------------------------
     ConfidenceBand {
         objectName: "removal-confidence-band"
-        visible: root.removal !== null && root.active
+        // Confidence data belongs to the layer, not to mask mode; keep it
+        // visible whenever the selected clip has a removal layer.
+        visible: root.removal !== null && root.removal.hasLayer
         Layout.fillWidth: true
     }
 
@@ -412,6 +414,17 @@ ColumnLayout {
         }
 
         Button {
+            objectName: "removal-redo-button"
+            Layout.fillWidth: true
+            text: "从此关键帧重做"
+            enabled: root.ready && root.removal.hasLayer
+                     && root.hasKeyframes && !root.removal.generating
+            onClicked: root.removal.repropagateFromCurrentKeyframe()
+            ToolTip.visible: hovered
+            ToolTip.text: "从当前播放头附近的关键帧重新跟踪并修复到层结尾"
+        }
+
+        Button {
             objectName: "removal-delete-layer"
             Layout.fillWidth: true
             text: "删除消除层"
@@ -444,6 +457,7 @@ ColumnLayout {
                 id: modeCombo
                 objectName: "removal-advanced-mode"
                 Layout.fillWidth: true
+                enabled: root.removal !== null && !root.removal.generating
                 model: [
                     { text: "快速（MI-GAN）", value: "fast" },
                     { text: "高质量（LaMa）", value: "quality" }
@@ -474,6 +488,7 @@ ColumnLayout {
                 id: heightCombo
                 objectName: "removal-advanced-height"
                 Layout.fillWidth: true
+                enabled: root.removal !== null && !root.removal.generating
                 model: ["540p", "720p", "1080p"]
                 function syncHeight() {
                     if (root.removal === null)
@@ -500,6 +515,7 @@ ColumnLayout {
                 id: stabilizationCombo
                 objectName: "removal-advanced-stabilization"
                 Layout.fillWidth: true
+                enabled: root.removal !== null && !root.removal.generating
                 model: ["关", "弱", "标准", "强"]
                 function syncStabilization() {
                     if (root.removal === null)

@@ -103,6 +103,25 @@ void RemovalController::setSelectedClipProvider(
     m_selectedClipProvider = std::move(provider);
 }
 
+void RemovalController::setCompareSink(
+    std::function<void(const QString &, int)> sink)
+{
+    m_compareSink = std::move(sink);
+    applyCompareMode();
+}
+
+void RemovalController::applyCompareMode()
+{
+    if (m_compareSink)
+        m_compareSink(m_compareMode, m_splitPermille);
+}
+
+void RemovalController::notifySelectionChanged()
+{
+    emit layerChanged();
+    notifyAnalysisChanged();
+}
+
 void RemovalController::setMaskImageProvider(MaskImageProvider *provider)
 {
     m_provider = provider;
@@ -229,12 +248,9 @@ bool RemovalController::track()
     }
 
     // The tracking cacheDir is derived from the same key generation will use,
-    // so tracking intermediates and repair chunks share one directory.
-    if (layer->cacheKey != spec.cacheKey
-        || layer->cachePath != QStringLiteral("removal/") + spec.cacheKey) {
-        updateLayerCacheKey(spec.cacheKey, QStringLiteral("AI 跟踪准备"));
-    }
-
+    // so tracking intermediates and repair chunks share one directory. The
+    // layer key is written only in the single completion command; a failed
+    // start leaves the project untouched.
     m_pendingLayerId = layer->id;
     if (!startPendingJob(PendingJobKind::Track, spec, &error)) {
         setError(error);
@@ -264,13 +280,9 @@ bool RemovalController::generate()
         return false;
     }
 
-    // Export preflight and generation must use exactly the same key. Persist it
-    // before starting so a blocked export can offer the right cache key.
-    if (layer->cacheKey != spec.cacheKey
-        || layer->cachePath != QStringLiteral("removal/") + spec.cacheKey) {
-        updateLayerCacheKey(spec.cacheKey, QStringLiteral("AI 修复准备"));
-    }
-
+    // Export preflight and generation use the same computed key. The layer is
+    // updated exactly once when the job finishes (success, cancel or error),
+    // so a failed start cannot leave a half-applied project command.
     m_pendingLayerId = layer->id;
     if (!startPendingJob(PendingJobKind::Generate, spec, &error)) {
         setError(error);
@@ -282,8 +294,28 @@ bool RemovalController::generate()
 void RemovalController::generateForExport()
 {
     m_exportAfterGeneration = true;
-    if (!generate())
+    if (!generate()) {
         m_exportAfterGeneration = false;
+        setExportGenerationPending(false);
+        return;
+    }
+    setExportGenerationPending(true);
+}
+
+void RemovalController::cancelExportGeneration()
+{
+    m_exportAfterGeneration = false;
+    setExportGenerationPending(false);
+    if (m_generating)
+        cancel();
+}
+
+void RemovalController::setExportGenerationPending(bool pending)
+{
+    if (pending == m_exportGenerationPending)
+        return;
+    m_exportGenerationPending = pending;
+    emit exportGenerationPendingChanged();
 }
 
 void RemovalController::setExportRequiredMessage(const QString &message)
@@ -335,6 +367,10 @@ void RemovalController::redoRange(qint64 sourceStartUs, qint64 sourceEndUs)
     QString error;
     if (!prepareForJob(&error)) {
         setError(error);
+        return;
+    }
+    if (m_jobManager && m_jobManager->running()) {
+        setError(QStringLiteral("已有 AI 任务在运行。"));
         return;
     }
     const RemovalLayer *layer = activeRemovalLayer();
@@ -395,6 +431,7 @@ void RemovalController::setCompareMode(const QString &mode)
         return;
     m_compareMode = value;
     emit compareModeChanged();
+    applyCompareMode();
 }
 
 void RemovalController::setSplitPermille(int permille)
@@ -404,10 +441,15 @@ void RemovalController::setSplitPermille(int permille)
         return;
     m_splitPermille = bounded;
     emit splitPermilleChanged();
+    applyCompareMode();
 }
 
 void RemovalController::setAdvancedMode(const QString &mode)
 {
+    if (m_generating || (m_jobManager && m_jobManager->running())) {
+        setError(QStringLiteral("AI 任务运行中，暂时无法修改高级设置。"));
+        return;
+    }
     bool ok = false;
     const RepairMode parsed = repairModeFromString(mode, &ok);
     if (!ok)
@@ -419,6 +461,10 @@ void RemovalController::setAdvancedMode(const QString &mode)
 
 void RemovalController::setStabilizationStrength(int strength)
 {
+    if (m_generating || (m_jobManager && m_jobManager->running())) {
+        setError(QStringLiteral("AI 任务运行中，暂时无法修改高级设置。"));
+        return;
+    }
     const int bounded = qBound(0, strength, 100);
     updateParameters([bounded](RemovalParameters &parameters) {
         parameters.stabilizationStrength = bounded;
@@ -428,6 +474,10 @@ void RemovalController::setStabilizationStrength(int strength)
 
 void RemovalController::setProcessingHeight(int height)
 {
+    if (m_generating || (m_jobManager && m_jobManager->running())) {
+        setError(QStringLiteral("AI 任务运行中，暂时无法修改高级设置。"));
+        return;
+    }
     const int bounded = qBound(144, height, 2160);
     updateParameters([this, bounded](RemovalParameters &parameters) {
         parameters.processingHeight = bounded;
@@ -1333,6 +1383,7 @@ void RemovalController::handleJobFinished(const AiJobResult &result)
     m_pendingExportAfter = false;
     m_generating = false;
     m_exportAfterGeneration = false;
+    setExportGenerationPending(false);
     emit generatingChanged();
     emit pausedChanged();
     emit progressChanged();
@@ -1347,7 +1398,9 @@ void RemovalController::handleJobFinished(const AiJobResult &result)
     }
 
     RemovalLayer after = *layer;
-    if (!wasTracking && !result.cacheKey.isEmpty()) {
+    // Tracking-only jobs also own the same content-addressed directory, so the
+    // single completion command records the key/state for every outcome.
+    if (!result.cacheKey.isEmpty()) {
         after.cacheKey = result.cacheKey;
         after.cachePath = QStringLiteral("removal/") + result.cacheKey;
     }
@@ -1437,22 +1490,6 @@ bool RemovalController::updateParameters(
     after.cachePath.clear();
     applyLayerUpdate(after, text);
     return true;
-}
-
-void RemovalController::updateLayerCacheKey(const QString &cacheKey,
-                                            const QString &text)
-{
-    const RemovalLayer *layer = activeRemovalLayer();
-    if (!layer || cacheKey.isEmpty())
-        return;
-    const QString cachePath = QStringLiteral("removal/") + cacheKey;
-    if (layer->cacheKey == cacheKey && layer->cachePath == cachePath)
-        return;
-    RemovalLayer after = *layer;
-    after.cacheKey = cacheKey;
-    after.cachePath = cachePath;
-    after.revision += 1;
-    applyLayerUpdate(after, text);
 }
 
 QString RemovalController::mapStageText(const QString &stage) const

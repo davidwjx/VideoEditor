@@ -31,6 +31,11 @@ class PreviewController : public QObject {
     Q_PROPERTY(bool timelineMode READ timelineMode NOTIFY mediaChanged)
     Q_PROPERTY(qint64 durationUs READ durationUs NOTIFY durationChanged)
     Q_PROPERTY(bool useProxy READ useProxy NOTIFY useProxyChanged)
+    // Observable removal compare state, also driven by RemovalController.
+    Q_PROPERTY(QString removalCompareMode READ removalCompareMode
+                   NOTIFY removalCompareModeChanged)
+    Q_PROPERTY(int removalSplitPermille READ removalSplitPermille
+                   NOTIFY removalCompareModeChanged)
 
 public:
     enum class Mode { Asset, Timeline };
@@ -50,6 +55,8 @@ public:
     QString decodeMode() const { return m_decodeMode; }
     QString mediaName() const { return m_mediaName; }
     bool useProxy() const { return m_useProxy; }
+    QString removalCompareMode() const { return m_removalCompareMode; }
+    int removalSplitPermille() const { return m_removalSplitPermille; }
 
     Mode mode() const { return m_mode; }
     bool timelineMode() const { return m_mode == Mode::Timeline; }
@@ -95,6 +102,7 @@ signals:
     void decodeModeChanged();
     void mediaChanged();
     void useProxyChanged();
+    void removalCompareModeChanged();
     void framePresented(qint64 ptsUs);
     // Emitted after a timeline-composited frame has been presented by the
     // scene graph, for self-tests and performance gates.
@@ -155,6 +163,8 @@ private:
     int64_t m_playStartUs = 0;
     bool m_useProxy = true;
     QString m_removalCacheRoot;
+    QString m_removalCompareMode = QStringLiteral("repair");
+    int m_removalSplitPermille = 500;
     int64_t m_lastTimelineFrame = -1;
     qint64 m_lastTimelineSubmittedUs = -1;
     int m_lastTimelineLayerCount = 0;
