@@ -24,6 +24,8 @@ qt_add_qml_module(VideoEditor
     InspectorPanel.qml
     SubtitlePanel.qml
     RemovalPanel.qml
+    ConfidenceBand.qml
+    JobProgressPanel.qml
     MaskEditorOverlay.qml
     ExportDialog.qml
 )

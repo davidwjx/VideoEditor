@@ -66,6 +66,7 @@ add_executable(ui_tests
   ui/TimelineModelTest.cpp
   ui/TimelineControllerTest.cpp
   ui/RemovalControllerTest.cpp
+  ui/RemovalControllerProgressTest.cpp
   ui/WaveformImageProviderTest.cpp
   ui/ExportControllerTest.cpp
   TestGuiMain.cpp)
@@ -130,6 +131,7 @@ add_executable(app_tests
   app/AppControllerTest.cpp
   app/TimelineUiTest.cpp
   app/TimelineIntegrationTest.cpp
+  app/RemovalTechnicalE2ETest.cpp
   TestMain.cpp)
 target_include_directories(app_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(app_tests PRIVATE videoeditor_app GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
@@ -180,7 +182,10 @@ gtest_discover_tests(ai_tests PROPERTIES
 # Loads Main.qml from the source tree and drives a real click/drag through the
 # Qt Quick event delivery path, so Flickable/MouseArea interaction regressions
 # (such as a stolen drag) fail here instead of only in manual UAT.
-add_executable(app_qml_tests app/TimelineQmlTest.cpp TestGuiMain.cpp)
+add_executable(app_qml_tests
+  app/TimelineQmlTest.cpp
+  app/RemovalQmlTest.cpp
+  TestGuiMain.cpp)
 target_link_libraries(app_qml_tests PRIVATE
   videoeditor_app GTest::gtest
   Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml Qt6::Test)
@@ -190,6 +195,13 @@ target_compile_definitions(app_qml_tests PRIVATE
 add_test(NAME TimelineQml
          COMMAND app_qml_tests --gtest_filter=TimelineQml.*)
 set_tests_properties(TimelineQml PROPERTIES
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  LABELS "gpu"
+  TIMEOUT 60)
+add_test(NAME RemovalQml
+         COMMAND app_qml_tests --gtest_filter=RemovalQml.*)
+set_tests_properties(RemovalQml PROPERTIES
   ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
   ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
   LABELS "gpu"

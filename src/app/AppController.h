@@ -43,6 +43,12 @@ class AppController : public QObject {
     // Number of open menus/popups. Main.qml uses it to disable the
     // window-scoped editing shortcuts while a popup owns the keyboard.
     Q_PROPERTY(int openPopupCount READ openPopupCount NOTIFY openPopupCountChanged)
+    // Internal technical preview state. RemovalPanel shows the persistent
+    // disclaimer; the normal release gate keeps both false.
+    Q_PROPERTY(bool aiFeatureEnabled READ aiFeatureEnabled CONSTANT)
+    Q_PROPERTY(bool aiTechnicalPreview READ aiTechnicalPreview CONSTANT)
+    Q_PROPERTY(QString aiFeatureDisabledReason READ aiFeatureDisabledReason
+                   CONSTANT)
 
 public:
     // The optional sink factory lets tests replace the WASAPI device before
@@ -68,6 +74,9 @@ public:
     bool useProxy() const { return m_useProxy; }
     void setUseProxy(bool enabled);
     int openPopupCount() const { return m_openPopupCount; }
+    bool aiFeatureEnabled() const;
+    bool aiTechnicalPreview() const;
+    QString aiFeatureDisabledReason() const;
     // Popups live in several QML components; each one pairs these calls from
     // its opened/closed handlers so the shortcut gate sees every menu.
     Q_INVOKABLE void beginPopup();

@@ -1,9 +1,13 @@
 #include "RemovalController.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <utility>
 
+#include <QDir>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QPoint>
 #include <QRect>
 #include <QUuid>
@@ -12,9 +16,14 @@
 
 #include "AiFeatureGate.h"
 #include "AiJobManager.h"
+#include "AiProtocol.h"
 #include "MaskEditor.h"
 #include "MaskImageProvider.h"
+#include "ModelRegistry.h"
 #include "RemovalCache.h"
+#include "RemovalCacheKey.h"
+#include "RemovalErrors.h"
+#include "RemovalPreflight.h"
 
 namespace VideoEditor {
 
@@ -23,6 +32,22 @@ namespace {
 QString newId(const QString &prefix)
 {
     return prefix + QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+QString confidenceColorFor(const QString &state)
+{
+    if (state == QLatin1String("good"))
+        return QStringLiteral("#4CAF50");
+    if (state == QLatin1String("fair"))
+        return QStringLiteral("#FFC107");
+    if (state == QLatin1String("low"))
+        return QStringLiteral("#F44336");
+    return QStringLiteral("#9E9E9E");
+}
+
+bool isLowConfidenceState(const QString &state)
+{
+    return state == QLatin1String("low") || state == QLatin1String("missing");
 }
 
 bool readMask(const MaskSidecarStore &sidecars, const QString &hash,
@@ -56,11 +81,26 @@ RemovalController::RemovalController(ProjectDocument &document,
     // notify independently of refreshFromDocument's editor-state early return.
     connect(&m_document, &ProjectDocument::removalLayersChanged, this,
             &RemovalController::layerChanged);
+    connect(&m_document, &ProjectDocument::removalLayersChanged, this,
+            [this] { notifyAnalysisChanged(); });
+    connect(&m_document, &ProjectDocument::projectReplaced, this,
+            [this] { notifyAnalysisChanged(); });
 }
 
 void RemovalController::setPlayheadProvider(std::function<qint64()> provider)
 {
     m_playheadProvider = std::move(provider);
+}
+
+void RemovalController::setSeekCallback(std::function<void(qint64)> callback)
+{
+    m_seekCallback = std::move(callback);
+}
+
+void RemovalController::setSelectedClipProvider(
+    std::function<QString()> provider)
+{
+    m_selectedClipProvider = std::move(provider);
 }
 
 void RemovalController::setMaskImageProvider(MaskImageProvider *provider)
@@ -72,49 +112,339 @@ void RemovalController::setMaskImageProvider(MaskImageProvider *provider)
 
 void RemovalController::setJobManager(AiJobManager *manager)
 {
+    if (m_jobManager == manager)
+        return;
+    if (m_jobManager)
+        QObject::disconnect(m_jobManager, nullptr, this, nullptr);
     m_jobManager = manager;
+    if (!m_jobManager)
+        return;
+    connect(m_jobManager, &AiJobManager::progressChanged, this,
+            &RemovalController::progressChanged);
+    connect(m_jobManager, &AiJobManager::pausedChanged, this,
+            &RemovalController::pausedChanged);
+    connect(m_jobManager, &AiJobManager::stageTextChanged, this,
+            &RemovalController::stageTextChanged);
+    connect(m_jobManager, &AiJobManager::etaTextChanged, this,
+            &RemovalController::etaTextChanged);
+    connect(m_jobManager, &AiJobManager::jobFinished, this,
+            &RemovalController::handleJobFinished);
 }
 
 void RemovalController::setCache(RemovalCache *cache)
 {
     m_cache = cache;
+    emit cacheStatusChanged();
 }
 
 void RemovalController::setFeatureGate(AiFeatureGate *gate)
 {
     m_featureGate = gate;
+    emit featureEnabledChanged();
+    emit cacheStatusChanged();
+}
+
+bool RemovalController::featureEnabled() const
+{
+    return m_featureGate && m_featureGate->enabled();
+}
+
+QString RemovalController::featureDisabledReason() const
+{
+    if (!m_featureGate)
+        return QStringLiteral("AI 消除功能未启用：未加载模型清单。");
+    return m_featureGate->disabledReason();
+}
+
+bool RemovalController::technicalPreview() const
+{
+    return m_featureGate && m_featureGate->technicalPreview();
+}
+
+bool RemovalController::paused() const
+{
+    return m_jobManager && m_jobManager->paused();
+}
+
+double RemovalController::progress() const
+{
+    return m_jobManager ? m_jobManager->progress() : 0.0;
+}
+
+QString RemovalController::stageText() const
+{
+    return m_jobManager ? mapStageText(m_jobManager->stageText()) : QString();
+}
+
+QString RemovalController::etaText() const
+{
+    return m_jobManager ? m_jobManager->etaText() : QString();
+}
+
+void RemovalController::setAdvancedOpen(bool open)
+{
+    if (open == m_advancedOpen)
+        return;
+    m_advancedOpen = open;
+    emit advancedOpenChanged();
+}
+
+QString RemovalController::advancedMode() const
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    return repairModeToString(layer ? layer->parameters.mode : RepairMode::Fast);
+}
+
+int RemovalController::processingHeight() const
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    return layer ? layer->parameters.processingHeight : 1080;
+}
+
+int RemovalController::stabilizationStrength() const
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    return layer ? layer->parameters.stabilizationStrength : 50;
 }
 
 bool RemovalController::track()
 {
-    if (!m_jobManager) {
-        setError(QStringLiteral("AI 任务管理器未初始化。"));
+    clearError();
+    QString error;
+    if (!prepareForJob(&error)) {
+        setError(error);
         return false;
     }
-    // Task 8 builds the tracking AiJobSpec and listens for jobFinished.
-    setError(QStringLiteral("AI 消除任务尚未启用。"));
-    return false;
+    const RemovalLayer *layer = activeRemovalLayer();
+    const Clip *clip = layer ? findClip(layer->clipId) : nullptr;
+    if (!layer || !clip) {
+        setError(QStringLiteral("请先绘制消除遮罩。"));
+        return false;
+    }
+
+    AiJobSpec spec;
+    if (!buildJobSpec(PendingJobKind::Track, &spec, &error)) {
+        setError(error);
+        return false;
+    }
+
+    // The tracking cacheDir is derived from the same key generation will use,
+    // so tracking intermediates and repair chunks share one directory.
+    if (layer->cacheKey != spec.cacheKey
+        || layer->cachePath != QStringLiteral("removal/") + spec.cacheKey) {
+        updateLayerCacheKey(spec.cacheKey, QStringLiteral("AI 跟踪准备"));
+    }
+
+    m_pendingLayerId = layer->id;
+    if (!startPendingJob(PendingJobKind::Track, spec, &error)) {
+        setError(error);
+        return false;
+    }
+    return true;
 }
 
 bool RemovalController::generate()
 {
-    if (!m_jobManager) {
-        setError(QStringLiteral("AI 任务管理器未初始化。"));
+    clearError();
+    QString error;
+    if (!prepareForJob(&error)) {
+        setError(error);
         return false;
     }
-    // Task 8 builds the inpaint AiJobSpec and listens for jobFinished.
-    setError(QStringLiteral("AI 消除任务尚未启用。"));
-    return false;
+    const RemovalLayer *layer = activeRemovalLayer();
+    const Clip *clip = layer ? findClip(layer->clipId) : nullptr;
+    if (!layer || !clip) {
+        setError(QStringLiteral("请先绘制消除遮罩。"));
+        return false;
+    }
+
+    AiJobSpec spec;
+    if (!buildJobSpec(PendingJobKind::Generate, &spec, &error)) {
+        setError(error);
+        return false;
+    }
+
+    // Export preflight and generation must use exactly the same key. Persist it
+    // before starting so a blocked export can offer the right cache key.
+    if (layer->cacheKey != spec.cacheKey
+        || layer->cachePath != QStringLiteral("removal/") + spec.cacheKey) {
+        updateLayerCacheKey(spec.cacheKey, QStringLiteral("AI 修复准备"));
+    }
+
+    m_pendingLayerId = layer->id;
+    if (!startPendingJob(PendingJobKind::Generate, spec, &error)) {
+        setError(error);
+        return false;
+    }
+    return true;
 }
 
-void RemovalController::beginGenerateForExport(const QString &message)
+void RemovalController::generateForExport()
 {
-    // Task 8 wires the real job + retry-export flow. Until then the user still
-    // gets the preflight explanation instead of a silent no-op.
-    setError(message.isEmpty()
-                 ? QStringLiteral(
-                       "AI 修复结果缺失或已过期。请先生成修复，再导出。")
-                 : message);
+    m_exportAfterGeneration = true;
+    if (!generate())
+        m_exportAfterGeneration = false;
+}
+
+void RemovalController::setExportRequiredMessage(const QString &message)
+{
+    if (message.isEmpty())
+        return;
+    if (m_error.isEmpty())
+        setError(message);
+}
+
+void RemovalController::cancel()
+{
+    if (m_jobManager)
+        m_jobManager->cancel();
+}
+
+void RemovalController::pause()
+{
+    if (m_jobManager)
+        m_jobManager->pause();
+}
+
+void RemovalController::resume()
+{
+    if (m_jobManager)
+        m_jobManager->resume();
+}
+
+void RemovalController::repropagateFromCurrentKeyframe()
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    const Clip *clip = layer ? findClip(layer->clipId) : nullptr;
+    if (!layer || !clip || layer->maskKeyframes.isEmpty()) {
+        setError(QStringLiteral("请先添加遮罩关键帧。"));
+        return;
+    }
+    const qint64 sourceUs = sourceTimeAt(*clip, playheadUs());
+    const MaskKeyframe *keyframe = nearestKeyframe(*layer, sourceUs);
+    if (!keyframe) {
+        setError(QStringLiteral("请先添加遮罩关键帧。"));
+        return;
+    }
+    redoRange(keyframe->sourceTimeUs, layer->sourceOutUs);
+}
+
+void RemovalController::redoRange(qint64 sourceStartUs, qint64 sourceEndUs)
+{
+    clearError();
+    QString error;
+    if (!prepareForJob(&error)) {
+        setError(error);
+        return;
+    }
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer || !m_cache) {
+        setError(QStringLiteral("AI 缓存未初始化。"));
+        return;
+    }
+    if (layer->cacheKey.isEmpty()) {
+        setError(removalErrorMessage(QStringLiteral("cache_missing"), {}));
+        return;
+    }
+
+    int firstFrame = 0;
+    int lastFrame = 0;
+    if (!computeRedoFrames(*layer, sourceStartUs, sourceEndUs, &firstFrame,
+                           &lastFrame)) {
+        return;
+    }
+
+    AiJobSpec spec;
+    if (!buildJobSpec(PendingJobKind::Redo, &spec, &error)) {
+        setError(error);
+        return;
+    }
+    if (spec.cacheKey != layer->cacheKey) {
+        setError(removalErrorMessage(QStringLiteral("cache_missing"), {}));
+        return;
+    }
+
+    QString invalidateError;
+    if (!m_cache->invalidateFrameRange(layer->cacheKey, firstFrame, lastFrame,
+                                       &invalidateError)) {
+        setError(removalErrorMessage(QStringLiteral("cache_missing"),
+                                     invalidateError));
+        emit cacheStatusChanged();
+        return;
+    }
+    emit cacheStatusChanged();
+
+    spec.resume = true;
+    spec.redoFirstFrame = firstFrame;
+    spec.redoLastFrame = lastFrame;
+
+    m_pendingLayerId = layer->id;
+    if (!startPendingJob(PendingJobKind::Redo, spec, &error))
+        setError(error);
+}
+
+void RemovalController::setCompareMode(const QString &mode)
+{
+    const QString value = mode.trimmed().toLower();
+    if (value != QStringLiteral("original")
+        && value != QStringLiteral("repair")
+        && value != QStringLiteral("split")) {
+        return;
+    }
+    if (value == m_compareMode)
+        return;
+    m_compareMode = value;
+    emit compareModeChanged();
+}
+
+void RemovalController::setSplitPermille(int permille)
+{
+    const int bounded = qBound(0, permille, 1000);
+    if (bounded == m_splitPermille)
+        return;
+    m_splitPermille = bounded;
+    emit splitPermilleChanged();
+}
+
+void RemovalController::setAdvancedMode(const QString &mode)
+{
+    bool ok = false;
+    const RepairMode parsed = repairModeFromString(mode, &ok);
+    if (!ok)
+        return;
+    updateParameters([parsed](RemovalParameters &parameters) {
+        parameters.mode = parsed;
+    }, QStringLiteral("AI 修复模式"));
+}
+
+void RemovalController::setStabilizationStrength(int strength)
+{
+    const int bounded = qBound(0, strength, 100);
+    updateParameters([bounded](RemovalParameters &parameters) {
+        parameters.stabilizationStrength = bounded;
+        parameters.temporalStabilization = bounded > 0;
+    }, QStringLiteral("AI 时域稳定化"));
+}
+
+void RemovalController::setProcessingHeight(int height)
+{
+    const int bounded = qBound(144, height, 2160);
+    updateParameters([this, bounded](RemovalParameters &parameters) {
+        parameters.processingHeight = bounded;
+        int sourceWidth = 16;
+        int sourceHeight = 9;
+        if (const Clip *clip = activeClip()) {
+            const QSize display = displaySizeForClip(*clip);
+            if (display.isValid() && !display.isEmpty()) {
+                sourceWidth = display.width();
+                sourceHeight = display.height();
+            }
+        }
+        const int width = qBound(
+            1, qRound(qreal(bounded) * sourceWidth / qMax(1, sourceHeight)),
+            8192);
+        parameters.processingWidth = width;
+    }, QStringLiteral("AI 处理分辨率"));
 }
 
 void RemovalController::setBrushSize(int px)
@@ -161,7 +491,16 @@ const Clip *RemovalController::findClip(const QString &clipId) const
 
 const Clip *RemovalController::activeClip() const
 {
-    return m_activeClipId.isEmpty() ? nullptr : findClip(m_activeClipId);
+    if (!m_activeClipId.isEmpty())
+        return findClip(m_activeClipId);
+    // Export-driven generation and the confidence strip must work for the
+    // selected clip without requiring mask mode first.
+    if (m_selectedClipProvider) {
+        const QString clipId = m_selectedClipProvider();
+        if (!clipId.isEmpty())
+            return findClip(clipId);
+    }
+    return nullptr;
 }
 
 const Asset *RemovalController::assetForClip(const Clip &clip) const
@@ -329,6 +668,7 @@ void RemovalController::beginMask(const QString &clipId)
     emit activeClipChanged();
     emit layerChanged();
     emit featherChanged();
+    notifyAnalysisChanged();
     updateOverlay();
 }
 
@@ -808,6 +1148,468 @@ void RemovalController::refreshFromDocument()
 
     emit layerChanged();
     updateOverlay();
+}
+
+const RemovalLayer *RemovalController::activeRemovalLayer() const
+{
+    if (const RemovalLayer *layer = currentLayer())
+        return layer;
+    const Clip *clip = activeClip();
+    if (!clip || clip->removalLayerId.isEmpty())
+        return nullptr;
+    return m_document.removalLayerById(clip->removalLayerId);
+}
+
+const Asset *RemovalController::activeAsset() const
+{
+    const Clip *clip = activeClip();
+    return clip ? assetForClip(*clip) : nullptr;
+}
+
+bool RemovalController::prepareForJob(QString *error) const
+{
+    const auto fail = [error](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!m_jobManager)
+        return fail(QStringLiteral("AI 任务管理器未初始化。"));
+    if (!m_featureGate)
+        return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
+    if (!m_featureGate->enabled())
+        return fail(m_featureGate->disabledReason());
+    if (!m_cache)
+        return fail(QStringLiteral("AI 缓存未初始化。"));
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer)
+        return fail(QStringLiteral("请先绘制消除遮罩。"));
+    if (layer->maskKeyframes.isEmpty())
+        return fail(QStringLiteral("请先添加遮罩关键帧。"));
+    const Clip *clip = findClip(layer->clipId);
+    if (!clip)
+        return fail(QStringLiteral("未找到消除层对应的片段。"));
+    const Asset *asset = assetForClip(*clip);
+    if (!asset || !asset->info.hasVideo)
+        return fail(QStringLiteral("只能对视频片段使用 AI 消除。"));
+    if (m_sidecars.sidecarRoot().isEmpty())
+        return fail(QStringLiteral("无法确定工程旁车目录。"));
+    if (!m_featureGate->registry())
+        return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
+    if (layer->sourceOutUs <= layer->sourceInUs)
+        return fail(QStringLiteral("消除层的源区间无效。"));
+    return true;
+}
+
+QString RemovalController::cacheKeyFor(const Clip &clip,
+                                       const RemovalLayer &layer,
+                                       const ModelRegistry &models) const
+{
+    return computeRemovalCacheKey(
+        RemovalPreflight::keyInputFor(m_document.project(), clip, layer, models));
+}
+
+QString RemovalController::manifestPath() const
+{
+    if (!m_featureGate || !m_featureGate->registry())
+        return QString();
+    const ModelRegistry *registry = m_featureGate->registry();
+    if (!registry->manifestPath().isEmpty())
+        return registry->manifestPath();
+    return QDir(registry->rootDir())
+        .filePath(QStringLiteral("models.manifest.json"));
+}
+
+bool RemovalController::buildJobSpec(PendingJobKind kind, AiJobSpec *spec,
+                                     QString *error)
+{
+    const auto fail = [error](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    const RemovalLayer *layer = activeRemovalLayer();
+    const Clip *clip = layer ? findClip(layer->clipId) : nullptr;
+    const Asset *asset = clip ? assetForClip(*clip) : nullptr;
+    const ModelRegistry *registry =
+        m_featureGate ? m_featureGate->registry() : nullptr;
+    if (!layer || !clip || !asset || !registry)
+        return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
+
+    const AiModelRecord *tracking = registry->defaultTrackingModel();
+    if (!tracking)
+        return fail(QStringLiteral("没有可用的跟踪模型。"));
+    const AiModelRecord *inpaint =
+        kind == PendingJobKind::Track
+            ? nullptr
+            : registry->preferredInpaintModel(layer->parameters.mode);
+    if (kind != PendingJobKind::Track && !inpaint)
+        return fail(QStringLiteral("没有可用的修复模型。"));
+
+    const QString key = cacheKeyFor(*clip, *layer, *registry);
+    if (key.isEmpty())
+        return fail(QStringLiteral("无法计算 AI 修复缓存键。"));
+
+    spec->jobId = newId(QStringLiteral("ai-"));
+    spec->clipId = clip->id;
+    spec->assetPath = asset->path;
+    spec->sidecarRoot = m_sidecars.sidecarRoot();
+    spec->cacheDir = m_cache ? m_cache->cacheDir(key) : QString();
+    spec->cacheKey = key;
+    spec->modelsManifestPath = manifestPath();
+    spec->trackingModelId = tracking->id;
+    spec->inpaintModelId = inpaint ? inpaint->id : QString();
+    // Tracking-only runs must not require an inpaint model; their cacheDir
+    // still uses the same key so the later repair run reuses the directory.
+    spec->trackingOnly = kind == PendingJobKind::Track;
+    spec->sourceInUs = layer->sourceInUs;
+    spec->sourceOutUs = layer->sourceOutUs;
+
+    const QSize display = displaySizeForAsset(*asset);
+    spec->width = display.width() > 0 ? display.width() : 1920;
+    spec->height = display.height() > 0 ? display.height() : 1080;
+
+    const Rational assetFps = asset->info.frameRate;
+    spec->fps = assetFps.isValid() ? assetFps : m_document.project().timeline.fps;
+    if (!spec->fps.isValid())
+        spec->fps = Rational{30, 1};
+
+    spec->maskKeyframes = layer->maskKeyframes;
+    RemovalParameters parameters = layer->parameters;
+    if (parameters.processingWidth <= 0 || parameters.processingWidth > 8192)
+        parameters.processingWidth = spec->width;
+    if (parameters.processingHeight <= 0 || parameters.processingHeight > 8192)
+        parameters.processingHeight = spec->height;
+    parameters.stabilizationStrength =
+        qBound(0, parameters.stabilizationStrength, 100);
+    spec->parameters = parameters;
+
+    if (spec->cacheDir.isEmpty() || spec->modelsManifestPath.isEmpty())
+        return fail(QStringLiteral("AI 任务参数无效。"));
+    return true;
+}
+
+bool RemovalController::startPendingJob(PendingJobKind kind,
+                                        const AiJobSpec &spec, QString *error)
+{
+    if (!m_jobManager) {
+        if (error)
+            *error = QStringLiteral("AI 任务管理器未初始化。");
+        return false;
+    }
+    m_pendingKind = kind;
+    m_pendingCacheKey = spec.cacheKey;
+    m_pendingExportAfter = m_exportAfterGeneration;
+    QString startError;
+    if (!m_jobManager->start(spec, &startError)) {
+        m_pendingKind = PendingJobKind::None;
+        m_pendingLayerId.clear();
+        m_pendingExportAfter = false;
+        if (error)
+            *error = startError.isEmpty()
+                         ? QStringLiteral("AI 任务参数无效。")
+                         : startError;
+        return false;
+    }
+    m_generating = true;
+    emit generatingChanged();
+    emit pausedChanged();
+    emit progressChanged();
+    emit stageTextChanged();
+    emit etaTextChanged();
+    emit cacheStatusChanged();
+    return true;
+}
+
+void RemovalController::handleJobFinished(const AiJobResult &result)
+{
+    const PendingJobKind kind = m_pendingKind;
+    const QString layerId = m_pendingLayerId;
+    const bool exportAfter = m_pendingExportAfter;
+    const bool wasTracking = kind == PendingJobKind::Track;
+    m_pendingKind = PendingJobKind::None;
+    m_pendingLayerId.clear();
+    m_pendingCacheKey.clear();
+    m_pendingExportAfter = false;
+    m_generating = false;
+    m_exportAfterGeneration = false;
+    emit generatingChanged();
+    emit pausedChanged();
+    emit progressChanged();
+    emit stageTextChanged();
+
+    RemovalLayer *layer = layerId.isEmpty()
+                              ? nullptr
+                              : m_document.removalLayerById(layerId);
+    if (!layer) {
+        notifyAnalysisChanged();
+        return;
+    }
+
+    RemovalLayer after = *layer;
+    if (!wasTracking && !result.cacheKey.isEmpty()) {
+        after.cacheKey = result.cacheKey;
+        after.cachePath = QStringLiteral("removal/") + result.cacheKey;
+    }
+    const bool confidenceChanged =
+        !result.confidenceHash.isEmpty()
+        && result.confidenceHash != after.trackingConfidenceHash;
+    if (confidenceChanged)
+        after.trackingConfidenceHash = result.confidenceHash;
+
+    if (result.ok) {
+        RemovalTrackingState state = result.trackingState;
+        if (wasTracking) {
+            if (state == RemovalTrackingState::NotTracked)
+                state = RemovalTrackingState::Complete;
+        } else if (m_cache && !after.cacheKey.isEmpty()) {
+            const RemovalCacheState cacheState = m_cache->state(after.cacheKey);
+            if (cacheState == RemovalCacheState::Complete) {
+                // Low confidence is actionable information even after a
+                // successful repair; keep it instead of flattening to Complete.
+                if (state != RemovalTrackingState::LowConfidence)
+                    state = RemovalTrackingState::Complete;
+            } else if (cacheState == RemovalCacheState::Partial) {
+                state = RemovalTrackingState::Partial;
+            } else if (state == RemovalTrackingState::NotTracked) {
+                state = RemovalTrackingState::Failed;
+            }
+        }
+        after.trackingState = state;
+        after.revision += 1;
+        applyLayerUpdate(after, wasTracking ? QStringLiteral("AI 跟踪完成")
+                                            : QStringLiteral("AI 修复完成"));
+        notifyAnalysisChanged();
+        if (exportAfter && !wasTracking)
+            emit generationFinishedForExport();
+        return;
+    }
+
+    if (result.cancelled) {
+        after.trackingState =
+            result.trackingState == RemovalTrackingState::NotTracked
+                ? RemovalTrackingState::Partial
+                : result.trackingState;
+        after.revision += 1;
+        applyLayerUpdate(after, QStringLiteral("AI 任务取消"));
+        setError(removalErrorMessage(QStringLiteral("cancelled"),
+                                     result.errorMessage));
+    } else {
+        after.trackingState = RemovalTrackingState::Failed;
+        after.revision += 1;
+        applyLayerUpdate(after, QStringLiteral("AI 任务失败"));
+        setError(removalErrorMessage(result.errorCode, result.errorMessage));
+    }
+    notifyAnalysisChanged();
+}
+
+void RemovalController::applyLayerUpdate(const RemovalLayer &after,
+                                         const QString &text)
+{
+    const RemovalLayer *before = m_document.removalLayerById(after.id);
+    RemovalLayerEdit edit;
+    edit.clipId = after.clipId;
+    if (before)
+        edit.before = *before;
+    edit.after = after;
+    m_document.applyRemovalLayerEdit(edit, text);
+    m_hasLayer = true;
+    m_layerEnabled = after.enabled;
+    emit layerChanged();
+    notifyAnalysisChanged();
+}
+
+bool RemovalController::updateParameters(
+    const std::function<void(RemovalParameters &)> &mutate, const QString &text)
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer)
+        return false;
+    RemovalLayer after = *layer;
+    mutate(after.parameters);
+    // The cache key includes every parameter, so any change invalidates the
+    // previously generated repair. Keep the tracking sidecar (its hash only
+    // depends on the mask and tracking model) but drop the stale key.
+    if (after.parameters == layer->parameters)
+        return false;
+    after.revision += 1;
+    after.cacheKey.clear();
+    after.cachePath.clear();
+    applyLayerUpdate(after, text);
+    return true;
+}
+
+void RemovalController::updateLayerCacheKey(const QString &cacheKey,
+                                            const QString &text)
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer || cacheKey.isEmpty())
+        return;
+    const QString cachePath = QStringLiteral("removal/") + cacheKey;
+    if (layer->cacheKey == cacheKey && layer->cachePath == cachePath)
+        return;
+    RemovalLayer after = *layer;
+    after.cacheKey = cacheKey;
+    after.cachePath = cachePath;
+    after.revision += 1;
+    applyLayerUpdate(after, text);
+}
+
+QString RemovalController::mapStageText(const QString &stage) const
+{
+    const QString value = stage.trimmed();
+    if (value.compare(QStringLiteral("tracking"), Qt::CaseInsensitive) == 0)
+        return QStringLiteral("正在跟踪遮罩");
+    if (value.compare(QStringLiteral("inpainting"), Qt::CaseInsensitive) == 0
+        || value.compare(QStringLiteral("repair"), Qt::CaseInsensitive) == 0)
+        return QStringLiteral("正在修复画面");
+    if (value.compare(QStringLiteral("writing"), Qt::CaseInsensitive) == 0)
+        return QStringLiteral("正在写入缓存");
+    return stage;
+}
+
+QString RemovalController::cacheStatusFor(const RemovalLayer *layer) const
+{
+    if (!layer)
+        return QString();
+    if (layer->cacheKey.isEmpty())
+        return QStringLiteral("缺失");
+    if (!m_cache)
+        return QStringLiteral("缺失");
+    switch (m_cache->state(layer->cacheKey)) {
+    case RemovalCacheState::Complete:
+        return QStringLiteral("已生成");
+    case RemovalCacheState::Partial:
+        return QStringLiteral("部分可继续");
+    case RemovalCacheState::Corrupt:
+        return QStringLiteral("已过期");
+    case RemovalCacheState::Missing:
+        break;
+    }
+    return QStringLiteral("缺失");
+}
+
+QString RemovalController::cacheStatusText() const
+{
+    return cacheStatusFor(activeRemovalLayer());
+}
+
+bool RemovalController::canContinueGeneration() const
+{
+    return cacheStatusText() == QStringLiteral("部分可继续");
+}
+
+QVariantList RemovalController::confidenceBand() const
+{
+    QVariantList band;
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer || layer->trackingConfidenceHash.isEmpty())
+        return band;
+    const auto tracking =
+        m_sidecars.readTracking(layer->trackingConfidenceHash, nullptr);
+    if (!tracking)
+        return band;
+
+    const Clip *clip = findClip(layer->clipId);
+    const QJsonArray frames =
+        tracking->value(QStringLiteral("frames")).toArray();
+    band.reserve(frames.size());
+    for (const QJsonValue &value : frames) {
+        const QJsonObject frame = value.toObject();
+        const qint64 sourceUs =
+            qint64(frame.value(QStringLiteral("timeUs")).toDouble());
+        qint64 timelineUs = sourceUs;
+        if (clip)
+            timelineUs = clip->timelineStartUs
+                         + unscaleBySpeed(sourceUs - clip->sourceInUs,
+                                          clip->speedMilli);
+        const QString state =
+            frame.value(QStringLiteral("state")).toString();
+        QVariantMap entry;
+        entry.insert(QStringLiteral("timeUs"),
+                     QVariant::fromValue<qint64>(sourceUs));
+        entry.insert(QStringLiteral("timelineUs"),
+                     QVariant::fromValue<qint64>(timelineUs));
+        entry.insert(QStringLiteral("state"), state);
+        entry.insert(QStringLiteral("color"), confidenceColorFor(state));
+        band.append(entry);
+    }
+    return band;
+}
+
+int RemovalController::lowConfidenceCount() const
+{
+    int count = 0;
+    for (const QVariant &entry : confidenceBand()) {
+        if (isLowConfidenceState(
+                entry.toMap().value(QStringLiteral("state")).toString()))
+            ++count;
+    }
+    return count;
+}
+
+void RemovalController::jumpToConfidence(int index)
+{
+    const QVariantList band = confidenceBand();
+    if (index < 0 || index >= band.size())
+        return;
+    const QVariantMap entry = band.at(index).toMap();
+    const qint64 timelineUs =
+        entry.value(QStringLiteral("timelineUs")).toLongLong();
+    if (m_seekCallback)
+        m_seekCallback(timelineUs);
+}
+
+void RemovalController::notifyAnalysisChanged()
+{
+    emit confidenceChanged();
+    emit cacheStatusChanged();
+}
+
+bool RemovalController::computeRedoFrames(const RemovalLayer &layer,
+                                          qint64 sourceStartUs,
+                                          qint64 sourceEndUs, int *firstFrame,
+                                          int *lastFrame)
+{
+    const Clip *clip = findClip(layer.clipId);
+    const Asset *asset = clip ? assetForClip(*clip) : nullptr;
+    if (!clip || !asset) {
+        setError(QStringLiteral("未找到消除层对应的片段。"));
+        return false;
+    }
+    const qint64 start = qBound(layer.sourceInUs, sourceStartUs,
+                                layer.sourceOutUs);
+    const qint64 end = qBound(layer.sourceInUs, sourceEndUs, layer.sourceOutUs);
+    if (end <= start) {
+        setError(QStringLiteral("重做范围为空。"));
+        return false;
+    }
+
+    Rational fps = asset->info.frameRate;
+    if (!fps.isValid())
+        fps = m_document.project().timeline.fps;
+    if (!fps.isValid())
+        fps = Rational{30, 1};
+
+    const auto frameAt = [&](qint64 us, bool roundUp) {
+        const qint64 delta = us - layer.sourceInUs;
+        const qint64 scaled = delta * fps.num;
+        const qint64 divisor = 1'000'000LL * fps.den;
+        if (roundUp)
+            return int((scaled + divisor - 1) / divisor);
+        return int(scaled / divisor);
+    };
+
+    const int totalFrames = qMax(
+        1, frameAt(layer.sourceOutUs, true));
+    const int first = qBound(0, frameAt(start, false), totalFrames - 1);
+    const int last = qBound(first, frameAt(end, true) - 1, totalFrames - 1);
+    const int chunkCount = (totalFrames + 29) / 30;
+    const int firstChunk = qMax(0, first / 30 - 1);
+    const int lastChunk = qMin(chunkCount - 1, last / 30 + 1);
+    *firstFrame = firstChunk * 30;
+    *lastFrame = (lastChunk + 1) * 30 - 1;
+    return true;
 }
 
 } // namespace VideoEditor

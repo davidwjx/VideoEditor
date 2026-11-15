@@ -322,6 +322,15 @@ ApplicationWindow {
                     anchors.fill: parent
                     previewItem: previewItem
                 }
+                // Floating AI job progress; visible only while a removal job
+                // runs. Editing stays available behind it.
+                JobProgressPanel {
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 12
+                    width: Math.min(320, parent.width - 24)
+                    z: 25
+                }
                 Label {
                     anchors.centerIn: parent
                     visible: !Preview.mediaName

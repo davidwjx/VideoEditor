@@ -14,6 +14,8 @@ add_library(videoeditor_core STATIC
   Project.cpp
   Removal.h
   Removal.cpp
+  RemovalErrors.h
+  RemovalErrors.cpp
   MaskCodec.h
   MaskCodec.cpp
   MaskEditor.h

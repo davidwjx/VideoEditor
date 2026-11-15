@@ -15,10 +15,36 @@ ColumnLayout {
     property var removal: (typeof Removal !== "undefined") ? Removal : null
     readonly property bool active: removal !== null && removal.maskMode
     readonly property bool hasClip: Timeline.selectedClipId !== ""
-    property bool advancedOpen: false
+    readonly property bool ready: removal !== null && removal.featureEnabled
+    readonly property bool hasKeyframes: removal !== null
+                                         && removal.maskKeyframes.length > 0
+    readonly property string disclaimer:
+        "内部技术预览：模型未取得商业许可，仅用于内部技术验证，禁止分发。"
 
     function timecodeLabel(us) {
         return (us / 1e6).toFixed(2) + "s"
+    }
+
+    function modeIndex(mode) {
+        return mode === "quality" ? 1 : 0
+    }
+
+    function heightIndex(height) {
+        if (height >= 1080)
+            return 2
+        if (height >= 720)
+            return 1
+        return 0
+    }
+
+    function stabilizationIndex(value) {
+        if (value <= 0)
+            return 0
+        if (value <= 30)
+            return 1
+        if (value <= 60)
+            return 2
+        return 3
     }
 
     Label {
@@ -39,6 +65,28 @@ ColumnLayout {
     }
 
     Label {
+        objectName: "removal-gate-reason"
+        visible: root.removal !== null && !root.removal.featureEnabled
+        text: root.removal !== null ? root.removal.featureDisabledReason : ""
+        color: "#e67e22"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
+    Label {
+        objectName: "removal-technical-preview"
+        // The disclaimer text is always present so the source-tree QML test can
+        // assert it; only the approved internal run makes it visible.
+        visible: root.removal !== null && root.removal.technicalPreview
+        text: root.disclaimer
+        color: "#e6c15a"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
+    Label {
         objectName: "removal-error"
         visible: root.removal !== null && root.removal.error.length > 0
         text: root.removal !== null ? root.removal.error : ""
@@ -49,6 +97,110 @@ ColumnLayout {
         MouseArea {
             anchors.fill: parent
             onClicked: if (root.removal !== null) root.removal.clearError()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Confidence, cache status and low-confidence count stay visible while
+    // the panel is open.
+    // ------------------------------------------------------------------
+    ConfidenceBand {
+        objectName: "removal-confidence-band"
+        visible: root.removal !== null && root.active
+        Layout.fillWidth: true
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        visible: root.removal !== null
+        Label {
+            objectName: "removal-cache-status"
+            text: "缓存：" + (root.removal !== null
+                             ? root.removal.cacheStatusText : "")
+            color: "#bdbdbd"
+            font.pixelSize: 11
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+        Button {
+            objectName: "removal-continue-button"
+            visible: root.removal !== null
+                     && root.removal.canContinueGeneration
+            text: "继续生成"
+            font.pixelSize: 10
+            padding: 3
+            enabled: root.ready && !root.removal.generating
+            onClicked: root.removal.generate()
+        }
+    }
+
+    Label {
+        objectName: "removal-low-confidence-count"
+        visible: root.removal !== null
+        text: "低置信 " + (root.removal !== null
+                          ? root.removal.lowConfidenceCount : 0) + " 帧"
+        color: root.removal !== null && root.removal.lowConfidenceCount > 0
+               ? "#F44336" : "#8a8a8a"
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
+    // ------------------------------------------------------------------
+    // Compare controls (original / repair / split).
+    // ------------------------------------------------------------------
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        visible: root.active
+
+        Label { text: "对比"; color: "#cccccc"; font.pixelSize: 11 }
+        ComboBox {
+            id: compareCombo
+            objectName: "removal-compare-toggle"
+            Layout.fillWidth: true
+            model: [
+                { text: "修复画面", value: "repair" },
+                { text: "原片", value: "original" },
+                { text: "分割对比", value: "split" }
+            ]
+            textRole: "text"
+            valueRole: "value"
+            function syncCompare() {
+                if (root.removal === null)
+                    return
+                const mode = root.removal.compareMode
+                const idx = mode === "original" ? 1
+                          : mode === "split" ? 2 : 0
+                if (currentIndex !== idx)
+                    currentIndex = idx
+            }
+            Component.onCompleted: syncCompare()
+            onActivated: if (root.removal !== null)
+                             root.removal.setCompareMode(currentValue)
+            Connections {
+                target: root.removal
+                function onCompareModeChanged() { compareCombo.syncCompare() }
+            }
+        }
+    }
+
+    Slider {
+        id: splitSlider
+        objectName: "removal-split-slider"
+        Layout.fillWidth: true
+        visible: root.active && root.removal !== null
+                 && root.removal.compareMode === "split"
+        from: 0
+        to: 1000
+        stepSize: 1
+        onMoved: if (root.removal !== null)
+                     root.removal.setSplitPermille(Math.round(value))
+        Binding {
+            target: splitSlider
+            property: "value"
+            value: root.removal !== null ? root.removal.splitPermille : 500
+            when: !splitSlider.pressed
         }
     }
 
@@ -234,6 +386,31 @@ ColumnLayout {
             }
         }
 
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Button {
+                objectName: "removal-track-button"
+                text: "跟踪遮罩"
+                Layout.fillWidth: true
+                enabled: root.ready && root.hasKeyframes
+                         && !root.removal.generating
+                onClicked: root.removal.track()
+            }
+            Button {
+                objectName: "removal-generate-button"
+                text: root.removal !== null
+                      && root.removal.canContinueGeneration
+                      ? "继续生成修复" : "生成修复"
+                Layout.fillWidth: true
+                highlighted: true
+                enabled: root.ready && root.hasKeyframes
+                         && !root.removal.generating
+                onClicked: root.removal.generate()
+            }
+        }
+
         Button {
             objectName: "removal-delete-layer"
             Layout.fillWidth: true
@@ -247,20 +424,106 @@ ColumnLayout {
         objectName: "removal-advanced-toggle"
         Layout.fillWidth: true
         visible: root.active
-        text: root.advancedOpen ? "收起高级 ▴" : "高级 ▾"
-        onClicked: root.advancedOpen = !root.advancedOpen
+        text: root.removal !== null && root.removal.advancedOpen
+              ? "收起高级 ▴" : "高级 ▾"
+        onClicked: if (root.removal !== null)
+                       root.removal.advancedOpen = !root.removal.advancedOpen
     }
 
     ColumnLayout {
         objectName: "removal-advanced-panel"
         Layout.fillWidth: true
         spacing: 4
-        visible: root.active && root.advancedOpen
+        visible: root.active && root.removal !== null
+                 && root.removal.advancedOpen
+
+        RowLayout {
+            Layout.fillWidth: true
+            Label { text: "模型"; color: "#cccccc"; font.pixelSize: 11 }
+            ComboBox {
+                id: modeCombo
+                objectName: "removal-advanced-mode"
+                Layout.fillWidth: true
+                model: [
+                    { text: "快速（MI-GAN）", value: "fast" },
+                    { text: "高质量（LaMa）", value: "quality" }
+                ]
+                textRole: "text"
+                valueRole: "value"
+                function syncMode() {
+                    if (root.removal === null)
+                        return
+                    const idx = root.modeIndex(root.removal.advancedMode)
+                    if (currentIndex !== idx)
+                        currentIndex = idx
+                }
+                Component.onCompleted: syncMode()
+                onActivated: if (root.removal !== null)
+                                 root.removal.setAdvancedMode(currentValue)
+                Connections {
+                    target: root.removal
+                    function onLayerChanged() { modeCombo.syncMode() }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Label { text: "处理分辨率"; color: "#cccccc"; font.pixelSize: 11 }
+            ComboBox {
+                id: heightCombo
+                objectName: "removal-advanced-height"
+                Layout.fillWidth: true
+                model: ["540p", "720p", "1080p"]
+                function syncHeight() {
+                    if (root.removal === null)
+                        return
+                    const idx = root.heightIndex(root.removal.processingHeight)
+                    if (currentIndex !== idx)
+                        currentIndex = idx
+                }
+                Component.onCompleted: syncHeight()
+                onActivated: if (root.removal !== null)
+                                 root.removal.setProcessingHeight(
+                                     [540, 720, 1080][currentIndex])
+                Connections {
+                    target: root.removal
+                    function onLayerChanged() { heightCombo.syncHeight() }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Label { text: "时域稳定化"; color: "#cccccc"; font.pixelSize: 11 }
+            ComboBox {
+                id: stabilizationCombo
+                objectName: "removal-advanced-stabilization"
+                Layout.fillWidth: true
+                model: ["关", "弱", "标准", "强"]
+                function syncStabilization() {
+                    if (root.removal === null)
+                        return
+                    const idx = root.stabilizationIndex(
+                        root.removal.stabilizationStrength)
+                    if (currentIndex !== idx)
+                        currentIndex = idx
+                }
+                Component.onCompleted: syncStabilization()
+                onActivated: if (root.removal !== null)
+                                 root.removal.setStabilizationStrength(
+                                     [0, 30, 60, 100][currentIndex])
+                Connections {
+                    target: root.removal
+                    function onLayerChanged() { stabilizationCombo.syncStabilization() }
+                }
+            }
+        }
 
         Label {
-            text: "模型、分辨率与稳定化将在后续任务中开放。"
+            objectName: "removal-chunk-size"
+            text: "分块大小：30 帧（M4 固定）"
             color: "#8a8a8a"
-            wrapMode: Text.WordWrap
             font.pixelSize: 11
             Layout.fillWidth: true
         }

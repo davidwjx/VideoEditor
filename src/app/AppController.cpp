@@ -146,13 +146,26 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     // The AI feature is fail-closed: loading the manifest is not enough, it
     // must carry commercial approval, legal sign-off and verified files.
     m_aiGate = std::make_unique<AiFeatureGate>();
-    QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS_DIR");
+    // Tests and internal technical runs point VIDEOEDITOR_M4_MODELS at an
+    // installed model directory; the historical suffix remains supported.
+    QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (modelsDir.isEmpty())
+        modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS_DIR");
     if (modelsDir.isEmpty()) {
         modelsDir = QDir(QCoreApplication::applicationDirPath())
                         .filePath(QStringLiteral("models"));
     }
     QString modelsError;
     m_aiGate->reload(modelsDir, &modelsError);
+    // Approved release builds stop here. The internal technical preview is an
+    // explicit, environment-gated escape hatch that never flips the manifest's
+    // commercialApproved/releaseBlocked flags.
+    if (!m_aiGate->enabled()
+        && qEnvironmentVariable("VIDEOEDITOR_M4_TECHNICAL")
+               == QLatin1String("1")) {
+        QString previewError;
+        m_aiGate->enableTechnicalPreview(&previewError);
+    }
     m_aiJobs = std::make_unique<AiJobManager>(*m_aiGate);
     m_removalCache = std::make_unique<RemovalCache>(
         QDir(appData).filePath(QStringLiteral("cache/removal")));
@@ -192,9 +205,15 @@ AppController::AppController(QObject *parent, QString recoveryPath,
             &ExportController::invalidateRemovalPreflight);
     m_export->setRemovalCacheRoot(m_removalCache->root());
     m_preview->setRemovalCacheRoot(m_removalCache->root());
-    // Task 8 replaces the placeholder with the real generate-and-export flow.
+    // Export preflight failure is surfaced by the dialog, but the message is
+    // still forwarded so the removal panel can explain what is missing.
     connect(m_export.get(), &ExportController::removalGenerationRequired,
-            m_removal.get(), &RemovalController::beginGenerateForExport);
+            m_removal.get(), &RemovalController::setExportRequiredMessage);
+    // Completed "generate, then export" runs resume the export the user asked
+    // for. The flag is only emitted on success, so a failed run keeps the
+    // dialog open with the mapped error.
+    connect(m_removal.get(), &RemovalController::generationFinishedForExport,
+            m_export.get(), &ExportController::startExport);
     // Timeline position is authoritative for mask authoring; the preview clock
     // mirrors it in timeline mode. The fallback keeps the controller useful
     // when only the timeline controller exists (asset-mode preview).
@@ -202,6 +221,16 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         if (m_preview && m_preview->timelineMode())
             return m_preview->positionMs() * 1000;
         return m_timeline ? m_timeline->positionUs() : 0;
+    });
+    // Confidence-band clicks jump to a timeline position and pause playback.
+    m_removal->setSeekCallback([this](qint64 timelineUs) {
+        if (m_preview)
+            m_preview->pause();
+        seekTimeline(qMax<qint64>(0, timelineUs));
+    });
+    // The export prompt can generate without mask mode; target the selection.
+    m_removal->setSelectedClipProvider([this] {
+        return m_timeline ? m_timeline->selectedClipId() : QString();
     });
     connect(m_document, &ProjectDocument::projectReplaced, this, [this] {
         m_maskSidecars->setProjectPath(m_document->filePath(),
@@ -298,6 +327,21 @@ AppController::~AppController()
         m_preview->pause();
     if (m_audio)
         m_audio->shutdown();
+}
+
+bool AppController::aiFeatureEnabled() const
+{
+    return m_aiGate && m_aiGate->enabled();
+}
+
+bool AppController::aiTechnicalPreview() const
+{
+    return m_aiGate && m_aiGate->technicalPreview();
+}
+
+QString AppController::aiFeatureDisabledReason() const
+{
+    return m_aiGate ? m_aiGate->disabledReason() : QString();
 }
 
 bool AppController::canUndo() const

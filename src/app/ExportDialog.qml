@@ -22,6 +22,17 @@ Dialog {
     onClosed: Export.cancelExport()
 
     property bool advancedOpen: false
+    // The Removal context property only exists when the app installs it.
+    property var removal: (typeof Removal !== "undefined") ? Removal : null
+    property bool removalPromptDismissed: false
+
+    Connections {
+        target: Export
+        function onRemovalRequiredChanged() {
+            if (Export.removalRequired)
+                root.removalPromptDismissed = false
+        }
+    }
 
     function openDialog() {
         Export.refreshCapabilities()
@@ -329,6 +340,62 @@ Dialog {
             visible: Export.validationError.length > 0
                      && Export.codec !== "h265" && !Export.running
             text: "无法开始导出：" + Export.validationError
+            color: "#e74c3c"
+            wrapMode: Text.WordWrap
+        }
+
+        // Required AI repair is missing/expired. Keep the dialog open and offer
+        // the in-place generation path instead of a dead export button.
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            visible: Export.removalRequired && !root.removalPromptDismissed
+
+            Label {
+                objectName: "export-removal-message"
+                Layout.fillWidth: true
+                text: Export.removalMessage.length > 0
+                      ? Export.removalMessage
+                      : "AI 修复结果缺失或已过期。请先生成修复，再导出。"
+                color: "#e74c3c"
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Button {
+                    objectName: "export-generate-removal"
+                    text: root.removal !== null && root.removal.generating
+                          ? "正在生成…" : "先生成再导出"
+                    highlighted: true
+                    enabled: root.removal !== null
+                             && !root.removal.generating
+                    onClicked: if (root.removal !== null)
+                                   root.removal.generateForExport()
+                }
+                Button {
+                    objectName: "export-cancel-removal"
+                    text: "取消"
+                    onClicked: root.removalPromptDismissed = true
+                }
+                Item { Layout.fillWidth: true }
+            }
+        }
+
+        Label {
+            objectName: "export-removal-warning"
+            Layout.fillWidth: true
+            visible: Export.removalWarning.length > 0
+                     && !Export.removalRequired
+            text: Export.removalWarning
+            color: "#e6c15a"
+            wrapMode: Text.WordWrap
+        }
+
+        Label {
+            objectName: "export-removal-error"
+            Layout.fillWidth: true
+            visible: root.removal !== null && root.removal.error.length > 0
+            text: root.removal !== null ? root.removal.error : ""
             color: "#e74c3c"
             wrapMode: Text.WordWrap
         }
