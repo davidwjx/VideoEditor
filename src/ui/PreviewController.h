@@ -6,6 +6,7 @@
 #include <QThread>
 #include <QTimer>
 
+#include "FrameRequestCoalescer.h"
 #include "MediaInfo.h"
 #include "Project.h"
 #include "TimeBase.h"
@@ -91,14 +92,17 @@ private:
     void onFramePresented(qint64 ptsUs);
     void onFinished();
     void onError(const QString &message);
+    void onAssetError(const QString &message, quint64 generation);
     void requestNextFrame();
 
     void onTimelineFrameReady(int slot, const QSize &size, qint64 timelineUs,
                               quintptr h0, quintptr h1, quintptr h2,
                               quint64 generation);
     void onTimelineError(const QString &message);
+    void onTimelineFrameSkipped(qint64 timelineUs, quint64 generation);
     void onTimelineTick();
     void requestTimelineFrame(qint64 timelineUs);
+    void dispatchTimelineFrame(int64_t timelineUs);
     int64_t currentTimelineUs() const;
 
     QThread m_thread;
@@ -124,12 +128,11 @@ private:
     Project m_timelineProject;
     QTimer m_presentationTimer;
     QElapsedTimer m_wallClock;
-    QElapsedTimer m_timelinePendingSince;
+    FrameRequestCoalescer m_timelineRequests;
     Rational m_timelineFps{30, 1};
     int64_t m_playStartUs = 0;
     int64_t m_lastTimelineFrame = -1;
     qint64 m_lastTimelineSubmittedUs = -1;
-    bool m_timelineFramePending = false;
 };
 
 } // namespace VideoEditor

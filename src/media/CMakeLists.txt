@@ -57,6 +57,9 @@ add_library(videoeditor_media STATIC
   audio/WaveformService.cpp
   render/FrameSelector.h
   render/FrameSelector.cpp
+  render/FrameRequestCoalescer.h
+  render/SourceCachePolicy.h
+  render/SourceCachePolicy.cpp
   render/LayerGeometry.h
   render/LayerGeometry.cpp
   render/SubtitleRasterizer.h

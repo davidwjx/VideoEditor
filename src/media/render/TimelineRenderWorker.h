@@ -20,6 +20,7 @@ class D3D11Context;
 class SharedTextureRing;
 class LayerCompositor;
 class ClipVideoSource;
+class VideoConverters;
 struct VideoLayer;
 
 // Runs on its own thread with its own D3D11 device: evaluates the timeline at
@@ -43,22 +44,34 @@ public slots:
 signals:
     void frameReady(int slot, QSize size, qint64 timelineUs, quintptr handle0,
                     quintptr handle1, quintptr handle2, quint64 generation);
+    // The ring slot is still held by the scene graph; the request was dropped
+    // so the controller can release its single-in-flight gate.
+    void frameSkipped(qint64 timelineUs, quint64 generation);
     void error(QString message);
 
 private:
+    struct SourceEntry {
+        std::unique_ptr<ClipVideoSource> source;
+        quint64 lastUsedFrame = 0;
+    };
+
     ClipVideoSource *sourceFor(const VideoLayer &layer);
     QImage subtitleImageFor(const QList<SubtitleLayer> &layers);
+    bool ensureConverters(QString *error);
+    void reportOnce(const QString &key, const QString &message);
     void reset();
 
     Project m_project;
     QString m_projectPath;
     quint64 m_generation = 0;
+    quint64 m_frameSerial = 0;
     std::unique_ptr<D3D11Context> m_context;
     std::unique_ptr<SharedTextureRing> m_ring;
     std::unique_ptr<LayerCompositor> m_compositor;
-    std::map<QString, std::unique_ptr<ClipVideoSource>> m_sources;
+    std::unique_ptr<VideoConverters> m_converters;
+    std::map<QString, SourceEntry> m_sources;
     QSet<QString> m_failedClips;
-    QSet<QString> m_reportedClips;
+    QSet<QString> m_reportedErrors;
     QString m_subtitleKey;
     QImage m_subtitleImage;
     int m_width = 1920;

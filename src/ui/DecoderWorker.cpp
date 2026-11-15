@@ -62,7 +62,7 @@ void DecoderWorker::open(const QString &path, const QString &proxyPath,
     QString error;
     auto info = MediaProbe::probe(path, &error);
     if (!info) {
-        emit this->error(error);
+        emit this->error(error, m_generation);
         return;
     }
     m_info = *info;
@@ -77,14 +77,15 @@ void DecoderWorker::open(const QString &path, const QString &proxyPath,
         QString softwareError;
         m_context = D3D11Context::create(false, &softwareError);
         if (!m_context) {
-            emit this->error(QStringLiteral("%1\n%2").arg(error, softwareError));
+            emit this->error(QStringLiteral("%1\n%2").arg(error, softwareError),
+                             m_generation);
             return;
         }
     }
 
     auto result = createVideoDecoder(actualPath, *m_context, m_info);
     if (!result.decoder) {
-        emit this->error(result.error);
+        emit this->error(result.error, m_generation);
         return;
     }
     m_decoder = std::move(result.decoder);
@@ -93,7 +94,8 @@ void DecoderWorker::open(const QString &path, const QString &proxyPath,
     if (!m_decoder->decodeNext(firstFrame, &error)) {
         emit this->error(error.isEmpty()
                              ? QStringLiteral("视频没有可解码的帧。")
-                             : error);
+                             : error,
+                         m_generation);
         return;
     }
 
@@ -103,13 +105,13 @@ void DecoderWorker::open(const QString &path, const QString &proxyPath,
     m_ring = std::make_unique<SharedTextureRing>(*m_context);
     if (!m_ring->create(displaySize.width(), displaySize.height(),
                         SharedTextureRing::kSlotCount, &error)) {
-        emit this->error(error);
+        emit this->error(error, m_generation);
         return;
     }
 
     m_publisher = std::make_unique<FramePublisher>(*m_context, *m_ring);
     if (!m_publisher->publish(firstFrame, m_info.rotationDegrees, &error)) {
-        emit this->error(error);
+        emit this->error(error, m_generation);
         return;
     }
     m_eof = false;
@@ -141,7 +143,7 @@ void DecoderWorker::requestFrame()
     if (!m_decoder->decodeNext(frame, &error)) {
         m_busy = false;
         if (!error.isEmpty()) {
-            emit this->error(error);
+            emit this->error(error, m_generation);
         } else {
             m_eof = true;
             emit finished();
@@ -151,7 +153,7 @@ void DecoderWorker::requestFrame()
 
     if (!m_publisher->publish(frame, m_info.rotationDegrees, &error)) {
         m_busy = false;
-        emit this->error(error);
+        emit this->error(error, m_generation);
         return;
     }
 
@@ -172,7 +174,7 @@ void DecoderWorker::seek(qint64 ptsUs)
         return;
     QString error;
     if (!m_decoder->seek(ptsUs, &error)) {
-        emit this->error(error);
+        emit this->error(error, m_generation);
         return;
     }
     m_eof = false;

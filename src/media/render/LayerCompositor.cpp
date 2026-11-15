@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 
+#include <algorithm>
 #include <cstring>
 
 #include <d3dcompiler.h>
@@ -170,12 +171,32 @@ bool LayerCompositor::initialize(D3D11Context &context, int width, int height,
     return true;
 }
 
+void LayerCompositor::applyDrawState()
+{
+    // Every draw re-establishes the full pipeline state because frame
+    // converters used between draws retarget the render target, viewport,
+    // shaders, sampler and constant buffers on the shared immediate context.
+    if (!m_context || !m_target || !m_params)
+        return;
+    m_context->OMSetRenderTargets(1, &m_target, nullptr);
+    m_context->RSSetViewports(1, &m_viewport);
+    m_context->OMSetBlendState(m_blend.Get(), nullptr, 0xffffffff);
+    m_context->RSSetState(m_rasterizer.Get());
+    m_context->IASetInputLayout(nullptr);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
+    m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
+    m_context->VSSetConstantBuffers(0, 1, m_params.GetAddressOf());
+    m_context->PSSetConstantBuffers(0, 1, m_params.GetAddressOf());
+    m_context->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
+}
+
 void LayerCompositor::begin(ID3D11RenderTargetView *target, bool clearBlack)
 {
     if (!m_context || !target)
         return;
 
-    m_context->OMSetRenderTargets(1, &target, nullptr);
+    m_target = target;
 
     int viewportWidth = m_width;
     int viewportHeight = m_height;
@@ -191,26 +212,19 @@ void LayerCompositor::begin(ID3D11RenderTargetView *target, bool clearBlack)
         }
     }
 
-    D3D11_VIEWPORT viewport{};
-    viewport.Width = float(viewportWidth);
-    viewport.Height = float(viewportHeight);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-    m_context->RSSetViewports(1, &viewport);
+    m_viewport = {};
+    m_viewport.Width = float(viewportWidth);
+    m_viewport.Height = float(viewportHeight);
+    m_viewport.MinDepth = 0.0f;
+    m_viewport.MaxDepth = 1.0f;
 
+    m_context->OMSetRenderTargets(1, &m_target, nullptr);
+    m_context->RSSetViewports(1, &m_viewport);
     if (clearBlack) {
         const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         m_context->ClearRenderTargetView(target, black);
     }
-
     m_context->OMSetBlendState(m_blend.Get(), nullptr, 0xffffffff);
-    m_context->RSSetState(m_rasterizer.Get());
-    m_context->IASetInputLayout(nullptr);
-    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
-    m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
-    m_context->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
-    m_context->PSSetConstantBuffers(0, 1, m_params.GetAddressOf());
 }
 
 void LayerCompositor::end()
@@ -219,8 +233,34 @@ void LayerCompositor::end()
         return;
     ID3D11ShaderResourceView *nullSrv = nullptr;
     m_context->PSSetShaderResources(0, 1, &nullSrv);
+    m_context->VSSetShader(nullptr, nullptr, 0);
+    m_context->PSSetShader(nullptr, nullptr, 0);
+    ID3D11Buffer *nullBuffer = nullptr;
+    m_context->VSSetConstantBuffers(0, 1, &nullBuffer);
+    m_context->PSSetConstantBuffers(0, 1, &nullBuffer);
+    m_context->PSSetSamplers(0, 0, nullptr);
+    m_context->RSSetState(nullptr);
+    m_context->IASetInputLayout(nullptr);
     m_context->OMSetRenderTargets(0, nullptr, nullptr);
     m_context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    m_target = nullptr;
+}
+
+void LayerCompositor::forgetTexture(ID3D11Texture2D *texture)
+{
+    if (!texture)
+        return;
+    m_textureSrvs.erase(
+        std::remove_if(m_textureSrvs.begin(), m_textureSrvs.end(),
+                       [texture](const CachedSrv &entry) {
+                           return entry.texture == texture;
+                       }),
+        m_textureSrvs.end());
+}
+
+void LayerCompositor::clearTextureCache()
+{
+    m_textureSrvs.clear();
 }
 
 bool LayerCompositor::drawTexture(ID3D11ShaderResourceView *srv,
@@ -243,14 +283,7 @@ bool LayerCompositor::drawTexture(ID3D11ShaderResourceView *srv,
     std::memcpy(mapped.pData, params, sizeof(params));
     m_context->Unmap(m_params.Get(), 0);
 
-    m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
-    m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
-    m_context->VSSetConstantBuffers(0, 1, m_params.GetAddressOf());
-    m_context->PSSetConstantBuffers(0, 1, m_params.GetAddressOf());
-    m_context->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
-    m_context->RSSetState(m_rasterizer.Get());
-    m_context->IASetInputLayout(nullptr);
-    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    applyDrawState();
     m_context->PSSetShaderResources(0, 1, &srv);
     m_context->Draw(4, 0);
 
@@ -295,20 +328,88 @@ LayerCompositor::imageTextureFor(int width, int height, QString *error)
 bool LayerCompositor::drawImage(const QImage &image, const LayerRect &rect,
                                 float opacity, QString *error)
 {
+    return drawImageCached(QString(), image, rect, opacity, error);
+}
+
+bool LayerCompositor::drawImageCached(const QString &cacheKey,
+                                      const QImage &image,
+                                      const LayerRect &rect, float opacity,
+                                      QString *error)
+{
     if (image.isNull() || image.width() <= 0 || image.height() <= 0) {
         setError(error, QStringLiteral("图层图像为空。"));
         return false;
     }
 
-    const QImage rgba = image.convertToFormat(QImage::Format_RGBA8888);
-    ImageTexture *target = imageTextureFor(rgba.width(), rgba.height(), error);
+    ImageTexture *target = imageTextureFor(image.width(), image.height(), error);
     if (!target)
         return false;
 
-    m_context->UpdateSubresource(target->texture.Get(), 0, nullptr,
-                                 rgba.constBits(), UINT(rgba.bytesPerLine()),
-                                 0);
+    const bool unchanged =
+        !cacheKey.isEmpty() && cacheKey == m_cachedImageKey
+        && m_cachedImageWidth == image.width()
+        && m_cachedImageHeight == image.height();
+    if (!unchanged) {
+        const QImage rgba = image.convertToFormat(QImage::Format_RGBA8888);
+        m_context->UpdateSubresource(target->texture.Get(), 0, nullptr,
+                                     rgba.constBits(),
+                                     UINT(rgba.bytesPerLine()), 0);
+        m_cachedImageKey = cacheKey;
+        m_cachedImageWidth = image.width();
+        m_cachedImageHeight = image.height();
+    }
     return drawTexture(target->srv.Get(), rect, opacity, error);
+}
+
+ID3D11ShaderResourceView *
+LayerCompositor::textureSrv(ID3D11Texture2D *texture, UINT subresource,
+                            QString *error)
+{
+    if (!texture) {
+        setError(error, QStringLiteral("视频帧纹理为空。"));
+        return nullptr;
+    }
+    for (const CachedSrv &entry : m_textureSrvs) {
+        if (entry.texture == texture && entry.subresource == subresource)
+            return entry.srv.Get();
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+    HRESULT hr = S_OK;
+    if (desc.ArraySize > 1) {
+        // A decoder pool frame is an array slice; D3D11 has no PlaneSlice for
+        // view descs, the subresource selects both slice and plane.
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = desc.Format;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        srvDesc.Texture2DArray.MostDetailedMip = 0;
+        srvDesc.Texture2DArray.MipLevels = 1;
+        srvDesc.Texture2DArray.FirstArraySlice = subresource;
+        srvDesc.Texture2DArray.ArraySize = 1;
+        hr = m_device->CreateShaderResourceView(texture, &srvDesc, &srv);
+    } else {
+        hr = m_device->CreateShaderResourceView(texture, nullptr, &srv);
+    }
+    if (FAILED(hr) || !srv) {
+        setError(error, QStringLiteral("无法创建视频帧纹理视图。"));
+        return nullptr;
+    }
+
+    // Hold a reference so a later texture allocation can never reuse the same
+    // pointer while the cached view is still alive. The cache is bounded by
+    // the number of simultaneously active sources; clear it if it grows.
+    if (m_textureSrvs.size() >= 8)
+        m_textureSrvs.erase(m_textureSrvs.begin());
+    CachedSrv entry;
+    entry.texture = texture;
+    entry.subresource = subresource;
+    entry.keepAlive = texture;
+    entry.srv = srv;
+    m_textureSrvs.push_back(std::move(entry));
+    return m_textureSrvs.back().srv.Get();
 }
 
 bool LayerCompositor::drawFrame(const DecodedFrame &frame,
@@ -330,35 +431,11 @@ bool LayerCompositor::drawFrame(const DecodedFrame &frame,
         return drawImage(image, rect, opacity, error);
     }
 
-    if (!frame.texture) {
-        setError(error, QStringLiteral("视频帧纹理为空。"));
+    ID3D11ShaderResourceView *srv =
+        textureSrv(frame.texture, frame.subresource, error);
+    if (!srv)
         return false;
-    }
-
-    D3D11_TEXTURE2D_DESC desc{};
-    frame.texture->GetDesc(&desc);
-
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-    HRESULT hr = S_OK;
-    if (desc.ArraySize > 1) {
-        // A decoder pool frame is an array slice; D3D11 has no PlaneSlice for
-        // view descs, the subresource selects both slice and plane.
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = desc.Format;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-        srvDesc.Texture2DArray.MostDetailedMip = 0;
-        srvDesc.Texture2DArray.MipLevels = 1;
-        srvDesc.Texture2DArray.FirstArraySlice = frame.subresource;
-        srvDesc.Texture2DArray.ArraySize = 1;
-        hr = m_device->CreateShaderResourceView(frame.texture, &srvDesc, &srv);
-    } else {
-        hr = m_device->CreateShaderResourceView(frame.texture, nullptr, &srv);
-    }
-    if (FAILED(hr) || !srv) {
-        setError(error, QStringLiteral("无法创建视频帧纹理视图。"));
-        return false;
-    }
-    return drawTexture(srv.Get(), rect, opacity, error);
+    return drawTexture(srv, rect, opacity, error);
 }
 
 } // namespace VideoEditor

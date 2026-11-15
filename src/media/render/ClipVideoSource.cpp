@@ -26,7 +26,32 @@ void setError(QString *error, const QString &message)
 
 constexpr float kPi = 3.14159265358979323846f;
 
+int normalizedRotation(int degrees)
+{
+    return ((degrees % 360) + 360) % 360;
+}
+
 } // namespace
+
+VideoConverters::VideoConverters()
+    : m_nv12(std::make_unique<Nv12Converter>())
+    , m_rgba(std::make_unique<RgbaConverter>())
+{
+}
+
+VideoConverters::~VideoConverters() = default;
+
+bool VideoConverters::initialize(D3D11Context &context, QString *error)
+{
+    if (m_initialized)
+        return true;
+    if (!m_nv12->initialize(context, error))
+        return false;
+    if (!m_rgba->initialize(context, error))
+        return false;
+    m_initialized = true;
+    return true;
+}
 
 ClipVideoSource::~ClipVideoSource() = default;
 
@@ -63,6 +88,25 @@ std::unique_ptr<ClipVideoSource>
 ClipVideoSource::open(const Asset &asset, D3D11Context &context,
                       const QString &proxyPath, QString *error)
 {
+    auto converters = std::make_unique<VideoConverters>();
+    if (!converters->initialize(context, error))
+        return nullptr;
+    auto source = open(asset, context, proxyPath, converters.get(), error);
+    if (source)
+        source->m_ownedConverters = std::move(converters);
+    return source;
+}
+
+std::unique_ptr<ClipVideoSource>
+ClipVideoSource::open(const Asset &asset, D3D11Context &context,
+                      const QString &proxyPath, VideoConverters *converters,
+                      QString *error)
+{
+    if (!converters || !converters->isInitialized()) {
+        setError(error, QStringLiteral("视频帧转换器尚未初始化。"));
+        return nullptr;
+    }
+
     auto source = std::unique_ptr<ClipVideoSource>(new ClipVideoSource);
     source->m_device = context.device();
     source->m_context = context.context();
@@ -70,22 +114,13 @@ ClipVideoSource::open(const Asset &asset, D3D11Context &context,
         setError(error, QStringLiteral("D3D11 设备不可用。"));
         return nullptr;
     }
+    source->m_converters = converters;
 
-    // ffmpeg applies the display matrix when it generates a proxy, so the proxy
-    // frames are already upright. The display size still has to follow the
-    // source orientation, otherwise a rotated proxy would be stretched.
+    // ffmpeg applies the display matrix when it generates a proxy, so proxy
+    // frames are already upright and their decoded size is the proxy size.
     const bool usingProxy = !proxyPath.isEmpty() && QFileInfo::exists(proxyPath);
     const QString path = usingProxy ? proxyPath : asset.path;
-    const int rotation = ((asset.info.rotationDegrees % 360) + 360) % 360;
-    source->m_displaySize = (rotation == 90 || rotation == 270)
-                                ? QSize(asset.info.height, asset.info.width)
-                                : QSize(asset.info.width, asset.info.height);
-    if (source->m_displaySize.isEmpty()) {
-        setError(error, QStringLiteral("视频素材尺寸无效。"));
-        return nullptr;
-    }
-    source->m_rotationRadians =
-        usingProxy ? 0.0f : float(-asset.info.rotationDegrees) * kPi / 180.0f;
+    const int rotation = normalizedRotation(asset.info.rotationDegrees);
 
     const Rational fps =
         asset.info.frameRate.isValid() ? asset.info.frameRate : Rational{30, 1};
@@ -102,41 +137,61 @@ ClipVideoSource::open(const Asset &asset, D3D11Context &context,
     }
     source->m_decoder = std::move(created.decoder);
 
+    // The decoder's first frame supplies the real (visible/proxy) dimensions.
+    // Allocating the RGBA target from media info would upscale 540p proxies to
+    // the source resolution and could mis-size rotated material.
+    DecodedFrame first;
+    if (!source->m_decoder->decodeNext(first, error)) {
+        if (!error || error->isEmpty())
+            setError(error, QStringLiteral("视频片段没有可解码的帧。"));
+        return nullptr;
+    }
+    if (first.width <= 0 || first.height <= 0) {
+        setError(error, QStringLiteral("视频片段帧尺寸无效。"));
+        return nullptr;
+    }
+
+    if (usingProxy) {
+        source->m_displaySize = QSize(first.width, first.height);
+        source->m_rotationRadians = 0.0f;
+    } else {
+        source->m_displaySize = (rotation == 90 || rotation == 270)
+                                    ? QSize(first.height, first.width)
+                                    : QSize(first.width, first.height);
+        source->m_rotationRadians =
+            float(-asset.info.rotationDegrees) * kPi / 180.0f;
+    }
+
     if (!source->createConvertedTexture(error))
         return nullptr;
-
-    // Both converters are cheap to create and the decoder implementation (not
-    // just isHardware()) decides the frame kind at runtime.
-    source->m_nv12 = std::make_unique<Nv12Converter>();
-    if (!source->m_nv12->initialize(context, error))
-        return nullptr;
-    source->m_rgba = std::make_unique<RgbaConverter>();
-    if (!source->m_rgba->initialize(context, error))
+    if (!source->convertToRgba(first, error))
         return nullptr;
 
+    source->m_lastPtsUs = first.ptsUs;
+    source->m_hasFrame = true;
     return source;
 }
 
 bool ClipVideoSource::convertToRgba(DecodedFrame &frame, QString *error)
 {
-    if (!m_convertedRtv) {
+    if (!m_converters || !m_convertedRtv) {
         setError(error, QStringLiteral("RGBA 转换目标不可用。"));
         return false;
     }
 
     bool ok = false;
     if (frame.kind == DecodedFrame::Kind::HardwareTexture) {
-        ok = m_nv12->convert(frame.texture, frame.subresource, frame.width,
-                             frame.height, m_convertedRtv.Get(),
-                             m_rotationRadians, error);
+        ok = m_converters->nv12()->convert(
+            frame.texture, frame.subresource, frame.width, frame.height,
+            m_convertedRtv.Get(), m_rotationRadians, error);
     } else {
         if (frame.rgba.empty()) {
             setError(error, QStringLiteral("软件解码帧没有像素数据。"));
             return false;
         }
-        ok = m_rgba->convertRgba(frame.rgba, frame.width, frame.height,
-                                 m_convertedRtv.Get(), m_rotationRadians,
-                                 error);
+        ok = m_converters->rgba()->convertRgba(
+            frame.rgba, frame.width, frame.height, m_convertedRtv.Get(),
+            m_rotationRadians, error);
     }
     if (!ok)
         return false;
@@ -172,7 +227,8 @@ const DecodedFrame *ClipVideoSource::frameAt(int64_t sourceUs, QString *error)
     if (plan.action == FrameFetchAction::Seek) {
         if (!m_decoder->seek(sourceUs, error))
             return nullptr;
-        m_hasFrame = false;
+        // Keep the previous frame as the EOF fallback: seeking beyond the end
+        // must show the last picture, not a black gap.
     }
 
     int drops =
@@ -180,13 +236,11 @@ const DecodedFrame *ClipVideoSource::frameAt(int64_t sourceUs, QString *error)
     while (true) {
         DecodedFrame frame;
         if (!m_decoder->decodeNext(frame, error)) {
-            // EOF: keep showing the last decoded frame rather than flashing
-            // black at the end of a clip.
-            if (m_hasFrame)
-                return &m_frame;
-            if (error && error->isEmpty())
-                *error = QStringLiteral("视频片段没有可解码的帧。");
-            return nullptr;
+            // A real decode error is propagated; only a clean EOF falls back
+            // to the last decoded frame.
+            if (error && !error->isEmpty())
+                return nullptr;
+            return m_hasFrame ? &m_frame : nullptr;
         }
         if (!convertToRgba(frame, error))
             return nullptr;

@@ -35,7 +35,7 @@ PreviewController::PreviewController(QObject *parent)
     connect(m_worker, &DecoderWorker::frameReady, this,
             &PreviewController::onFrameReady);
     connect(m_worker, &DecoderWorker::error, this,
-            &PreviewController::onError);
+            &PreviewController::onAssetError);
     connect(m_worker, &DecoderWorker::finished, this,
             &PreviewController::onFinished);
     m_thread.start();
@@ -50,6 +50,8 @@ PreviewController::PreviewController(QObject *parent)
             &PreviewController::onTimelineFrameReady);
     connect(m_timelineWorker, &TimelineRenderWorker::error, this,
             &PreviewController::onTimelineError);
+    connect(m_timelineWorker, &TimelineRenderWorker::frameSkipped, this,
+            &PreviewController::onTimelineFrameSkipped);
     m_timelineThread.setObjectName(QStringLiteral("TimelineRender"));
     m_timelineThread.start();
 
@@ -112,7 +114,7 @@ void PreviewController::openMedia(const QString &path, const QString &proxyPath)
         m_timelineProject = Project{};
         m_lastTimelineFrame = -1;
         m_lastTimelineSubmittedUs = -1;
-        m_timelineFramePending = false;
+        m_timelineRequests.reset();
     }
 
     const quint64 generation = ++m_generation;
@@ -148,7 +150,7 @@ void PreviewController::closeMedia()
         m_timelineProject = Project{};
         m_lastTimelineFrame = -1;
         m_lastTimelineSubmittedUs = -1;
-        m_timelineFramePending = false;
+        m_timelineRequests.reset();
     }
 
     // Bump before clearing anything so any frame the worker already emitted
@@ -231,9 +233,12 @@ void PreviewController::pause()
             m_audioEngine->pause();
         m_presentationTimer.stop();
         const int64_t current = currentTimelineUs();
-        m_positionUs = qBound<qint64>(
+        const qint64 clamped = qBound<qint64>(
             0, current, m_durationUs > 0 ? m_durationUs : current);
-        emit positionChanged();
+        if (clamped != m_positionUs) {
+            m_positionUs = clamped;
+            emit positionChanged();
+        }
     } else {
         m_frameTimer.stop();
     }
@@ -298,14 +303,17 @@ void PreviewController::seekFrame(qint64 frame)
     if (m_audioEngine)
         m_audioEngine->seek(target);
 
+    const bool positionChangedNow = target != m_positionUs;
     m_positionUs = target;
     m_playStartUs = target;
     m_wallClock.restart();
     m_atEnd = false;
     m_lastTimelineFrame = microsToFrames(target, m_timelineFps);
     m_lastTimelineSubmittedUs = -1;
-    m_timelineFramePending = false;
-    emit positionChanged();
+    // Do not reset the gate: an in-flight frame completes first and then
+    // dispatches this latest target, so requests stay single-in-flight.
+    if (positionChangedNow)
+        emit positionChanged();
 
     if (wasPlaying) {
         if (m_audioEngine && m_audioEngine->hasOutputDevice()) {
@@ -338,7 +346,7 @@ void PreviewController::openTimeline(const Project &project, qint64 durationUs)
     m_playStartUs = 0;
     m_lastTimelineFrame = -1;
     m_lastTimelineSubmittedUs = -1;
-    m_timelineFramePending = false;
+    m_timelineRequests.reset();
     m_atEnd = false;
     m_framePending = false;
     m_mediaName = project.name;
@@ -435,19 +443,41 @@ void PreviewController::onTimelineFrameReady(int slot, const QSize &size,
         return;
     }
 
-    m_timelineFramePending = false;
+    // One frame in flight: completion releases the gate and, at most, requests
+    // the latest target that arrived while this frame was rendering.
+    const std::optional<int64_t> next =
+        m_timelineRequests.complete(timelineUs);
+
     if (!m_playing) {
-        m_positionUs = qBound<qint64>(
+        const qint64 clamped = qBound<qint64>(
             0, timelineUs, m_durationUs > 0 ? m_durationUs : timelineUs);
-        emit positionChanged();
+        if (clamped != m_positionUs) {
+            m_positionUs = clamped;
+            emit positionChanged();
+        }
     }
 
-    if (!m_item)
-        return;
+    if (m_item) {
+        m_lastTimelineSubmittedUs = timelineUs;
+        m_item->setSharedHandles({h0, h1, h2});
+        m_item->submitFrame(slot, size, 0, timelineUs);
+    }
 
-    m_lastTimelineSubmittedUs = timelineUs;
-    m_item->setSharedHandles({h0, h1, h2});
-    m_item->submitFrame(slot, size, 0, timelineUs);
+    if (next)
+        dispatchTimelineFrame(*next);
+}
+
+void PreviewController::onTimelineFrameSkipped(qint64 timelineUs,
+                                                quint64 generation)
+{
+    if (generation != m_generation || m_mode != Mode::Timeline)
+        return;
+    // The worker dropped this request (ring slot still held by the scene
+    // graph). Release the gate; do not retry the same instant immediately.
+    if (const std::optional<int64_t> next =
+            m_timelineRequests.complete(timelineUs)) {
+        dispatchTimelineFrame(*next);
+    }
 }
 
 void PreviewController::onFramePresented(qint64 pts)
@@ -471,11 +501,20 @@ void PreviewController::onError(const QString &message)
     emit error(message);
 }
 
+void PreviewController::onAssetError(const QString &message,
+                                     quint64 generation)
+{
+    // An error from the asset decoder after the controller already switched
+    // media or mode belongs to the previous preview and must be ignored.
+    if (generation != m_generation || m_mode != Mode::Asset)
+        return;
+    onError(message);
+}
+
 void PreviewController::onTimelineError(const QString &message)
 {
     // A missing clip or a failed composition must not stop preview: the
     // remaining layers keep rendering and the error is surfaced once.
-    m_timelineFramePending = false;
     emit error(message);
 }
 
@@ -515,8 +554,11 @@ void PreviewController::onTimelineTick()
 
     const int64_t current = currentTimelineUs();
     const int64_t limit = m_durationUs > 0 ? m_durationUs : current;
-    m_positionUs = qBound<qint64>(0, current, limit);
-    emit positionChanged();
+    const qint64 clamped = qBound<qint64>(0, current, limit);
+    if (clamped != m_positionUs) {
+        m_positionUs = clamped;
+        emit positionChanged();
+    }
 
     if (m_playing && m_durationUs > 0 && current >= m_durationUs) {
         m_atEnd = true;
@@ -534,11 +576,6 @@ void PreviewController::onTimelineTick()
     if (frame != m_lastTimelineFrame) {
         m_lastTimelineFrame = frame;
         requestTimelineFrame(framesToMicros(frame, m_timelineFps));
-    } else if (m_timelineFramePending && m_timelinePendingSince.isValid()
-               && m_timelinePendingSince.elapsed() > 500) {
-        // The worker skips a frame when the scene graph still owns the ring
-        // slot. Do not let that skip stall the request gate forever.
-        m_timelineFramePending = false;
     }
 }
 
@@ -546,10 +583,20 @@ void PreviewController::requestTimelineFrame(qint64 timelineUs)
 {
     if (!m_timelineWorker)
         return;
-    m_timelineFramePending = true;
-    m_timelinePendingSince.start();
+    // While a frame is in flight, request() only records the newest target;
+    // the completion path dispatches it. Stale intermediate frames never hit
+    // the worker queue.
+    if (const std::optional<int64_t> dispatch =
+            m_timelineRequests.request(timelineUs)) {
+        dispatchTimelineFrame(*dispatch);
+    }
+}
+
+void PreviewController::dispatchTimelineFrame(int64_t timelineUs)
+{
     QMetaObject::invokeMethod(m_timelineWorker, "renderFrame",
-                              Qt::QueuedConnection, Q_ARG(qint64, timelineUs),
+                              Qt::QueuedConnection,
+                              Q_ARG(qint64, qint64(timelineUs)),
                               Q_ARG(quint64, m_generation));
 }
 

@@ -59,6 +59,34 @@ TEST(SubtitleRasterizer, DrawsChineseTextNearBottomCenter)
     EXPECT_LT((minX + maxX) / 2, 440);
 }
 
+TEST(SubtitleRasterizer, HonorsHorizontalAlignment)
+{
+    const auto horizontalCenter = [](const QImage &image) {
+        int minX = image.width();
+        int maxX = -1;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (qAlpha(image.pixel(x, y)) == 0)
+                    continue;
+                minX = qMin(minX, x);
+                maxX = qMax(maxX, x);
+            }
+        }
+        return maxX < 0 ? -1 : (minX + maxX) / 2;
+    };
+
+    auto aligned = [](int alignment) {
+        SubtitleLayer value = layer(QStringLiteral("测试字幕"));
+        value.style.alignment = alignment;
+        return value;
+    };
+
+    const QImage left = SubtitleRasterizer::render({aligned(1)}, 640, 360, {});
+    const QImage right = SubtitleRasterizer::render({aligned(3)}, 640, 360, {});
+    EXPECT_GT(horizontalCenter(left), 360);
+    EXPECT_LT(horizontalCenter(right), 280);
+}
+
 TEST(SubtitleRasterizer, CacheKeyChangesWithText)
 {
     const QString a = SubtitleRasterizer::cacheKey({layer(QStringLiteral("A"))}, 640, 360);

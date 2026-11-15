@@ -113,7 +113,13 @@ void drawLayer(QPainter &painter, const SubtitleLayer &layer,
     int blockRight = 0;
     for (int i = 0; i < lines.size(); ++i) {
         const int textWidth = metrics.horizontalAdvance(lines.at(i));
+        // alignment: 1 = left edge on the anchor, 3 = right edge on the
+        // anchor, anything else (including the default 2) = centered.
         int x = anchorX - textWidth / 2;
+        if (style.alignment == 1)
+            x = anchorX;
+        else if (style.alignment == 3)
+            x = anchorX - textWidth;
         const int maxX = std::max(marginX, width - marginX - textWidth);
         x = qBound(marginX, x, maxX);
         int baseline = top + i * lineHeight + metrics.ascent();

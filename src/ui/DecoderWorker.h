@@ -36,7 +36,9 @@ signals:
     void frameReady(int slot, QSize size, int rotationDegrees, qint64 ptsUs,
                     quintptr handle0, quintptr handle1, quintptr handle2,
                     quint64 generation);
-    void error(QString message);
+    // Tagged with the open generation so a stale asset error is ignored after
+    // the controller switched media or entered timeline mode.
+    void error(QString message, quint64 generation);
     void finished();
 
 private:
