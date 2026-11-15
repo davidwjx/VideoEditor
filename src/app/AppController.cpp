@@ -274,10 +274,46 @@ void AppController::addAssetToTimeline(const QString &assetId,
     const Track *target = m_document->trackById(trackId);
     if (!target || target->type == TrackType::Subtitle) {
         trackId.clear();
-        for (const Track &track : m_document->project().tracks) {
-            if (track.type == wanted) {
-                trackId = track.id;
-                break;
+        if (wanted == TrackType::Audio && !wantsVideo) {
+            // Standalone music must not land on the lane that already holds a
+            // video's original audio: mute/solo and waveforms would collide.
+            // Use the first free audio lane, or create a dedicated BGM lane.
+            const Project &project = m_document->project();
+            QString firstAudioTrack;
+            QString freeAudioTrack;
+            for (const Track &track : project.tracks) {
+                if (track.type != TrackType::Audio)
+                    continue;
+                if (firstAudioTrack.isEmpty())
+                    firstAudioTrack = track.id;
+                bool hasOriginalAudio = false;
+                for (const Clip &clip : track.clips) {
+                    const Asset *clipAsset = project.assetById(clip.assetId);
+                    if (clipAsset
+                        && (clipAsset->info.hasVideo
+                            || clipAsset->info.kind == MediaKind::Video)) {
+                        hasOriginalAudio = true;
+                        break;
+                    }
+                }
+                if (!hasOriginalAudio) {
+                    freeAudioTrack = track.id;
+                    break;
+                }
+            }
+            if (!freeAudioTrack.isEmpty()) {
+                trackId = freeAudioTrack;
+            } else if (!firstAudioTrack.isEmpty()) {
+                trackId = m_timeline->addTrack(1);
+            } else {
+                trackId.clear();
+            }
+        } else {
+            for (const Track &track : m_document->project().tracks) {
+                if (track.type == wanted) {
+                    trackId = track.id;
+                    break;
+                }
             }
         }
     }
@@ -292,6 +328,9 @@ void AppController::addAssetToTimeline(const QString &assetId,
     if (clipId.isEmpty())
         return; // TimelineController already reported the failure.
     clearError();
+    // Select the inserted clip so the inspector immediately shows its volume,
+    // fades and transform controls (CapCut-style "what I just added" focus).
+    m_timeline->selectClip(clipId);
 
     const Project &project = m_document->project();
     const int64_t duration = TimelineEvaluator(project).durationUs();

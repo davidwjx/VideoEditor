@@ -70,6 +70,9 @@ public:
     Q_INVOKABLE void trimEnd(const QString &clipId, qint64 newEndUs);
     Q_INVOKABLE void splitAtPlayhead();
     Q_INVOKABLE void deleteSelected(bool ripple);
+    // Deletes whatever is selected: a subtitle cue takes precedence, otherwise
+    // the selected clip. One shortcut path for both selection types.
+    Q_INVOKABLE void deleteSelection(bool ripple = false);
     Q_INVOKABLE void copySelected();
     Q_INVOKABLE void pasteAtPlayhead();
     Q_INVOKABLE void setClipSpeed(const QString &clipId, int speedMilli,

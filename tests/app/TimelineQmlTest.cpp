@@ -99,7 +99,9 @@ void dragMouse(QQuickWindow *window, const QPointF &from, const QPointF &to,
     }
     sendMouse(window, QEvent::MouseButtonRelease, to, Qt::LeftButton,
               Qt::NoButton);
-    QTest::qWait(100);
+    // Let the controller commit and the bindings settle before the caller
+    // reads the project; 100 ms was intermittently too short on CI desktops.
+    QTest::qWait(200);
 }
 
 void clickItem(QQuickWindow *window, QQuickItem *item)
@@ -396,8 +398,9 @@ TEST(TimelineQml, TrackHeadersSelectTargetAndToggleAudioMuteSolo)
         GTEST_SKIP() << "window was not exposed (no desktop/D3D session)";
     QTest::qWait(300);
 
-    // The track add/reorder menu and header controls are reachable from QML.
-    EXPECT_NE(findItem(window, QStringLiteral("track-menu-button")), nullptr);
+    // Track management lives in the timeline status strip now; the duplicate
+    // global menu was removed.
+    EXPECT_NE(findItem(window, QStringLiteral("add-track-button")), nullptr);
     EXPECT_NE(findItem(window, QStringLiteral("track-header-track-a1")),
               nullptr);
 
@@ -505,6 +508,9 @@ TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
     controller.timeline()->selectClip(audioClipId);
     const QString cueId = controller.timeline()->addCueAtPlayhead();
     ASSERT_FALSE(cueId.isEmpty());
+    // Adding a cue selects it (one-click subtitle flow); restore the audio
+    // clip selection this test authors keyframes on.
+    controller.timeline()->selectClip(audioClipId);
     controller.timeline()->seekUs(500'000);
 
     QQmlEngine engine;
@@ -546,6 +552,15 @@ TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
     ASSERT_NE(addKeyframe, nullptr);
     ASSERT_NE(keyframeList, nullptr);
     EXPECT_EQ(keyframeList->property("count").toInt(), 0);
+    // Keyframes are progressive disclosure: they stay hidden until the user
+    // opens 高级, so the first screen only shows volume/fades.
+    EXPECT_FALSE(keyframeList->isVisible());
+    QQuickItem *advancedToggle =
+        findItem(window, QStringLiteral("inspector-advanced-toggle"));
+    ASSERT_NE(advancedToggle, nullptr);
+    clickItem(window, advancedToggle);
+    QTest::qWait(80);
+    EXPECT_TRUE(keyframeList->isVisible());
 
     clickItem(window, addKeyframe);
     controller.timeline()->seekUs(1'500'000);
@@ -636,4 +651,449 @@ TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
                           TimelineModel::PositionYPermilleRole)
                   .toInt(),
               cue->positionYPermille);
+}
+
+namespace {
+
+int cueCount(const Project &project)
+{
+    int count = 0;
+    for (const Track &track : project.tracks)
+        count += int(track.cues.size());
+    return count;
+}
+
+int clipCount(const Project &project)
+{
+    int count = 0;
+    for (const Track &track : project.tracks)
+        count += int(track.clips.size());
+    return count;
+}
+
+// Loads Main.qml against a prepared controller and exposes the window. The
+// caller owns the returned root object.
+QQuickWindow *showMainWindow(QQmlEngine &engine, AppController &controller,
+                             QScopedPointer<QObject> &root)
+{
+    engine.addImageProvider(QStringLiteral("waveform"),
+                            new WaveformImageProvider(controller.waveforms()));
+    engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
+                                             controller.preview());
+    engine.rootContext()->setContextProperty(QStringLiteral("Timeline"),
+                                             controller.timeline());
+    engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
+                                             controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("Export"),
+                                             controller.exportController());
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
+                                             QStringLiteral("test"));
+
+    QQmlComponent component(
+        &engine,
+        QUrl::fromLocalFile(QStringLiteral(VIDEOEDITOR_SOURCE_DIR
+                                           "/src/app/Main.qml")));
+    root.reset(component.create());
+    if (component.isError()) {
+        ADD_FAILURE() << component.errorString().toStdString();
+        return nullptr;
+    }
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    if (!window)
+        return nullptr;
+    window->show();
+    if (!QTest::qWaitForWindowExposed(window, 5000))
+        return nullptr;
+    // Keyboard shortcuts only fire for an active window; mouse tests do not
+    // need this but Shortcut delivery does.
+    window->requestActivate();
+    QTest::qWaitForWindowActive(window, 2000);
+    QTest::qWait(300);
+    return window;
+}
+
+} // namespace
+
+TEST(TimelineQml, ShortcutsRespectTextFocusAndEditTimeline)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+    const QString cueId = controller.timeline()->addCueAtPlayhead();
+    ASSERT_FALSE(cueId.isEmpty());
+    controller.timeline()->setCueText(cueId, QStringLiteral("字幕"));
+    // The preview must be in timeline mode with a real duration before Space
+    // can toggle playback.
+    controller.refreshTimelinePreview();
+    controller.timeline()->seekUs(1'000'000);
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key/click delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key delivery";
+
+    // --- Space toggles playback. -----------------------------------------
+    if (QQuickItem *focusSink =
+            findItem(window, QStringLiteral("import-button")))
+        focusSink->forceActiveFocus();
+    QTest::qWait(50);
+    const bool playingBefore = controller.preview()->playing();
+    QTest::keyClick(window, Qt::Key_Space);
+    QTest::qWait(80);
+    EXPECT_NE(controller.preview()->playing(), playingBefore)
+        << "Space must toggle playback";
+    QTest::keyClick(window, Qt::Key_Space);
+    QTest::qWait(80);
+
+    // --- A focused text editor swallows editing shortcuts. ---------------
+    QQuickItem *subtitleText =
+        findItem(window, QStringLiteral("subtitle-text"));
+    ASSERT_NE(subtitleText, nullptr);
+    subtitleText->forceActiveFocus();
+    QTest::qWait(50);
+    ASSERT_TRUE(subtitleText->hasActiveFocus());
+
+    const int clipsBeforeTyping = clipCount(controller.document()->project());
+    const int undoBeforeTyping = controller.document()->undoStack()->index();
+    const double zoomBeforeTyping = controller.timeline()->pixelsPerSecond();
+    QTest::keyClick(window, Qt::Key_S);
+    QTest::keyClick(window, Qt::Key_Plus);
+    QTest::keyClick(window, Qt::Key_Minus);
+    QTest::qWait(80);
+    EXPECT_EQ(clipCount(controller.document()->project()), clipsBeforeTyping)
+        << "typing s/+/- must not split or edit the timeline";
+    EXPECT_EQ(controller.document()->undoStack()->index(), undoBeforeTyping);
+    EXPECT_DOUBLE_EQ(controller.timeline()->pixelsPerSecond(),
+                     zoomBeforeTyping)
+        << "typing +/- must not zoom the timeline";
+    EXPECT_TRUE(subtitleText->property("text").toString()
+                    .contains(QStringLiteral("s")))
+        << "typed text must reach the subtitle field";
+
+    // Arrow keys must not move the playhead while text editing either.
+    const qint64 positionBeforeTyping = controller.timeline()->positionUs();
+    QTest::keyClick(window, Qt::Key_Right);
+    QTest::qWait(50);
+    EXPECT_EQ(controller.timeline()->positionUs(), positionBeforeTyping);
+
+    // Release text focus and make sure editing shortcuts work again.
+    if (QQuickItem *focusSink =
+            findItem(window, QStringLiteral("import-button")))
+        focusSink->forceActiveFocus();
+    QTest::qWait(50);
+
+    // --- Ctrl+B splits the clip under the playhead even when a cue is
+    // selected elsewhere. -------------------------------------------------
+    controller.timeline()->selectCue(cueId);
+    controller.timeline()->seekUs(1'000'000);
+    const int videoClipsBefore = int(
+        controller.document()->trackById(QStringLiteral("track-v1"))
+            ->clips.size());
+    const int undoBeforeSplit = controller.document()->undoStack()->index();
+    QTest::keyClick(window, Qt::Key_B, Qt::ControlModifier);
+    QTest::qWait(80);
+    EXPECT_EQ(int(controller.document()->trackById(QStringLiteral("track-v1"))
+                      ->clips.size()),
+              videoClipsBefore + 1)
+        << "Ctrl+B must split the clip under the playhead";
+    EXPECT_GE(controller.document()->undoStack()->index(), undoBeforeSplit + 1);
+
+    // --- Delete dispatches to the selected cue. --------------------------
+    controller.timeline()->selectCue(cueId);
+    const int cuesBeforeDelete = cueCount(controller.document()->project());
+    QTest::keyClick(window, Qt::Key_Delete);
+    QTest::qWait(80);
+    EXPECT_EQ(cueCount(controller.document()->project()), cuesBeforeDelete - 1)
+        << "Delete must remove the selected subtitle cue";
+    EXPECT_TRUE(controller.timeline()->selectedCueId().isEmpty());
+
+    // --- Delete removes a selected clip. ---------------------------------
+    const QString splitClipId = controller.document()
+                                    ->trackById(QStringLiteral("track-v1"))
+                                    ->clips.first().id;
+    controller.timeline()->selectClip(splitClipId);
+    const int clipsBeforeDelete = clipCount(controller.document()->project());
+    QTest::keyClick(window, Qt::Key_Delete);
+    QTest::qWait(80);
+    // A linked A/V pair is deleted together, so assert a decrease rather than
+    // exactly one clip.
+    EXPECT_LT(clipCount(controller.document()->project()), clipsBeforeDelete)
+        << "Delete must remove the selected clip";
+    EXPECT_TRUE(controller.timeline()->selectedClipId().isEmpty());
+
+    // --- Ctrl+Z / Ctrl+Y mirror the undo stack. --------------------------
+    if (QQuickItem *focusSink =
+            findItem(window, QStringLiteral("import-button")))
+        focusSink->forceActiveFocus();
+    const int undoBeforeUndo = controller.document()->undoStack()->index();
+    QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+    QTest::qWait(80);
+    EXPECT_LT(controller.document()->undoStack()->index(), undoBeforeUndo)
+        << "Ctrl+Z must undo";
+    QTest::keyClick(window, Qt::Key_Y, Qt::ControlModifier);
+    QTest::qWait(80);
+    EXPECT_EQ(controller.document()->undoStack()->index(), undoBeforeUndo)
+        << "Ctrl+Y must redo the undone step";
+
+    // --- Arrow keys step one frame when no editor has focus. -------------
+    controller.timeline()->seekUs(1'000'000);
+    const qint64 frameStart = controller.timeline()->positionUs();
+    QTest::keyClick(window, Qt::Key_Right);
+    QTest::qWait(80);
+    const qint64 expected = controller.timeline()->frameQuantizeUs(
+        1'000'000) + (1'000'000 / 30);
+    EXPECT_GT(controller.timeline()->positionUs(), frameStart);
+    EXPECT_LE(qMax<qint64>(0, controller.timeline()->positionUs() - expected),
+              40'000)
+        << "Right must advance about one frame";
+    QTest::keyClick(window, Qt::Key_Left);
+    QTest::qWait(80);
+    EXPECT_LT(controller.timeline()->positionUs(), frameStart + 1'000'000);
+}
+
+TEST(TimelineQml, OneClickSubtitleExportEntryAndDisclosure)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key/click delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for click delivery";
+
+    // --- Export entry is fixed in the right half and enabled. ------------
+    QQuickItem *exportButton =
+        findItem(window, QStringLiteral("exportButton"));
+    ASSERT_NE(exportButton, nullptr);
+    EXPECT_TRUE(exportButton->isVisible());
+    EXPECT_TRUE(exportButton->isEnabled());
+    const QPointF exportScene = exportButton->mapToScene(
+        QPointF(exportButton->width() / 2.0, exportButton->height() / 2.0));
+    EXPECT_GT(exportScene.x(), window->width() / 2.0)
+        << "export must stay in the top-right corner";
+
+    // --- One-click subtitle creates and focuses the editor. --------------
+    QQuickItem *subtitleAdd = findItem(window, QStringLiteral("subtitle-add"));
+    ASSERT_NE(subtitleAdd, nullptr);
+    const int cuesBefore = cueCount(controller.document()->project());
+    clickItem(window, subtitleAdd);
+    QTest::qWait(120);
+    EXPECT_EQ(cueCount(controller.document()->project()), cuesBefore + 1);
+    QQuickItem *subtitleText =
+        findItem(window, QStringLiteral("subtitle-text"));
+    ASSERT_NE(subtitleText, nullptr);
+    EXPECT_TRUE(subtitleText->hasActiveFocus())
+        << "the one-click subtitle flow must focus the text editor";
+
+    // --- Progressive disclosure: keyframes stay hidden until 高级. --------
+    QQuickItem *keyframeList =
+        findItem(window, QStringLiteral("inspector-keyframe-list"));
+    ASSERT_NE(keyframeList, nullptr);
+    EXPECT_FALSE(keyframeList->isVisible());
+    QQuickItem *advancedToggle =
+        findItem(window, QStringLiteral("inspector-advanced-toggle"));
+    ASSERT_NE(advancedToggle, nullptr);
+    clickItem(window, advancedToggle);
+    QTest::qWait(80);
+    EXPECT_TRUE(keyframeList->isVisible());
+
+    // --- Context menus exist without occupying the primary bar. ----------
+    const QString clipId = controller.document()
+                               ->trackById(QStringLiteral("track-v1"))
+                               ->clips.first().id;
+    controller.timeline()->selectClip(clipId);
+    QTest::qWait(80);
+    QQuickItem *clipItem =
+        findItem(window, QStringLiteral("clip-") + clipId);
+    ASSERT_NE(clipItem, nullptr);
+    const QPointF menuPoint = clipItem->mapToScene(
+        QPointF(clipItem->width() / 2.0, clipItem->height() / 2.0));
+    sendMouse(window, QEvent::MouseButtonPress, menuPoint, Qt::RightButton,
+              Qt::RightButton);
+    sendMouse(window, QEvent::MouseButtonRelease, menuPoint, Qt::RightButton,
+              Qt::NoButton);
+    QTest::qWait(150);
+
+    QObject *clipMenu =
+        window->findChild<QObject *>(QStringLiteral("clip-context-menu"));
+    ASSERT_NE(clipMenu, nullptr);
+    EXPECT_TRUE(clipMenu->property("visible").toBool());
+    for (const auto &name : {
+             QStringLiteral("clip-menu-split"),
+             QStringLiteral("clip-menu-delete"),
+             QStringLiteral("clip-menu-ripple"),
+             QStringLiteral("clip-menu-detach"),
+             QStringLiteral("clip-menu-link") }) {
+        EXPECT_NE(window->findChild<QObject *>(name), nullptr)
+            << name.toStdString();
+    }
+    EXPECT_NE(findItem(window, QStringLiteral("selection-context-bar")),
+              nullptr);
+
+    // --- Status chips reflect the bound controller state. ----------------
+    QQuickItem *snapToggle = findItem(window, QStringLiteral("snap-toggle"));
+    QQuickItem *proxyToggle = findItem(window, QStringLiteral("proxy-toggle"));
+    ASSERT_NE(snapToggle, nullptr);
+    ASSERT_NE(proxyToggle, nullptr);
+    EXPECT_EQ(snapToggle->property("checked").toBool(),
+              controller.timeline()->snapEnabled());
+    EXPECT_EQ(proxyToggle->property("checked").toBool(),
+              controller.useProxy());
+}
+
+TEST(TimelineQml, ExportEntryDisabledOnEmptyTimeline)
+{
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    ASSERT_EQ(clipCount(controller.document()->project()), 0);
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key/click delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+
+    QQuickItem *exportButton =
+        findItem(window, QStringLiteral("exportButton"));
+    ASSERT_NE(exportButton, nullptr);
+    EXPECT_FALSE(exportButton->isEnabled())
+        << "export must be disabled before any clip exists";
+}
+
+TEST(TimelineQml, BgmLandsOnItsOwnAudioLane)
+{
+    const QString video = fixture(QStringLiteral("h264.mp4"));
+    const QString music = fixture(QStringLiteral("bgm.mp3"));
+    if (!QFileInfo::exists(video) || !QFileInfo::exists(music))
+        GTEST_SKIP() << "missing fixtures";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(video),
+                           QUrl::fromLocalFile(music)});
+    ASSERT_EQ(controller.mediaModel()->rowCount(), 2);
+    const QString videoId = controller.document()->project().assets.at(0).id;
+    const QString musicId = controller.document()->project().assets.at(1).id;
+
+    // The video's original audio occupies A1.
+    controller.addAssetToTimeline(videoId);
+    ASSERT_EQ(controller.document()->trackById(QStringLiteral("track-a1"))
+                  ->clips.size(),
+              1);
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key/click delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for click delivery";
+
+    // Double-click the music item with no explicit target lane.
+    QQuickItem *musicItem =
+        findItem(window, QStringLiteral("media-item-") + musicId);
+    ASSERT_NE(musicItem, nullptr);
+    doubleClickItem(window, musicItem);
+    QTest::qWait(120);
+
+    const Project &project = controller.document()->project();
+    int audioTracks = 0;
+    QString musicTrackId;
+    for (const Track &track : project.tracks) {
+        if (track.type != TrackType::Audio)
+            continue;
+        ++audioTracks;
+        for (const Clip &clip : track.clips) {
+            if (clip.assetId == musicId)
+                musicTrackId = track.id;
+        }
+    }
+    EXPECT_GE(audioTracks, 2) << "a separate BGM lane must be created";
+    EXPECT_FALSE(musicTrackId.isEmpty());
+    EXPECT_NE(musicTrackId, QStringLiteral("track-a1"))
+        << "BGM must not overlap the video's original audio on A1";
+    EXPECT_EQ(controller.document()->trackById(QStringLiteral("track-a1"))
+                  ->clips.size(),
+              1)
+        << "A1 must keep only the original audio clip";
+    EXPECT_FALSE(controller.timeline()->selectedClipId().isEmpty())
+        << "the inserted BGM clip should be selected";
+}
+
+TEST(TimelineQml, PlayheadAutoFollowsDuringSeeks)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+    // Extend the project so the playhead can move far beyond the viewport.
+    const QString cueId = controller.timeline()->addCueAtPlayhead();
+    ASSERT_FALSE(cueId.isEmpty());
+    ASSERT_TRUE(controller.timeline()->setCueTiming(cueId, 60'000'000,
+                                                    62'000'000));
+    controller.timeline()->setPixelsPerSecond(80.0);
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key/click delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for scroll delivery";
+
+    QQuickItem *flick =
+        findItem(window, QStringLiteral("timeline-flickable"));
+    ASSERT_NE(flick, nullptr);
+    EXPECT_NEAR(flick->property("contentX").toDouble(), 0.0, 0.001);
+
+    controller.timeline()->seekUs(50'000'000);
+    QTest::qWait(120);
+    EXPECT_GT(flick->property("contentX").toDouble(), 0.0)
+        << "the timeline must scroll to keep the playhead visible";
 }

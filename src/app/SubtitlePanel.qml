@@ -3,16 +3,23 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
 
-// Subtitle track editor: add/delete cues, import/export SRT, apply style
-// presets and edit each cue's text in place.
+// Subtitle section. "+ 字幕" is the single frequent action: it creates a cue at
+// the playhead, selects it, and focuses a text field so the user can type
+// immediately without another click. SRT import/export live in the overflow
+// menu; precise timing, style and position remain visible.
 ColumnLayout {
     id: panel
+    objectName: "subtitle-panel"
     spacing: 6
 
     function cueField(name, fallback) {
         const map = Timeline.selectedCue
         const value = map ? map[name] : undefined
         return value === undefined ? fallback : value
+    }
+
+    function selectedCueText() {
+        return panel.cueField("text", "")
     }
 
     function resetTimingFields() {
@@ -33,6 +40,13 @@ ColumnLayout {
                               Math.round(end))
     }
 
+    function commitTopText() {
+        if (Timeline.selectedCueId === "")
+            return
+        if (topText.editBuffer !== panel.selectedCueText())
+            Timeline.setCueText(Timeline.selectedCueId, topText.editBuffer)
+    }
+
     function commitPositionX(permille) {
         if (Timeline.selectedCueId !== "")
             Timeline.setCuePosition(panel.cueField("trackId", ""),
@@ -49,42 +63,120 @@ ColumnLayout {
                                     Math.round(permille))
     }
 
-    Label {
-        text: "字幕"
-        font.bold: true
-        color: "#dddddd"
+    function focusSelectedText() {
+        if (Timeline.selectedCueId === "")
+            return
+        topText.forceActiveFocus()
+        topText.selectAll()
     }
 
     RowLayout {
         Layout.fillWidth: true
+        Label {
+            text: "字幕"
+            font.bold: true
+            color: "#dddddd"
+            Layout.fillWidth: true
+        }
+        ToolButton {
+            objectName: "subtitle-overflow"
+            text: "⋯"
+            onClicked: subtitleMenu.open()
+            ToolTip.visible: hovered
+            ToolTip.text: "更多字幕操作"
+            Menu {
+                id: subtitleMenu
+                MenuItem {
+                    objectName: "subtitle-import-srt"
+                    text: "导入 SRT…"
+                    onClicked: srtImport.open()
+                }
+                MenuItem {
+                    objectName: "subtitle-export-srt"
+                    text: "导出 SRT…"
+                    onClicked: srtExport.open()
+                }
+                MenuSeparator {}
+                MenuItem {
+                    objectName: "subtitle-delete"
+                    text: "删除选中字幕"
+                    enabled: Timeline.selectedCueId !== ""
+                    onClicked: Timeline.deleteSelectedCue()
+                }
+            }
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 6
+
         Button {
-            text: "在播放头添加"
-            onClicked: Timeline.addCueAtPlayhead()
+            objectName: "subtitle-add"
+            Layout.fillWidth: true
+            text: "＋ 字幕（播放头）"
+            highlighted: true
+            onClicked: {
+                const id = Timeline.addCueAtPlayhead()
+                if (id.length > 0) {
+                    Qt.callLater(function() {
+                        topText.forceActiveFocus()
+                        topText.selectAll()
+                    })
+                }
+            }
+            ToolTip.visible: hovered
+            ToolTip.text: "在播放头添加字幕并立即输入"
         }
         Button {
-            text: "删除选中"
+            objectName: "subtitle-delete-button"
+            text: "删除"
+            enabled: Timeline.selectedCueId !== ""
             onClicked: Timeline.deleteSelectedCue()
         }
     }
-    RowLayout {
+
+    // Direct editor for the selected cue. This is the one-click path: after
+    // "+ 字幕" the text is selected so typing replaces the placeholder.
+    TextField {
+        id: topText
+        objectName: "subtitle-text"
         Layout.fillWidth: true
-        Button {
-            text: "导入 SRT"
-            onClicked: srtImport.open()
+        enabled: Timeline.selectedCueId !== ""
+        placeholderText: Timeline.selectedCueId !== ""
+                         ? "输入字幕文本" : "先添加或选中一条字幕"
+        property string editBuffer: ""
+        onTextChanged: {
+            if (activeFocus)
+                editBuffer = text
         }
-        Button {
-            text: "导出 SRT"
-            onClicked: srtExport.open()
+        onEditingFinished: panel.commitTopText()
+        onActiveFocusChanged: {
+            if (activeFocus)
+                editBuffer = text
+        }
+        Binding {
+            target: topText
+            property: "text"
+            value: panel.selectedCueText()
+            when: !topText.activeFocus
         }
     }
 
-    ComboBox {
-        id: styleBox
+    RowLayout {
         Layout.fillWidth: true
-        model: App.subtitleStyles()
-        textRole: "name"
-        valueRole: "id"
-        onActivated: Timeline.applySubtitleStyle(currentValue)
+        Label { text: "样式"; color: "#cccccc"; font.pixelSize: 11 }
+        ComboBox {
+            id: styleBox
+            objectName: "subtitle-style"
+            Layout.fillWidth: true
+            model: App.subtitleStyles()
+            textRole: "name"
+            valueRole: "id"
+            enabled: Timeline.selectedCueId !== ""
+            onActivated: Timeline.applySubtitleStyle(
+                             currentValue, Timeline.selectedCueId)
+        }
     }
 
     // Timing fields edit the selected cue in seconds and preserve its text,
@@ -191,15 +283,17 @@ ColumnLayout {
     }
 
     ListView {
+        id: cueList
+        objectName: "subtitle-cue-list"
         Layout.fillWidth: true
-        Layout.fillHeight: true
+        Layout.preferredHeight: Math.min(220, contentHeight)
         clip: true
         model: Timeline.timelineModel
 
         delegate: Rectangle {
             width: ListView.view.width
             visible: model.kind === "cue"
-            height: visible ? 70 : 0
+            height: visible ? 58 : 0
             color: model.selected ? "#3a3424" : "transparent"
             border.color: "#2a2a2a"
 
@@ -218,22 +312,8 @@ ColumnLayout {
                         font.pixelSize: 11
                     }
                     Item { Layout.fillWidth: true }
-                    ComboBox {
-                        id: cueStyle
-                        Layout.preferredWidth: 110
-                        model: App.subtitleStyles()
-                        textRole: "name"
-                        valueRole: "id"
-                        onActivated: Timeline.applySubtitleStyle(currentValue,
-                                                                 model.itemId)
-                        Binding {
-                            target: cueStyle
-                            property: "currentIndex"
-                            value: Math.max(0, cueStyle.indexOfValue(model.styleId))
-                            when: !cueStyle.pressed
-                        }
-                    }
                     ToolButton {
+                        objectName: "cue-delete-" + model.itemId
                         text: "删"
                         font.pixelSize: 11
                         padding: 2

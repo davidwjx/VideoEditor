@@ -561,26 +561,33 @@ void TimelineController::trimEnd(const QString &clipId, qint64 newEndUs)
 void TimelineController::splitAtPlayhead()
 {
     QList<ClipLocator> locators;
-    if (!m_selectedClipId.isEmpty()) {
-        QString trackId;
-        const Clip *clip = nullptr;
-        if (trackForClip(m_selectedClipId, &trackId))
-            clip = findClip(trackId, m_selectedClipId);
-        if (clip && m_positionUs > clip->timelineStartUs
-            && m_positionUs < clip->timelineEndUs()) {
-            locators.append(ClipLocator{trackId, m_selectedClipId});
-        }
-    } else {
-        for (const Track &track : m_document.project().tracks) {
-            if (track.type == TrackType::Subtitle)
-                continue;
-            for (const Clip &clip : track.clips) {
-                if (m_positionUs > clip.timelineStartUs
-                    && m_positionUs < clip.timelineEndUs()) {
-                    locators.append(ClipLocator{track.id, clip.id});
-                }
+    for (const Track &track : m_document.project().tracks) {
+        if (track.type == TrackType::Subtitle)
+            continue;
+        for (const Clip &clip : track.clips) {
+            if (m_positionUs > clip.timelineStartUs
+                && m_positionUs < clip.timelineEndUs()) {
+                locators.append(ClipLocator{track.id, clip.id});
             }
         }
+    }
+
+    // Fallback: the playhead is elsewhere but the user explicitly selected a
+    // clip that still contains a valid split point.
+    if (locators.isEmpty() && !m_selectedClipId.isEmpty()) {
+        QString trackId;
+        if (trackForClip(m_selectedClipId, &trackId)) {
+            const Clip *clip = findClip(trackId, m_selectedClipId);
+            if (clip && m_positionUs > clip->timelineStartUs
+                && m_positionUs < clip->timelineEndUs()) {
+                locators.append(ClipLocator{trackId, m_selectedClipId});
+            }
+        }
+    }
+
+    if (locators.isEmpty()) {
+        emit editFailed(QStringLiteral("播放头不在可分割的片段上。"));
+        return;
     }
 
     // splitClip already acts on the whole linked group, so call it once per
@@ -609,6 +616,21 @@ void TimelineController::deleteSelected(bool ripple)
     if (!trackForClip(m_selectedClipId, &trackId))
         return;
     m_editor.deleteClip(trackId, m_selectedClipId, ripple);
+}
+
+void TimelineController::deleteSelection(bool ripple)
+{
+    // Selecting a cue deliberately clears the clip selection, so dispatch on
+    // the cue first or Delete would silently do nothing for subtitles.
+    if (!m_selectedCueId.isEmpty()) {
+        deleteSelectedCue();
+        return;
+    }
+    if (!m_selectedClipId.isEmpty()) {
+        deleteSelected(ripple);
+        return;
+    }
+    emit editFailed(QStringLiteral("请先选择片段或字幕。"));
 }
 
 void TimelineController::copySelected()
@@ -880,6 +902,9 @@ QString TimelineController::addCueAtPlayhead()
         emit editFailed(QStringLiteral("添加字幕失败。"));
         return {};
     }
+    // Selecting the new cue immediately makes Delete, the subtitle text field
+    // and the inspector target the cue the user just created.
+    selectCue(id);
     return id;
 }
 

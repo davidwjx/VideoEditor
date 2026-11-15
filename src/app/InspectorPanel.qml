@@ -2,12 +2,16 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Properties for the selected clip. Controls are initialized from
-// Timeline.selectedClip and only commit to the controller on release, so one
-// drag is one undo step and unrelated fields are preserved by the dedicated
-// single-field setters.
-ScrollView {
+// Selected-clip inspector. The first screen shows only the common controls
+// ("基础"); keyframes, pan and preserve-pitch live behind an explicit "高级"
+// disclosure. Nothing was removed from the controller: every professional
+// parameter is still reachable here.
+ColumnLayout {
     id: inspector
+    objectName: "inspector-panel"
+    spacing: 5
+
+    property bool advancedOpen: false
 
     readonly property var clip: Timeline.selectedClip
     readonly property var speedValues: [250, 500, 1000, 1500, 2000, 4000]
@@ -84,65 +88,299 @@ ScrollView {
                                       Timeline.selectedClipId, index)
     }
 
-    ColumnLayout {
-        width: inspector.availableWidth
-        spacing: 4
+    Label {
+        text: "片段属性"
+        font.bold: true
+        color: "#dddddd"
+    }
+    Label {
+        text: inspector.hasClip()
+              ? (inspector.isAudioClip() ? "音频片段" : "视频片段")
+              : "未选择片段"
+        color: "#999999"
+    }
 
-        Label {
-            text: "片段属性"
-            font.bold: true
-            color: "#dddddd"
-        }
-        Label {
-            text: inspector.hasClip() ? "已选择片段" : "未选择片段"
-            color: "#999999"
-        }
+    // ------------------------------------------------------------------
+    // 基础
+    // ------------------------------------------------------------------
+    Label {
+        text: "基础"
+        font.bold: true
+        color: "#cfcfcf"
+        Layout.topMargin: 2
+    }
 
-        RowLayout {
+    RowLayout {
+        Layout.fillWidth: true
+        Label { text: "变速"; color: "#cccccc" }
+        ComboBox {
+            id: speedBox
+            objectName: "inspector-speed"
             Layout.fillWidth: true
-            Label { text: "变速"; color: "#cccccc" }
-            ComboBox {
-                id: speedBox
-                objectName: "inspector-speed"
-                Layout.fillWidth: true
-                editable: true
-                model: inspector.speedModel
-                enabled: inspector.hasClip()
-                onActivated: {
-                    if (index < inspector.speedValues.length) {
-                        Timeline.setClipSpeed(Timeline.selectedClipId,
-                                              inspector.speedValues[index],
-                                              preservePitch.checked)
-                    }
-                }
-                // Free-form entry keeps non-preset speeds editable instead of
-                // displaying 1x for them.
-                onAccepted: {
-                    const parsed = parseFloat(text)
-                    if (inspector.hasClip() && isFinite(parsed)
-                        && parsed >= 0.25 && parsed <= 4) {
-                        Timeline.setClipSpeed(Timeline.selectedClipId,
-                                              Math.round(parsed * 1000),
-                                              preservePitch.checked)
-                    } else {
-                        editText = inspector.formatSpeed(
-                                       inspector.clipField("speedMilli", 1000))
-                    }
+            editable: true
+            model: inspector.speedModel
+            enabled: inspector.hasClip()
+            onActivated: {
+                if (index < inspector.speedValues.length) {
+                    Timeline.setClipSpeed(Timeline.selectedClipId,
+                                          inspector.speedValues[index],
+                                          preservePitch.checked)
                 }
             }
-            Binding {
-                target: speedBox
-                property: "currentIndex"
-                value: {
-                    const index = inspector.speedIndexFor(
-                                      inspector.clipField("speedMilli", 1000))
-                    return index < 0 ? speedBox.model.length - 1 : index
+            // Free-form entry keeps non-preset speeds editable instead of
+            // displaying 1x for them.
+            onAccepted: {
+                const parsed = parseFloat(text)
+                if (inspector.hasClip() && isFinite(parsed)
+                    && parsed >= 0.25 && parsed <= 4) {
+                    Timeline.setClipSpeed(Timeline.selectedClipId,
+                                          Math.round(parsed * 1000),
+                                          preservePitch.checked)
+                } else {
+                    editText = inspector.formatSpeed(
+                                   inspector.clipField("speedMilli", 1000))
                 }
-                when: !speedBox.pressed && !speedBox.activeFocus
             }
         }
+        Binding {
+            target: speedBox
+            property: "currentIndex"
+            value: {
+                const index = inspector.speedIndexFor(
+                                  inspector.clipField("speedMilli", 1000))
+                return index < 0 ? speedBox.model.length - 1 : index
+            }
+            when: !speedBox.pressed && !speedBox.activeFocus
+        }
+    }
+
+    // Video picture controls.
+    Label {
+        visible: inspector.hasClip() && !inspector.isAudioClip()
+        text: "画面缩放"
+        color: "#cccccc"
+    }
+    Slider {
+        id: scale
+        objectName: "inspector-scale"
+        visible: inspector.hasClip() && !inspector.isAudioClip()
+        Layout.fillWidth: true
+        from: 10
+        to: 400
+        enabled: inspector.hasClip() && !inspector.isAudioClip()
+        property real pendingValue: 100
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                Timeline.setClipScale(Timeline.selectedClipId,
+                                      Math.round(value * 10))
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                Timeline.setClipScale(Timeline.selectedClipId,
+                                      Math.round(pendingValue * 10))
+            }
+        }
+        Binding {
+            target: scale
+            property: "value"
+            value: inspector.clipField("scaleMilli", 1000) / 10
+            when: !scale.pressed
+        }
+    }
+
+    Label {
+        visible: inspector.hasClip() && !inspector.isAudioClip()
+        text: "不透明度"
+        color: "#cccccc"
+    }
+    Slider {
+        id: opacity
+        objectName: "inspector-opacity"
+        visible: inspector.hasClip() && !inspector.isAudioClip()
+        Layout.fillWidth: true
+        from: 0
+        to: 100
+        enabled: inspector.hasClip() && !inspector.isAudioClip()
+        property real pendingValue: 100
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                Timeline.setClipOpacity(Timeline.selectedClipId,
+                                        Math.round(value * 10))
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                Timeline.setClipOpacity(Timeline.selectedClipId,
+                                        Math.round(pendingValue * 10))
+            }
+        }
+        Binding {
+            target: opacity
+            property: "value"
+            value: inspector.clipField("opacityMilli", 1000) / 10
+            when: !opacity.pressed
+        }
+    }
+
+    // Audio first screen: volume, fades and mute are the three things a BGM
+    // edit needs. Pan and keyframes stay under 高级.
+    Label {
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        text: "音量"
+        color: "#cccccc"
+    }
+    Slider {
+        id: volume
+        objectName: "inspector-volume"
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        Layout.fillWidth: true
+        from: 0
+        to: 200
+        enabled: inspector.hasClip() && inspector.isAudioClip()
+        property real pendingValue: 100
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                Timeline.setClipVolume(Timeline.selectedClipId,
+                                       Math.round(value * 10))
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                Timeline.setClipVolume(Timeline.selectedClipId,
+                                       Math.round(pendingValue * 10))
+            }
+        }
+        Binding {
+            target: volume
+            property: "value"
+            value: inspector.clipField("volumeMilli", 1000) / 10
+            when: !volume.pressed
+        }
+    }
+    CheckBox {
+        id: muteBox
+        objectName: "inspector-mute"
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        text: "静音"
+        enabled: inspector.hasClip() && inspector.isAudioClip()
+        property int lastVolume: 1000
+        checked: inspector.clipField("volumeMilli", 1000) === 0
+        onToggled: {
+            if (!inspector.hasClip())
+                return
+            if (checked) {
+                lastVolume = Math.max(1, inspector.clipField("volumeMilli",
+                                                             1000))
+                Timeline.setClipVolume(Timeline.selectedClipId, 0)
+            } else {
+                Timeline.setClipVolume(Timeline.selectedClipId, lastVolume)
+            }
+        }
+    }
+
+    Label {
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        text: "淡入（秒）"
+        color: "#cccccc"
+    }
+    Slider {
+        id: fadeIn
+        objectName: "inspector-fadeIn"
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        Layout.fillWidth: true
+        from: 0
+        to: 5
+        enabled: inspector.hasClip() && inspector.isAudioClip()
+        property real pendingValue: 0
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                inspector.commitFadeIn(value)
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                inspector.commitFadeIn(pendingValue)
+            }
+        }
+        Binding {
+            target: fadeIn
+            property: "value"
+            value: inspector.clipField("fadeInUs", 0) / 1e6
+            when: !fadeIn.pressed
+        }
+    }
+    Label {
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        text: "淡出（秒）"
+        color: "#cccccc"
+    }
+    Slider {
+        id: fadeOut
+        objectName: "inspector-fadeOut"
+        visible: inspector.hasClip() && inspector.isAudioClip()
+        Layout.fillWidth: true
+        from: 0
+        to: 5
+        enabled: inspector.hasClip() && inspector.isAudioClip()
+        property real pendingValue: 0
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                inspector.commitFadeOut(value)
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (inspector.hasClip()) {
+                inspector.commitFadeOut(pendingValue)
+            }
+        }
+        Binding {
+            target: fadeOut
+            property: "value"
+            value: inspector.clipField("fadeOutUs", 0) / 1e6
+            when: !fadeOut.pressed
+        }
+    }
+
+    Button {
+        objectName: "inspector-advanced-toggle"
+        Layout.fillWidth: true
+        text: inspector.advancedOpen ? "收起高级 ▴" : "高级 ▾"
+        onClicked: inspector.advancedOpen = !inspector.advancedOpen
+    }
+
+    // ------------------------------------------------------------------
+    // 高级: keyframes, pan, preserve pitch and low-frequency detail.
+    // ------------------------------------------------------------------
+    ColumnLayout {
+        objectName: "inspector-advanced-panel"
+        Layout.fillWidth: true
+        visible: inspector.advancedOpen
+        spacing: 5
+
         CheckBox {
             id: preservePitch
+            objectName: "inspector-preserve-pitch"
             text: "保持音高"
             enabled: inspector.hasClip()
             onClicked: if (inspector.hasClip())
@@ -158,47 +396,45 @@ ScrollView {
         }
 
         Label {
-            visible: inspector.hasClip() && !inspector.isAudioClip()
-            text: "音频参数请选择链接的音频片段（A 轨）"
-            color: "#b08a5a"
-            font.pixelSize: 10
-            wrapMode: Text.WordWrap
-            Layout.fillWidth: true
+            text: "声像"
+            color: "#cccccc"
         }
-        Label { text: "音量"; color: "#cccccc" }
         Slider {
-            id: volume
-            objectName: "inspector-volume"
+            id: pan
+            objectName: "inspector-pan"
             Layout.fillWidth: true
-            from: 0
-            to: 200
+            from: -100
+            to: 100
             enabled: inspector.hasClip() && inspector.isAudioClip()
-            property real pendingValue: 100
+            property real pendingValue: 0
             onMoved: {
                 if (pressed) {
                     pendingValue = value
                 } else if (inspector.hasClip()) {
-                    Timeline.setClipVolume(Timeline.selectedClipId,
-                                           Math.round(value * 10))
+                    Timeline.setClipPan(Timeline.selectedClipId,
+                                        Math.round(value * 10))
                 }
             }
             onPressedChanged: {
                 if (pressed) {
                     pendingValue = value
                 } else if (inspector.hasClip()) {
-                    Timeline.setClipVolume(Timeline.selectedClipId,
-                                           Math.round(pendingValue * 10))
+                    Timeline.setClipPan(Timeline.selectedClipId,
+                                        Math.round(pendingValue * 10))
                 }
             }
             Binding {
-                target: volume
+                target: pan
                 property: "value"
-                value: inspector.clipField("volumeMilli", 1000) / 10
-                when: !volume.pressed
+                value: inspector.clipField("panMilli", 0) / 10
+                when: !pan.pressed
             }
         }
 
-        Label { text: "音量关键帧"; color: "#cccccc" }
+        Label {
+            text: "音量关键帧"
+            color: "#cccccc"
+        }
         ListView {
             id: keyframeList
             objectName: "inspector-keyframe-list"
@@ -246,167 +482,6 @@ ScrollView {
                 text: "共 " + inspector.clipField("keyframeCount", 0)
                 color: "#999999"
                 font.pixelSize: 11
-            }
-        }
-
-        Label { text: "声像"; color: "#cccccc" }
-        Slider {
-            id: pan
-            objectName: "inspector-pan"
-            Layout.fillWidth: true
-            from: -100
-            to: 100
-            enabled: inspector.hasClip() && inspector.isAudioClip()
-            property real pendingValue: 0
-            onMoved: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    Timeline.setClipPan(Timeline.selectedClipId,
-                                        Math.round(value * 10))
-                }
-            }
-            onPressedChanged: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    Timeline.setClipPan(Timeline.selectedClipId,
-                                        Math.round(pendingValue * 10))
-                }
-            }
-            Binding {
-                target: pan
-                property: "value"
-                value: inspector.clipField("panMilli", 0) / 10
-                when: !pan.pressed
-            }
-        }
-
-        Label { text: "淡入（秒）"; color: "#cccccc" }
-        Slider {
-            id: fadeIn
-            objectName: "inspector-fadeIn"
-            Layout.fillWidth: true
-            from: 0
-            to: 5
-            enabled: inspector.hasClip() && inspector.isAudioClip()
-            property real pendingValue: 0
-            onMoved: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    inspector.commitFadeIn(value)
-                }
-            }
-            onPressedChanged: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    inspector.commitFadeIn(pendingValue)
-                }
-            }
-            Binding {
-                target: fadeIn
-                property: "value"
-                value: inspector.clipField("fadeInUs", 0) / 1e6
-                when: !fadeIn.pressed
-            }
-        }
-
-        Label { text: "淡出（秒）"; color: "#cccccc" }
-        Slider {
-            id: fadeOut
-            objectName: "inspector-fadeOut"
-            Layout.fillWidth: true
-            from: 0
-            to: 5
-            enabled: inspector.hasClip() && inspector.isAudioClip()
-            property real pendingValue: 0
-            onMoved: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    inspector.commitFadeOut(value)
-                }
-            }
-            onPressedChanged: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    inspector.commitFadeOut(pendingValue)
-                }
-            }
-            Binding {
-                target: fadeOut
-                property: "value"
-                value: inspector.clipField("fadeOutUs", 0) / 1e6
-                when: !fadeOut.pressed
-            }
-        }
-
-        Label { text: "画面缩放"; color: "#cccccc" }
-        Slider {
-            id: scale
-            objectName: "inspector-scale"
-            Layout.fillWidth: true
-            from: 10
-            to: 400
-            enabled: inspector.hasClip()
-            property real pendingValue: 100
-            onMoved: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    Timeline.setClipScale(Timeline.selectedClipId,
-                                          Math.round(value * 10))
-                }
-            }
-            onPressedChanged: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    Timeline.setClipScale(Timeline.selectedClipId,
-                                          Math.round(pendingValue * 10))
-                }
-            }
-            Binding {
-                target: scale
-                property: "value"
-                value: inspector.clipField("scaleMilli", 1000) / 10
-                when: !scale.pressed
-            }
-        }
-
-        Label { text: "不透明度"; color: "#cccccc" }
-        Slider {
-            id: opacity
-            objectName: "inspector-opacity"
-            Layout.fillWidth: true
-            from: 0
-            to: 100
-            enabled: inspector.hasClip()
-            property real pendingValue: 100
-            onMoved: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    Timeline.setClipOpacity(Timeline.selectedClipId,
-                                            Math.round(value * 10))
-                }
-            }
-            onPressedChanged: {
-                if (pressed) {
-                    pendingValue = value
-                } else if (inspector.hasClip()) {
-                    Timeline.setClipOpacity(Timeline.selectedClipId,
-                                            Math.round(pendingValue * 10))
-                }
-            }
-            Binding {
-                target: opacity
-                property: "value"
-                value: inspector.clipField("opacityMilli", 1000) / 10
-                when: !opacity.pressed
             }
         }
     }

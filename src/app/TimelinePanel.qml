@@ -7,10 +7,33 @@ import QtQuick.Layouts
 // controller receives exactly one command when the mouse is released.
 Item {
     id: root
-    property real trackHeight: 44
+    // 56 px fits the name row plus the M/S/lock/menu row without clipping.
+    property real trackHeight: 56
     property real rulerHeight: 28
     property real headerWidth: 160
     property real pixelsPerSecond: Timeline.pixelsPerSecond
+    // When enabled, the timeline scrolls horizontally to keep the playhead in
+    // view during playback and seeks beyond the right edge.
+    property bool followPlayhead: true
+
+    // Context-menu target (set by the delegate under the cursor). Keeping one
+    // menu for the whole panel avoids creating a popup per clip/cue.
+    property string contextClipId: ""
+    property string contextCueId: ""
+    property string contextCueTrackId: ""
+    signal cueEditRequested(string cueId)
+
+    function openClipMenu(clipId, linked) {
+        contextClipId = clipId
+        clipMenu.linked = linked === true
+        clipMenu.popup()
+    }
+
+    function openCueMenu(cueId, trackId) {
+        contextCueId = cueId
+        contextCueTrackId = trackId
+        cueMenu.popup()
+    }
     property real contentWidth: Math.max(width - headerWidth,
                                          Timeline.durationUs / 1e6 * pixelsPerSecond + 400)
     // Adaptive ruler: keep at least ~64 px between ticks instead of creating
@@ -30,6 +53,24 @@ Item {
 
     function seekTo(timeUs) {
         App.seekTimeline(Math.max(0, Math.round(timeUs)))
+    }
+
+    function ensurePlayheadVisible() {
+        if (!followPlayhead)
+            return
+        const x = Timeline.positionUs / 1e6 * root.pixelsPerSecond
+        const margin = 40
+        if (x < flick.contentX) {
+            flick.contentX = Math.max(0, x - margin)
+        } else if (x > flick.contentX + flick.width - margin) {
+            flick.contentX = Math.max(0, Math.min(
+                flick.contentWidth - flick.width, x - flick.width + margin))
+        }
+    }
+
+    Connections {
+        target: Timeline
+        function onPositionChanged() { root.ensurePlayheadVisible() }
     }
 
     function rulerLabel(seconds) {
@@ -81,6 +122,7 @@ Item {
 
         Flickable {
             id: flick
+            objectName: "timeline-flickable"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: root.contentWidth
@@ -207,6 +249,121 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    // Clip right-click menu. Actions operate on the item the user pressed,
+    // not on a stale selection.
+    Menu {
+        id: clipMenu
+        objectName: "clip-context-menu"
+        property bool linked: false
+
+        MenuItem {
+            objectName: "clip-menu-split"
+            text: "分割  Ctrl+B"
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.splitAtPlayhead()
+            }
+        }
+        MenuItem {
+            objectName: "clip-menu-delete"
+            text: "删除  Del"
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.deleteSelection(false)
+            }
+        }
+        MenuItem {
+            objectName: "clip-menu-ripple"
+            text: "波纹删除"
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.deleteSelection(true)
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            objectName: "clip-menu-detach"
+            text: "分离音频（解链）"
+            enabled: clipMenu.linked
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.unlinkSelectedClip()
+            }
+        }
+        MenuItem {
+            objectName: "clip-menu-link"
+            text: "链接音视频"
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.linkSelectedClip()
+            }
+        }
+        MenuItem {
+            objectName: "clip-menu-copy"
+            text: "复制  Ctrl+C"
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.copySelected()
+            }
+        }
+    }
+
+    // Cue right-click menu: text, style, position and delete without leaving
+    // the timeline.
+    Menu {
+        id: cueMenu
+        objectName: "cue-context-menu"
+
+        MenuItem {
+            objectName: "cue-menu-edit"
+            text: "编辑文本"
+            onClicked: {
+                Timeline.selectCue(root.contextCueId)
+                root.cueEditRequested(root.contextCueId)
+            }
+        }
+        MenuItem {
+            objectName: "cue-menu-delete"
+            text: "删除  Del"
+            onClicked: {
+                Timeline.selectCue(root.contextCueId)
+                Timeline.deleteSelection(false)
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            objectName: "cue-menu-style-default"
+            text: "样式：默认"
+            onClicked: Timeline.applySubtitleStyle("default",
+                                                   root.contextCueId)
+        }
+        MenuItem {
+            objectName: "cue-menu-style-boxed"
+            text: "样式：黑底白字"
+            onClicked: Timeline.applySubtitleStyle("boxed",
+                                                   root.contextCueId)
+        }
+        MenuItem {
+            objectName: "cue-menu-style-bold"
+            text: "样式：粗描边"
+            onClicked: Timeline.applySubtitleStyle("bold-outline",
+                                                   root.contextCueId)
+        }
+        MenuSeparator {}
+        MenuItem {
+            objectName: "cue-menu-pos-bottom"
+            text: "位置：底部"
+            onClicked: Timeline.setCuePosition(root.contextCueTrackId,
+                                               root.contextCueId, 500, 880)
+        }
+        MenuItem {
+            objectName: "cue-menu-pos-center"
+            text: "位置：居中"
+            onClicked: Timeline.setCuePosition(root.contextCueTrackId,
+                                               root.contextCueId, 500, 500)
         }
     }
 }

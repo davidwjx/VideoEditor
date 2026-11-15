@@ -65,6 +65,8 @@ Rectangle {
                 padding: 1
                 Layout.preferredWidth: 22
                 onClicked: Timeline.setTrackMuted(header.trackId, !header.muted)
+                ToolTip.visible: hovered
+                ToolTip.text: "静音轨道"
                 Binding {
                     target: muteButton
                     property: "checked"
@@ -82,6 +84,8 @@ Rectangle {
                 padding: 1
                 Layout.preferredWidth: 22
                 onClicked: Timeline.setTrackSolo(header.trackId, !header.solo)
+                ToolTip.visible: hovered
+                ToolTip.text: "独奏轨道"
                 Binding {
                     target: soloButton
                     property: "checked"
@@ -98,6 +102,8 @@ Rectangle {
                 padding: 1
                 Layout.preferredWidth: 24
                 onClicked: Timeline.setTrackLocked(header.trackId, !header.locked)
+                ToolTip.visible: hovered
+                ToolTip.text: "锁定轨道"
                 Binding {
                     target: lockButton
                     property: "checked"

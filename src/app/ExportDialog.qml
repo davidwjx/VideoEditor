@@ -62,6 +62,19 @@ Dialog {
             }
         }
 
+        // H.265 stays visibly selectable only when hardware encoding exists.
+        // Selecting it without hardware never silently substitutes a codec:
+        // the reason is shown here and the start button stays disabled.
+        Label {
+            objectName: "presetNote"
+            visible: Export.presetId === "h265-1080p30"
+                     && !Export.h265Available
+            Layout.fillWidth: true
+            text: Export.h265UnavailableReason
+            color: "#e67e22"
+            wrapMode: Text.WordWrap
+        }
+
         RowLayout {
             Layout.fillWidth: true
             Label { text: "视频编码" }

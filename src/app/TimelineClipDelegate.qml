@@ -45,7 +45,7 @@ Rectangle {
     radius: 3
     color: selected ? "#3d6ea8" : (trackType === "audio" ? "#2b5d3f" : "#3a3a55")
     border.color: selected ? "#8fc4ff" : "#111111"
-    border.width: 1
+    border.width: selected ? 2 : 1
     clip: true
     z: selected ? 2 : 1
     opacity: (dragging || trimming) ? 0.85 : 1.0
@@ -126,6 +126,17 @@ Rectangle {
             clipItem.restoreGeometry()
         }
         onCanceled: clipItem.restoreGeometry()
+    }
+
+    // Right-click context menu: every professional clip action stays one
+    // gesture away without occupying the primary bar.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        onClicked: {
+            Timeline.selectClip(clipItem.itemId)
+            timeline.openClipMenu(clipItem.itemId, clipItem.linked)
+        }
     }
 
     // Trim handles: live local geometry while dragging, one command on release.
