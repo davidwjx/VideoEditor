@@ -1,9 +1,12 @@
 #include "AudioEncoder.h"
 
+#include <cstddef>
 #include <cstring>
+#include <utility>
 
 extern "C" {
 #include <libavutil/channel_layout.h>
+#include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/samplefmt.h>
 }
@@ -90,6 +93,8 @@ bool AudioEncoder::open(int sampleRate, int channels, int bitrateKbps,
     }
     m_channels = channels;
     m_delay = m_ctx->initial_padding;
+    m_firstEncode = true;
+    m_lastSampleIndex = 0;
     return true;
 }
 
@@ -109,6 +114,14 @@ bool AudioEncoder::encode(const float *interleaved, int frames,
             *error = QStringLiteral("音频帧必须为 %1 个采样，实际为 %2。")
                          .arg(m_frameSize)
                          .arg(frames);
+        return false;
+    }
+    // The pre-roll packet's identity comes from encoding the timeline from
+    // sample 0; reject a mid-stream start instead of guessing.
+    if (m_firstEncode && sampleIndex != 0) {
+        if (error)
+            *error = QStringLiteral("音频编码必须从采样 0 开始，实际为 %1。")
+                         .arg(sampleIndex);
         return false;
     }
     if (av_frame_make_writable(m_frame) < 0) {
@@ -132,6 +145,8 @@ bool AudioEncoder::encode(const float *interleaved, int frames,
                          .arg(ffmpegErrorString(ret));
         return false;
     }
+    m_lastSampleIndex = sampleIndex;
+    m_firstEncode = false;
     return receivePackets(packets, error);
 }
 
@@ -150,19 +165,19 @@ bool AudioEncoder::receivePackets(std::vector<EncodedPacket> *packets,
                              .arg(ffmpegErrorString(ret));
             return false;
         }
-        // libavcodec prepends one silent pre-roll packet at
-        // pts == -initial_padding. The container signals that priming through
-        // skip_samples (encoderDelaySamples()), so only timeline packets from
-        // sample 0 onwards are exposed to the muxer.
-        if (m_packet->pts != AV_NOPTS_VALUE && m_packet->pts < 0) {
-            av_packet_unref(m_packet);
-            continue;
-        }
+        // Native AAC emits a pre-roll packet at pts == -initial_padding before
+        // the first timeline packet. Keep it: it carries the MDCT overlap for
+        // sample 0, and the muxer discards the decoded priming with
+        // skip_samples (encoderDelaySamples()) on this exact packet.
         EncodedPacket packet;
-        packet.data.assign(m_packet->data, m_packet->data + m_packet->size);
-        packet.pts = m_packet->pts;
-        packet.dts = m_packet->dts == AV_NOPTS_VALUE ? m_packet->pts
-                                                     : m_packet->dts;
+        packet.pts = m_packet->pts != AV_NOPTS_VALUE ? m_packet->pts
+                                                    : m_lastSampleIndex;
+        packet.dts = m_packet->dts != AV_NOPTS_VALUE ? m_packet->dts
+                                                    : packet.pts;
+        if (m_packet->size > 0 && m_packet->data) {
+            packet.data.assign(m_packet->data,
+                               m_packet->data + m_packet->size);
+        }
         // Native AAC normally reports 1024; fall back so callers always get a
         // usable duration.
         packet.duration = m_packet->duration > 0 ? m_packet->duration
@@ -205,6 +220,8 @@ void AudioEncoder::close()
     m_channels = 0;
     m_frameSize = 0;
     m_delay = 0;
+    m_firstEncode = true;
+    m_lastSampleIndex = 0;
 }
 
 } // namespace VideoEditor

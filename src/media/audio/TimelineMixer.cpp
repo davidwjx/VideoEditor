@@ -156,15 +156,20 @@ void TimelineMixer::setProject(const Project &project)
     dropStaleReaders();
 }
 
+void TimelineMixer::resetReaders()
+{
+    for (auto &entry : m_readers) {
+        if (entry.second.reader)
+            entry.second.reader->reset();
+    }
+}
+
 void TimelineMixer::setPosition(int64_t positionUs)
 {
     m_startSamples = -1;
     m_startPositionUs = qMax<int64_t>(0, positionUs);
     m_framesRendered = 0;
-    for (auto &entry : m_readers) {
-        if (entry.second.reader)
-            entry.second.reader->reset();
-    }
+    resetReaders();
 }
 
 void TimelineMixer::setPositionSamples(int64_t sampleIndex)
@@ -173,10 +178,7 @@ void TimelineMixer::setPositionSamples(int64_t sampleIndex)
     m_startPositionUs =
         (m_startSamples * 1'000'000LL + m_sampleRate / 2) / m_sampleRate;
     m_framesRendered = 0;
-    for (auto &entry : m_readers) {
-        if (entry.second.reader)
-            entry.second.reader->reset();
-    }
+    resetReaders();
 }
 
 int64_t TimelineMixer::positionSamples() const

@@ -52,12 +52,43 @@ TEST(AudioEncoder, EncodesAacLcAtFortyEightKilohertz)
     for (const EncodedPacket &packet : flushed)
         all.push_back(packet);
 
+    // The native AAC encoder emits one pre-roll packet at a negative pts. It
+    // must be exposed for the muxer, which writes skip_samples on it once.
+    int primingCount = 0;
+    int timelineCount = 0;
     int64_t durationSum = 0;
-    for (const EncodedPacket &packet : all)
+    int64_t expectedPts = 0;
+    for (const EncodedPacket &packet : all) {
+        if (packet.pts < 0) {
+            ++primingCount;
+            continue;
+        }
         durationSum += packet.duration;
+        EXPECT_EQ(packet.pts, expectedPts);
+        expectedPts += 1024;
+        ++timelineCount;
+    }
+    ASSERT_EQ(primingCount, 1);
+    EXPECT_EQ(all.front().pts, -1024);
+    EXPECT_EQ(all.front().duration, 1024);
+    EXPECT_EQ(encoder.encoderDelaySamples(), 1024);
+    EXPECT_EQ(timelineCount, 47);
+    EXPECT_EQ(expectedPts, 48'128);
     EXPECT_EQ(durationSum, 48'128); // 47 AAC frames, 128 padded samples
     EXPECT_GT(valid, 0);
     EXPECT_GT(all.size(), size_t(40));
+}
+
+TEST(AudioEncoder, RejectsMidStreamStart)
+{
+    AudioEncoder encoder;
+    QString error;
+    ASSERT_TRUE(encoder.open(48000, 2, 192, &error)) << error.toStdString();
+    std::vector<float> frame(1024 * 2, 0.0f);
+    std::vector<EncodedPacket> packets;
+    // Priming identity depends on the stream starting at sample 0.
+    EXPECT_FALSE(encoder.encode(frame.data(), 1024, 1024, &packets, &error));
+    EXPECT_FALSE(error.isEmpty());
 }
 
 TEST(TimelineMixer, SamplePositionIsExactAcrossBlocks)

@@ -73,6 +73,7 @@ private:
     ClipAudioReader *readerFor(const Clip &clip);
     int64_t positionForFrameCount(int64_t frames) const;
     static QString sourceKeyFor(const Asset &asset);
+    void resetReaders();
     void dropStaleReaders();
     void evictUnusedReaders(const QSet<QString> &used);
 
