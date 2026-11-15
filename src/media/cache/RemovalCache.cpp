@@ -317,8 +317,9 @@ bool RemovalCache::writeChunkFrames(const QString &cacheKey, int chunkIndex,
 
     RemovalChunkIndex index;
     index.index = chunkIndex;
-    index.firstFrame =
-        frameIndices.isEmpty() ? chunkIndex * 30 : frameIndices.first();
+    // Always chunk-aligned so the chunk index matches
+    // manifest.chunks[].firstFrame even when leading frames have no holes.
+    index.firstFrame = chunkIndex * 30;
 
     for (int i = 0; i < patches.size(); ++i) {
         // Patches carry feathered alpha; normalize before PNG so an

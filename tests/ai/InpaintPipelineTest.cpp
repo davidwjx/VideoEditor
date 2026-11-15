@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 
 #include "InpaintPipeline.h"
@@ -216,6 +217,71 @@ TEST(InpaintPipeline, ChunkRoundTripsThroughRemovalCacheWithAlpha)
     EXPECT_EQ(qAlpha(stored.pixel(holeCenter)), 255);
     const QPoint outside = QPoint(2, 2) - patches->at(0).crop.topLeft();
     EXPECT_EQ(qAlpha(stored.pixel(outside)), 0);
+}
+
+TEST(InpaintPipeline, SparseChunkFramesStayChunkAligned)
+{
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString key(64, QLatin1Char('e'));
+    RemovalCache cache(temp.path());
+
+    QImage red(8, 8, QImage::Format_ARGB32);
+    red.fill(QColor(200, 10, 10, 255));
+    QImage green(8, 8, QImage::Format_ARGB32);
+    green.fill(QColor(10, 200, 10, 255));
+
+    QString error;
+    // Non-contiguous global frame indices with a gap at frame 1.
+    RemovalChunkIndex sparse;
+    ASSERT_TRUE(cache.writeChunkFrames(key, 0, {0, 2}, {red, green},
+                                       {QRect(1, 1, 8, 8), QRect(2, 2, 8, 8)},
+                                       &sparse, &error))
+        << error.toStdString();
+    EXPECT_EQ(sparse.firstFrame, 0);
+    ASSERT_EQ(sparse.frames.size(), 2);
+    EXPECT_EQ(sparse.frames.at(0).frame, 0);
+    EXPECT_EQ(sparse.frames.at(1).frame, 2);
+
+    const auto read = cache.readChunkIndex(key, 0, &error);
+    ASSERT_TRUE(read.has_value()) << error.toStdString();
+    EXPECT_EQ(read->firstFrame, 0);
+    RemovalChunkFrame absent;
+    absent.frame = 1;
+    absent.file = read->frames.first().file;
+    EXPECT_TRUE(cache.readFrameImage(key, absent, &error).isNull());
+    EXPECT_FALSE(cache.readFrameImage(key, read->frames.at(1), &error)
+                     .isNull());
+
+    // A later chunk with a leading gap still reports firstFrame = index * 30.
+    RemovalChunkIndex second;
+    ASSERT_TRUE(cache.writeChunkFrames(key, 1, {31, 35}, {red, green},
+                                       {QRect(0, 0, 8, 8), QRect(0, 0, 8, 8)},
+                                       &second, &error))
+        << error.toStdString();
+    EXPECT_EQ(second.firstFrame, 30);
+    EXPECT_EQ(second.frames.at(0).frame, 31);
+    EXPECT_EQ(second.frames.at(1).frame, 35);
+
+    // A chunk with no holes is still written so the manifest can prove every
+    // chunk index exists.
+    RemovalChunkIndex empty;
+    ASSERT_TRUE(
+        cache.writeChunkFrames(key, 2, {}, {}, {}, &empty, &error))
+        << error.toStdString();
+    EXPECT_EQ(empty.firstFrame, 60);
+    EXPECT_TRUE(empty.frames.isEmpty());
+    EXPECT_FALSE(empty.treeSha256.isEmpty());
+    EXPECT_TRUE(QFileInfo::exists(
+        QDir(cache.cacheDir(key)).filePath(QStringLiteral("chunks/2/index.json"))));
+
+    // The dense wrapper keeps the chunk-aligned first frame too.
+    RemovalChunkIndex dense;
+    ASSERT_TRUE(cache.writeChunk(key, 3, 90, {red}, {QRect(0, 0, 8, 8)},
+                                 &dense, &error))
+        << error.toStdString();
+    EXPECT_EQ(dense.firstFrame, 90);
+    EXPECT_EQ(dense.frames.at(0).frame, 90);
 }
 
 #endif // VIDEOEDITOR_HAVE_ORT

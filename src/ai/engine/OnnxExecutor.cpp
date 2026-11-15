@@ -59,11 +59,14 @@ struct OnnxExecutor::Impl {
 #ifdef _WIN32
         if (enableDml) {
             try {
-                // ORT 1.20 has no session provider query. With CPU fallback
-                // disabled, a successful session means the graph really runs
-                // on DirectML rather than silently spilling to CPU.
-                options.AddConfigEntry("session.disable_cpu_ep_fallback",
-                                       "1");
+                // ORT 1.20 has no session provider query. Callers that need
+                // proof of pure DML disable CPU EP fallback; models with a few
+                // CPU-only nodes (MI-GAN) leave it enabled so the DML session
+                // can still be created.
+                if (config.requirePureDml) {
+                    options.AddConfigEntry("session.disable_cpu_ep_fallback",
+                                           "1");
+                }
                 Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_DML(
                     options, config.deviceIndex));
             } catch (const std::exception &exception) {

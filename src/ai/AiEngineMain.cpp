@@ -167,20 +167,56 @@ QString firstOnnxPath(const ModelRegistry &registry,
     return {};
 }
 
-bool isLamaRecord(const AiModelRecord &record)
+enum class InpaintAdapter { MiGan, Lama };
+
+// The adapter is a property of the model record, never of the requested mode;
+// an unknown record must fail instead of being sent to the uint8 MI-GAN graph.
+std::optional<InpaintAdapter> inpaintAdapterFor(const AiModelRecord &record)
 {
-    return record.id.contains(QLatin1String("lama"), Qt::CaseInsensitive)
-        || record.version.contains(QLatin1String("lama"), Qt::CaseInsensitive);
+    const QString haystack = record.id + QLatin1Char(' ') + record.version;
+    const bool mentionsMigan =
+        haystack.contains(QLatin1String("migan"), Qt::CaseInsensitive);
+    const bool mentionsLama =
+        haystack.contains(QLatin1String("lama"), Qt::CaseInsensitive);
+    if (mentionsMigan && !mentionsLama)
+        return InpaintAdapter::MiGan;
+    if (mentionsLama && !mentionsMigan)
+        return InpaintAdapter::Lama;
+    // Explicit manifest io hints: MI-GAN is uint8, LaMa takes 4 channels.
+    const QString inputDtype =
+        record.io.value(QStringLiteral("inputDtype")).toString();
+    if (inputDtype.compare(QLatin1String("uint8"), Qt::CaseInsensitive) == 0)
+        return InpaintAdapter::MiGan;
+    if (record.io.value(QStringLiteral("inputChannels")).toInt() == 4)
+        return InpaintAdapter::Lama;
+    return std::nullopt;
 }
 
 const AiModelRecord *resolveInpaintRecord(const ModelRegistry &registry,
-                                          const AiJobSpec &spec)
+                                          const AiJobSpec &spec,
+                                          QString *error)
 {
+    const auto fail = [error](const QString &message) {
+        if (error)
+            *error = message;
+        return nullptr;
+    };
+
+    // An explicit id was part of the cache key: never silently substitute a
+    // different model when it is unknown or has the wrong role.
     if (!spec.inpaintModelId.isEmpty()) {
         const AiModelRecord *requested = registry.model(spec.inpaintModelId);
-        if (requested && requested->isInpaint())
-            return requested;
+        if (!requested) {
+            return fail(QStringLiteral("修复模型不存在：%1。")
+                            .arg(spec.inpaintModelId));
+        }
+        if (!requested->isInpaint()) {
+            return fail(QStringLiteral("修复模型角色无效：%1。")
+                            .arg(spec.inpaintModelId));
+        }
+        return requested;
     }
+
     // Measured defaults: MI-GAN for Fast, int8 allowzero LaMa for Quality.
     const QString preferred = spec.parameters.mode == RepairMode::Fast
         ? QStringLiteral("migan-512")
@@ -188,9 +224,13 @@ const AiModelRecord *resolveInpaintRecord(const ModelRegistry &registry,
     const AiModelRecord *record = registry.model(preferred);
     if (record && record->isInpaint())
         return record;
-    return registry.defaultInpaintModel(spec.parameters.mode == RepairMode::Fast
-                                            ? QStringLiteral("migan")
-                                            : QStringLiteral("lama"));
+    record = registry.defaultInpaintModel(spec.parameters.mode == RepairMode::Fast
+                                              ? QStringLiteral("migan")
+                                              : QStringLiteral("lama"));
+    if (!record || !record->isInpaint()) {
+        return fail(QStringLiteral("没有可用的修复模型。"));
+    }
+    return record;
 }
 
 // Shared pause/cancel poll for tracking and repair. Returns true on cancel.
@@ -308,11 +348,19 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
 
     // Repair jobs need a resolved inpaint record; tracking-only jobs do not.
     const AiModelRecord *inpaintRecord = nullptr;
+    std::optional<InpaintAdapter> inpaintAdapter;
     if (!spec.trackingOnly) {
-        inpaintRecord = resolveInpaintRecord(*registry, spec);
-        if (!inpaintRecord || !inpaintRecord->isInpaint()) {
+        inpaintRecord = resolveInpaintRecord(*registry, spec, &error);
+        if (!inpaintRecord) {
+            return modelUnavailable(error.isEmpty()
+                                        ? QStringLiteral("修复模型不可用。")
+                                        : error);
+        }
+        inpaintAdapter = inpaintAdapterFor(*inpaintRecord);
+        if (!inpaintAdapter) {
             return modelUnavailable(
-                QStringLiteral("修复模型不可用：%1。").arg(spec.inpaintModelId));
+                QStringLiteral("无法识别修复模型 %1 的适配器。")
+                    .arg(inpaintRecord->id));
         }
     }
 
@@ -448,7 +496,7 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
     const QString inpaintPath = firstOnnxPath(*registry, *inpaintRecord);
     if (inpaintPath.isEmpty())
         return modelUnavailable(QStringLiteral("修复模型缺少 ONNX 文件。"));
-    if (isLamaRecord(*inpaintRecord)) {
+    if (*inpaintAdapter == InpaintAdapter::Lama) {
         inpainter = std::make_unique<LamaInpainter>(inpaintPath, 0);
     } else {
         inpainter = std::make_unique<MiGanInpainter>(
@@ -520,6 +568,9 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
             continue;
         }
 
+        // Memory bound: one chunk holds up to 30 RGB32 frames (30 * W * H * 4
+        // bytes) plus masks. At 1080p that is ~250 MB; at 4K it approaches
+        // ~1 GB. The offline scope is 1080p; a 4K streaming path is Task 9.
         QList<QImage> frames;
         QList<BinaryMask> masks;
         frames.reserve(framesInChunk);
@@ -599,23 +650,18 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
                 InpaintPipeline::colorMatch(sourceCrop, &patchImages[i],
                                             maskCrop);
             }
-
-            RemovalChunkIndex written;
-            if (!cache.writeChunkFrames(spec.cacheKey, chunk, patchFrames,
-                                        patchImages, crops, &written, &error)) {
-                return repairFailed(error);
-            }
-            manifestChunks.insert(
-                chunk, RemovalCacheChunk{chunk, firstFrame, framesInChunk,
-                                         written.treeSha256});
-        } else {
-            manifestChunks.remove(chunk);
-            // A redo of a chunk that now has no holes must not leave the old
-            // patch directory behind.
-            QDir(QDir(cache.cacheDir(spec.cacheKey))
-                     .filePath(QStringLiteral("chunks/%1").arg(chunk)))
-                .removeRecursively();
         }
+
+        // A chunk with no holes is still written (with an empty frame list) so
+        // every chunk index is present and the manifest can prove completeness.
+        RemovalChunkIndex written;
+        if (!cache.writeChunkFrames(spec.cacheKey, chunk, patchFrames,
+                                    patchImages, crops, &written, &error)) {
+            return repairFailed(error);
+        }
+        manifestChunks.insert(
+            chunk, RemovalCacheChunk{chunk, firstFrame, framesInChunk,
+                                     written.treeSha256});
 
         processedFrames += framesInChunk;
         send(QJsonObject{
@@ -640,8 +686,25 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
     manifest.trackingModelId = record->id;
     manifest.inpaintModelId = inpaintRecord->id;
     manifest.pipelineVersion = QStringLiteral("m4.0");
-    manifest.status = cancelled ? QStringLiteral("partial")
-                                : QStringLiteral("complete");
+    // "complete" is only safe when every chunk index is listed and its
+    // directory/index.json is present; a redo after a partial run must not
+    // promote a manifest that still has missing chunks.
+    bool allChunksComplete = !cancelled;
+    for (int chunk = 0; chunk < chunkCount && allChunksComplete; ++chunk) {
+        const auto it = manifestChunks.constFind(chunk);
+        if (it == manifestChunks.constEnd()
+            || it.value().treeSha256.isEmpty()) {
+            allChunksComplete = false;
+            break;
+        }
+        const QString indexPath =
+            QDir(cache.cacheDir(spec.cacheKey))
+                .filePath(QStringLiteral("chunks/%1/index.json").arg(chunk));
+        if (!QFileInfo::exists(indexPath))
+            allChunksComplete = false;
+    }
+    manifest.status = allChunksComplete ? QStringLiteral("complete")
+                                        : QStringLiteral("partial");
     manifest.totalFrames = totalFrames;
     manifest.createdAt =
         QDateTime::currentDateTimeUtc().toString(Qt::ISODate);

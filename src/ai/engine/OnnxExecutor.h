@@ -15,6 +15,12 @@ struct EpConfig {
     int deviceIndex = 0;
     bool allowDml = false;
     bool allowCpu = true;
+    // When true, a DML session is created with CPU EP fallback disabled so a
+    // successful session proves the whole graph runs on DirectML. MI-GAN has
+    // a few CPU-only nodes, so it must leave this false and allow node-level
+    // CPU fallback inside a DML session (whole-session CPU retry still needs
+    // allowCpu).
+    bool requirePureDml = false;
 };
 
 struct OnnxTensor {

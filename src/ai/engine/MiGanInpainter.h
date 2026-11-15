@@ -26,6 +26,8 @@ public:
     bool isReady() const override;
     QString lastError() const override;
     QString provider() const;
+    bool usingCpuFallback() const;
+    QString cpuFallbackReason() const;
 
 private:
     struct Impl;

@@ -83,6 +83,16 @@ QString MiGanInpainter::lastError() const { return m_impl->error; }
 
 QString MiGanInpainter::provider() const { return m_impl->provider; }
 
+bool MiGanInpainter::usingCpuFallback() const
+{
+    return m_impl->executor.usingCpuFallback();
+}
+
+QString MiGanInpainter::cpuFallbackReason() const
+{
+    return m_impl->executor.cpuFallbackReason();
+}
+
 std::optional<PatchResult> MiGanInpainter::repair(const QImage &crop,
                                                   const BinaryMask &maskCrop,
                                                   QString *error)

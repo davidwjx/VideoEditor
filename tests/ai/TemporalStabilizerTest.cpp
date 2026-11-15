@@ -28,6 +28,24 @@ qreal temporalVariation(const QList<QImage> &frames, const QRect &hole)
     return count == 0 ? 0.0 : total / count;
 }
 
+// 64x64 patch whose hole (20..43) is opaque; a 4 px vertical stripe carries
+// `value`, the rest of the hole is black. The stripe position is the content
+// marker used to verify centroid alignment.
+QImage stripePatch(int stripeX, int value)
+{
+    QImage image(64, 64, QImage::Format_ARGB32);
+    image.fill(QColor(40, 40, 40, 0));
+    for (int y = 20; y <= 43; ++y) {
+        for (int x = 20; x <= 43; ++x) {
+            const bool stripe = x >= stripeX && x < stripeX + 4;
+            const int channel = stripe ? value : 0;
+            image.setPixelColor(x, y,
+                                QColor(channel, channel, channel, 255));
+        }
+    }
+    return image;
+}
+
 QImage holePatch(const QRect &hole, const QColor &inside)
 {
     QImage image(64, 64, QImage::Format_ARGB32);
@@ -103,6 +121,41 @@ TEST(TemporalStabilizer, AlphaIsPreserved)
     TemporalStabilizer::stabilize(patches, crops, centroids, 50);
     EXPECT_EQ(qAlpha(patches.at(1).pixel(32, 32)), 255);
     EXPECT_EQ(qAlpha(patches.at(1).pixel(2, 2)), 0);
+}
+
+TEST(TemporalStabilizer, AlignsNeighboursByPositiveCentroidOffset)
+{
+    // Target stripe at x=20..23 (centroid 22); neighbours at 40..43
+    // (centroid 42). Correct alignment samples the neighbour at q + 20, so
+    // the target stripe sees the neighbour stripe (105), not its baseline (0).
+    QList<QImage> patches{stripePatch(40, 105), stripePatch(20, 100),
+                          stripePatch(40, 105)};
+    const QList<QRect> crops(3, QRect(0, 0, 64, 64));
+    const QList<QPoint> centroids{QPoint(42, 32), QPoint(22, 32),
+                                  QPoint(42, 32)};
+
+    TemporalStabilizer::stabilize(patches, crops, centroids, 100);
+    const QColor aligned = patches.at(1).pixelColor(22, 32);
+    EXPECT_GT(aligned.red(), 101) << "neighbour sampled in the wrong direction";
+    EXPECT_LT(aligned.red(), 110);
+    EXPECT_EQ(aligned.alpha(), 255);
+}
+
+TEST(TemporalStabilizer, AlignsNeighboursByNegativeCentroidOffset)
+{
+    // Mirror case: target stripe at 40..43 (centroid 42), neighbours at
+    // 20..23 (centroid 22); correct alignment samples q - 20.
+    QList<QImage> patches{stripePatch(20, 105), stripePatch(40, 100),
+                          stripePatch(20, 105)};
+    const QList<QRect> crops(3, QRect(0, 0, 64, 64));
+    const QList<QPoint> centroids{QPoint(22, 32), QPoint(42, 32),
+                                  QPoint(22, 32)};
+
+    TemporalStabilizer::stabilize(patches, crops, centroids, 100);
+    const QColor aligned = patches.at(1).pixelColor(42, 32);
+    EXPECT_GT(aligned.red(), 101) << "neighbour sampled in the wrong direction";
+    EXPECT_LT(aligned.red(), 110);
+    EXPECT_EQ(aligned.alpha(), 255);
 }
 
 #endif // VIDEOEDITOR_HAVE_ORT

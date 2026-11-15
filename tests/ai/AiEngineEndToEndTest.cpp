@@ -91,6 +91,23 @@ QString writeMaskSidecar(const QString &sidecarRoot, const BinaryMask &mask)
     return hash;
 }
 
+bool writeTrackingMask(const QString &cacheDir, int frame,
+                       const BinaryMask &mask)
+{
+    const QString directory =
+        QDir(cacheDir).filePath(QStringLiteral("tracking/masks"));
+    if (!QDir().mkpath(directory))
+        return false;
+    const QByteArray encoded = MaskCodec::encode(mask);
+    if (encoded.isEmpty())
+        return false;
+    QFile file(QDir(directory).filePath(
+        QStringLiteral("frame_%1.rle").arg(frame, 6, 10, QLatin1Char('0'))));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    return file.write(encoded) == encoded.size();
+}
+
 BinaryMask centeredMask(int width, int height)
 {
     BinaryMask mask;
@@ -127,6 +144,16 @@ AiJobSpec makeEngineSpec(const QString &fixture, const QString &modelsDir,
     spec.maskKeyframes.append(
         MaskKeyframe{QStringLiteral("mk-1"), 0, maskHash, 4, 1});
     return spec;
+}
+
+QString fileSha256(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return QString::fromLatin1(
+        QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256)
+            .toHex());
 }
 
 bool sawEvent(const QSignalSpy &spy, const QString &event,
@@ -430,32 +457,64 @@ TEST(AiEngineEndToEnd, ResumeSkipsChunksAlreadyInManifest)
     spec.inpaintModelId = QStringLiteral("migan-512");
     EngineEnvironmentGuard guard;
 
+    QString chunkFile;
+    QDateTime chunkModified;
+    QString chunkSha;
+    QString error;
     {
         LocalAiTransport transport;
         QSignalSpy messages(&transport, &AiTransport::message);
         QSignalSpy finished(&transport, &AiTransport::finished);
-        QString error;
         ASSERT_TRUE(transport.start(spec, &error)) << error.toStdString();
         QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 90000);
         EXPECT_TRUE(sawEvent(messages, QStringLiteral("done")));
     }
+    {
+        RemovalCache cache(cacheRoot);
+        const auto manifest = cache.readManifest(cacheKey, &error);
+        ASSERT_TRUE(manifest.has_value()) << error.toStdString();
+        ASSERT_FALSE(manifest->chunks.isEmpty());
+        const auto index =
+            cache.readChunkIndex(cacheKey, manifest->chunks.first().index,
+                                 &error);
+        ASSERT_TRUE(index.has_value()) << error.toStdString();
+        ASSERT_FALSE(index->frames.isEmpty());
+        chunkFile = QDir(cache.cacheDir(cacheKey))
+                        .filePath(QStringLiteral("chunks/%1/%2")
+                                      .arg(index->index)
+                                      .arg(index->frames.first().file));
+        ASSERT_TRUE(QFileInfo::exists(chunkFile));
+        chunkModified = QFileInfo(chunkFile).lastModified();
+        chunkSha = fileSha256(chunkFile);
+        ASSERT_EQ(chunkSha.size(), 64);
+    }
 
-    // Remove the tracking masks. A resumed job that skipped the completed
-    // chunk never needs them again; re-running the chunk would fail here.
-    ASSERT_TRUE(QDir(QDir(cacheDir).filePath(QStringLiteral("tracking/masks")))
-                    .removeRecursively());
-
+    // Resume must skip the completed chunk without rewriting it. The tracking
+    // masks stay in place, so this proves the chunk itself was not re-run.
     AiJobSpec resumed = spec;
     resumed.resume = true;
     LocalAiTransport transport;
     QSignalSpy messages(&transport, &AiTransport::message);
     QSignalSpy finished(&transport, &AiTransport::finished);
-    QString error;
     ASSERT_TRUE(transport.start(resumed, &error)) << error.toStdString();
     QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 30000);
     QJsonObject done;
     ASSERT_TRUE(sawEvent(messages, QStringLiteral("done"), &done));
     EXPECT_EQ(done.value(QStringLiteral("completedFrames")).toInt(), 2);
+
+    int repairChunkDone = 0;
+    for (const QList<QVariant> &arguments : messages) {
+        const QJsonObject message = arguments.at(0).toJsonObject();
+        if (message.value(QStringLiteral("event")).toString()
+                == QLatin1String("chunkDone")
+            && message.value(QStringLiteral("stage")).toString()
+                == QLatin1String("repair")) {
+            ++repairChunkDone;
+        }
+    }
+    EXPECT_EQ(repairChunkDone, 0);
+    EXPECT_EQ(fileSha256(chunkFile), chunkSha);
+    EXPECT_EQ(QFileInfo(chunkFile).lastModified(), chunkModified);
 
     RemovalCache cache(cacheRoot);
     const auto manifest = cache.readManifest(cacheKey, &error);
@@ -527,6 +586,135 @@ TEST(AiEngineEndToEnd, CancelDuringRepairWritesPartialManifest)
     ASSERT_TRUE(manifest.has_value()) << error.toStdString();
     EXPECT_EQ(manifest->status, QStringLiteral("partial"));
     EXPECT_LE(manifest->chunks.size(), 1);
+}
+
+TEST(AiEngineEndToEnd, UnknownInpaintModelFailsInsteadOfSubstitutingDefault)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (!skipUnlessEngineAvailable())
+        GTEST_SKIP() << "VisionAiEngine.exe, h264.mp4 or "
+                        "VIDEOEDITOR_M4_MODELS is unavailable";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString cacheRoot = temp.filePath(QStringLiteral("cache"));
+    const QString cacheKey = QString(64, QLatin1Char('d'));
+    const QString cacheDir = QDir(cacheRoot).filePath(cacheKey);
+    const QString maskHash =
+        writeMaskSidecar(sidecarRoot, centeredMask(640, 360));
+    ASSERT_EQ(maskHash.size(), 64);
+
+    AiJobSpec spec = makeEngineSpec(fixturePath(), modelsDir, sidecarRoot,
+                                    cacheDir, 1, maskHash);
+    spec.trackingOnly = false;
+    // The id was part of the cache key; it must not silently fall back to the
+    // mode default.
+    spec.inpaintModelId = QStringLiteral("made-up-inpaint-model");
+    spec.cacheKey = cacheKey;
+    EngineEnvironmentGuard guard;
+
+    LocalAiTransport transport;
+    QSignalSpy messages(&transport, &AiTransport::message);
+    QSignalSpy finished(&transport, &AiTransport::finished);
+    QString error;
+    ASSERT_TRUE(transport.start(spec, &error)) << error.toStdString();
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 30000);
+
+    QJsonObject errorEvent;
+    ASSERT_TRUE(sawEvent(messages, QStringLiteral("error"), &errorEvent));
+    EXPECT_EQ(errorEvent.value(QStringLiteral("code")).toString(),
+              QStringLiteral("model_unavailable"));
+    EXPECT_NE(
+        errorEvent.value(QStringLiteral("message")).toString().indexOf(
+            QStringLiteral("修复模型不存在")),
+        -1);
+    EXPECT_EQ(finished.at(0).at(0).toInt(), 3);
+}
+
+TEST(AiEngineEndToEnd, RedoAfterPartialStaysPartialUntilAllChunksExist)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (!skipUnlessEngineAvailable())
+        GTEST_SKIP() << "VisionAiEngine.exe, h264.mp4 or "
+                        "VIDEOEDITOR_M4_MODELS is unavailable";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString cacheRoot = temp.filePath(QStringLiteral("cache"));
+    const QString cacheKey = QString(64, QLatin1Char('c'));
+    const QString cacheDir = QDir(cacheRoot).filePath(cacheKey);
+    const QString maskHash =
+        writeMaskSidecar(sidecarRoot, centeredMask(640, 360));
+    ASSERT_EQ(maskHash.size(), 64);
+
+    // 31 frames = two chunks. A redo skips tracking, so pre-write the masks:
+    // frame 0 has a hole, frames 1..30 are empty.
+    constexpr int kFrames = 31;
+    AiJobSpec spec = makeEngineSpec(fixturePath(), modelsDir, sidecarRoot,
+                                    cacheDir, kFrames, maskHash);
+    spec.trackingOnly = false;
+    spec.inpaintModelId = QStringLiteral("migan-512");
+    spec.cacheKey = cacheKey;
+    spec.redoFirstFrame = 0;
+    spec.redoLastFrame = 0;
+
+    const BinaryMask hole = centeredMask(640, 360);
+    BinaryMask empty;
+    empty.width = 640;
+    empty.height = 360;
+    empty.bits.assign(size_t(640) * size_t(360), 0);
+    for (int frame = 0; frame < kFrames; ++frame) {
+        ASSERT_TRUE(writeTrackingMask(cacheDir, frame,
+                                      frame == 0 ? hole : empty));
+    }
+    EngineEnvironmentGuard guard;
+
+    const auto runJob = [&](const AiJobSpec &job) -> bool {
+        LocalAiTransport transport;
+        QSignalSpy messages(&transport, &AiTransport::message);
+        QSignalSpy finished(&transport, &AiTransport::finished);
+        QString startError;
+        if (!transport.start(job, &startError)) {
+            ADD_FAILURE() << startError.toStdString();
+            return false;
+        }
+        QElapsedTimer timer;
+        timer.start();
+        while (finished.count() < 1 && timer.elapsed() < 60000)
+            QTest::qWait(25);
+        return finished.count() >= 1
+            && sawEvent(messages, QStringLiteral("done"));
+    };
+
+    // Only chunk 0 is repaired; chunk 1 is still absent, so the manifest must
+    // stay partial even though this run was not cancelled.
+    ASSERT_TRUE(runJob(spec));
+    RemovalCache cache(cacheRoot);
+    QString error;
+    auto manifest = cache.readManifest(cacheKey, &error);
+    ASSERT_TRUE(manifest.has_value()) << error.toStdString();
+    EXPECT_EQ(manifest->status, QStringLiteral("partial"));
+    ASSERT_EQ(manifest->chunks.size(), 1);
+    EXPECT_EQ(manifest->chunks.first().index, 0);
+
+    // Repair chunk 1 (all-empty masks): now every index exists and its chunk
+    // directory is present, so the manifest may become complete.
+    AiJobSpec second = spec;
+    second.redoFirstFrame = 30;
+    second.redoLastFrame = 30;
+    ASSERT_TRUE(runJob(second));
+    manifest = cache.readManifest(cacheKey, &error);
+    ASSERT_TRUE(manifest.has_value()) << error.toStdString();
+    EXPECT_EQ(manifest->status, QStringLiteral("complete"));
+    EXPECT_EQ(manifest->chunks.size(), 2);
+    EXPECT_TRUE(cache.verify(cacheKey, &error)) << error.toStdString();
+
+    const auto emptyChunk = cache.readChunkIndex(cacheKey, 1, &error);
+    ASSERT_TRUE(emptyChunk.has_value()) << error.toStdString();
+    EXPECT_EQ(emptyChunk->firstFrame, 30);
+    EXPECT_TRUE(emptyChunk->frames.isEmpty());
 }
 
 #endif // VIDEOEDITOR_HAVE_ORT

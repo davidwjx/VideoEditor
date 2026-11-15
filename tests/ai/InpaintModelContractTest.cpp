@@ -23,8 +23,9 @@ QString modelsManifestPath()
     const QString dir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
     if (dir.isEmpty())
         return {};
-    const QString path = dir + QStringLiteral("/models.manifest.json");
-    return QFileInfo::exists(path) ? path : QString();
+    // Only an absent environment variable may skip. If models are installed
+    // but a session fails, the test must fail and surface the adapter error.
+    return dir + QStringLiteral("/models.manifest.json");
 }
 
 const AiModelRecord *findRecord(const ModelRegistry &registry,
@@ -107,15 +108,17 @@ TEST(InpaintModelContract, MiGanRepairsSyntheticCrop)
     const auto registry = ModelRegistry::load(manifestPath, &error);
     ASSERT_TRUE(registry.has_value()) << error.toStdString();
     const AiModelRecord *record = findRecord(*registry, QStringLiteral("migan-512"));
-    if (!record)
-        GTEST_SKIP() << "migan-512 is not in the manifest";
+    ASSERT_NE(record, nullptr) << "migan-512 is missing from the installed manifest";
     const QString path = firstOnnxPath(*registry, *record);
-    if (path.isEmpty())
-        GTEST_SKIP() << "migan-512 has no ONNX file";
+    ASSERT_FALSE(path.isEmpty()) << "migan-512 has no ONNX file";
 
     MiGanInpainter inpainter(path, 0, /*allowDml=*/true, /*allowCpu=*/true);
-    if (!inpainter.isReady())
-        GTEST_SKIP() << inpainter.lastError().toStdString();
+    ASSERT_TRUE(inpainter.isReady()) << inpainter.lastError().toStdString();
+    if (inpainter.provider() != QStringLiteral("dml")) {
+        // DML is genuinely unavailable: the CPU retry must record why.
+        EXPECT_TRUE(inpainter.usingCpuFallback());
+        EXPECT_FALSE(inpainter.cpuFallbackReason().isEmpty());
+    }
 
     constexpr int kSize = 128;
     const BinaryMask mask = centeredHole(kSize, kSize);
@@ -142,15 +145,16 @@ TEST(InpaintModelContract, MiGanPadsNonMultipleOfEightCrop)
     const auto registry = ModelRegistry::load(manifestPath, &error);
     ASSERT_TRUE(registry.has_value()) << error.toStdString();
     const AiModelRecord *record = findRecord(*registry, QStringLiteral("migan-512"));
-    if (!record)
-        GTEST_SKIP() << "migan-512 is not in the manifest";
+    ASSERT_NE(record, nullptr) << "migan-512 is missing from the installed manifest";
     const QString path = firstOnnxPath(*registry, *record);
-    if (path.isEmpty())
-        GTEST_SKIP() << "migan-512 has no ONNX file";
+    ASSERT_FALSE(path.isEmpty()) << "migan-512 has no ONNX file";
 
     MiGanInpainter inpainter(path, 0, /*allowDml=*/true, /*allowCpu=*/true);
-    if (!inpainter.isReady())
-        GTEST_SKIP() << inpainter.lastError().toStdString();
+    ASSERT_TRUE(inpainter.isReady()) << inpainter.lastError().toStdString();
+    if (inpainter.provider() != QStringLiteral("dml")) {
+        EXPECT_TRUE(inpainter.usingCpuFallback());
+        EXPECT_FALSE(inpainter.cpuFallbackReason().isEmpty());
+    }
 
     // 130x98 is not a multiple of 8: the adapter must reflect-pad, run and
     // crop the result back to the input size.
@@ -179,15 +183,14 @@ TEST(InpaintModelContract, LamaTilesCropLargerThan512)
     ASSERT_TRUE(registry.has_value()) << error.toStdString();
     const AiModelRecord *record =
         findRecord(*registry, QStringLiteral("lama-512-int8-allowzero0"));
-    if (!record)
-        GTEST_SKIP() << "lama-512-int8-allowzero0 is not in the manifest";
+    ASSERT_NE(record, nullptr)
+        << "lama-512-int8-allowzero0 is missing from the installed manifest";
     const QString path = firstOnnxPath(*registry, *record);
-    if (path.isEmpty())
-        GTEST_SKIP() << "lama-512-int8-allowzero0 has no ONNX file";
+    ASSERT_FALSE(path.isEmpty())
+        << "lama-512-int8-allowzero0 has no ONNX file";
 
     LamaInpainter inpainter(path, 0);
-    if (!inpainter.isReady())
-        GTEST_SKIP() << inpainter.lastError().toStdString();
+    ASSERT_TRUE(inpainter.isReady()) << inpainter.lastError().toStdString();
 
     // Two 512 tiles with a 64 px overlap and feather blending.
     constexpr int kWidth = 640;
@@ -216,15 +219,14 @@ TEST(InpaintModelContract, LamaRepairsSyntheticCrop)
     ASSERT_TRUE(registry.has_value()) << error.toStdString();
     const AiModelRecord *record =
         findRecord(*registry, QStringLiteral("lama-512-int8-allowzero0"));
-    if (!record)
-        GTEST_SKIP() << "lama-512-int8-allowzero0 is not in the manifest";
+    ASSERT_NE(record, nullptr)
+        << "lama-512-int8-allowzero0 is missing from the installed manifest";
     const QString path = firstOnnxPath(*registry, *record);
-    if (path.isEmpty())
-        GTEST_SKIP() << "lama-512-int8-allowzero0 has no ONNX file";
+    ASSERT_FALSE(path.isEmpty())
+        << "lama-512-int8-allowzero0 has no ONNX file";
 
     LamaInpainter inpainter(path, 0);
-    if (!inpainter.isReady())
-        GTEST_SKIP() << inpainter.lastError().toStdString();
+    ASSERT_TRUE(inpainter.isReady()) << inpainter.lastError().toStdString();
     EXPECT_EQ(inpainter.provider(), QStringLiteral("cpu"));
 
     constexpr int kSize = 512;

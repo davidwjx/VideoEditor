@@ -18,12 +18,12 @@ namespace VideoEditor {
 
 // Model locations and device selection for the repair stage. MI-GAN and LaMa
 // are separate ONNX graphs; only the path matching the selected mode needs to
-// be set on the production path.
+// be set on the production path. Tile dimensions are fixed by the model
+// contracts (MI-GAN's internal canvas and LaMa's 512 graph), so they are not
+// configurable here; chooseTileSize() remains the tested VRAM-budget helper.
 struct InpaintConfig {
     QString miganPath;
     QString lamaPath;
-    int miganTile = 512;
-    int lamaTile = 512;
     int deviceIndex = 0;
     bool allowDml = true;
     bool allowCpu = true;
