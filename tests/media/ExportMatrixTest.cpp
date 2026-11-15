@@ -17,25 +17,25 @@
 
 using namespace VideoEditor;
 
-namespace {
-
-bool gpuAvailable()
-{
-    QString error;
-    return D3D11Context::create(true, &error) != nullptr
-           || D3D11Context::create(false, &error) != nullptr;
-}
-
-} // namespace
-
-// MPEG-4 and H.264 must actually produce playable MP4 files: the pipeline's
-// own re-probe validation checks container, codecs, frame rate, packet count
-// and both track durations (audio within one frame of video).
+// MPEG-4 and the software H.264 path must actually produce playable MP4 files:
+// the pipeline's own re-probe validation checks container, codecs, frame rate,
+// packet count and both track durations (audio within one frame of video).
+// `preferHardware=false` makes this the software row (h264_mf@sw), which is a
+// different encoder and pixel format from the hardware path covered below.
 TEST(ExportMatrix, SoftwareCodecsProduceValidMp4)
 {
-    if (!gpuAvailable())
+    if (!d3d11Available())
         GTEST_SKIP() << "no D3D11 device";
     const EncoderCatalog catalog = detectEncodersForTest(320, 180, Rational{30, 1});
+    bool h264Hardware = true;
+    QString h264Reason;
+    if (catalog
+            .selectEncoder(ExportVideoCodec::H264, false, &h264Hardware,
+                           &h264Reason)
+            .isEmpty()) {
+        GTEST_SKIP() << h264Reason.toStdString();
+    }
+    EXPECT_FALSE(h264Hardware) << "software preference selected a hardware row";
     for (ExportVideoCodec codec : {ExportVideoCodec::Mpeg4Part2,
                                    ExportVideoCodec::H264}) {
         QTemporaryDir dir;
@@ -47,15 +47,20 @@ TEST(ExportMatrix, SoftwareCodecsProduceValidMp4)
         settings.fps = Rational{30, 1};
         settings.rateControl = ExportRateControl::Bitrate;
         settings.bitrateKbps = 6000;
+        settings.preferHardware = false;
         settings.outputPath = dir.filePath(QStringLiteral("out.mp4"));
         settings.segmentTargetUs = 500'000;
 
-        ExportPipeline pipeline;
-        const ExportResult result = pipeline.run(
-            makeExportProject(VIDEOEDITOR_FIXTURE_DIR), settings, catalog,
-            false, {});
+        const Project project = makeExportProject(VIDEOEDITOR_FIXTURE_DIR);
+        ASSERT_TRUE(exportProjectAssetsProbed(project))
+            << "fixture probe failed";
+        // h264_mf@sw must be opened on a worker with MTA COM, like production.
+        const ExportResult result =
+            runExportForTest(project, settings, catalog, false, {});
         ASSERT_TRUE(result.ok) << result.error.toStdString();
         EXPECT_TRUE(result.validation.ok) << result.validation.error.toStdString();
+        EXPECT_FALSE(result.usedHardware);
+        EXPECT_TRUE(result.encoderId.endsWith(QStringLiteral("@sw")));
         EXPECT_EQ(result.validation.videoPacketCount, 60);
         const int64_t frameUs = 33'333;
         EXPECT_LE(std::llabs(result.validation.videoDurationUs - 2'000'000),
@@ -72,11 +77,60 @@ TEST(ExportMatrix, SoftwareCodecsProduceValidMp4)
     }
 }
 
+// The hardware H.264 row (NVENC / QSV / AMF / h264_mf-hw) is a different
+// encoder and input pixel format from h264_mf@sw, so the matrix covers it
+// explicitly at the same 320x180 size. It skips with the catalog's Chinese
+// reason when no hardware encoder exists; that is the documented fallback,
+// not a failure.
+TEST(ExportMatrix, HardwareH264ProducesValidMp4WhenHardwareExists)
+{
+    if (!d3d11Available())
+        GTEST_SKIP() << "no D3D11 device";
+    const EncoderCatalog catalog =
+        detectEncodersForTest(320, 180, Rational{30, 1});
+    bool hardware = false;
+    QString reason;
+    const QString encoder =
+        catalog.selectEncoder(ExportVideoCodec::H264, true, &hardware, &reason);
+    if (encoder.isEmpty() || !hardware) {
+        GTEST_SKIP() << (reason.isEmpty()
+                             ? QStringLiteral("没有可用的 H.264 硬件编码器")
+                             : reason)
+                            .toStdString();
+    }
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ExportSettings settings;
+    settings.codec = ExportVideoCodec::H264;
+    settings.width = 320;
+    settings.height = 180;
+    settings.fps = Rational{30, 1};
+    settings.rateControl = ExportRateControl::Bitrate;
+    settings.bitrateKbps = 6000;
+    settings.preferHardware = true;
+    settings.outputPath = dir.filePath(QStringLiteral("hw.mp4"));
+    settings.segmentTargetUs = 500'000;
+    const Project project = makeExportProject(VIDEOEDITOR_FIXTURE_DIR);
+    ASSERT_TRUE(exportProjectAssetsProbed(project)) << "fixture probe failed";
+    const ExportResult result =
+        ExportPipeline().run(project, settings, catalog, false, {});
+    ASSERT_TRUE(result.ok) << result.error.toStdString();
+    EXPECT_TRUE(result.usedHardware);
+    EXPECT_TRUE(result.encoderId.endsWith(QStringLiteral("@hw")));
+    EXPECT_TRUE(result.validation.ok) << result.validation.error.toStdString();
+    EXPECT_EQ(result.validation.videoPacketCount, 60);
+    std::cout << "H.264 hardware: encoder=" << result.encoderId.toStdString()
+              << " packets=" << result.validation.videoPacketCount
+              << " videoDurationUs=" << result.validation.videoDurationUs
+              << " audioDurationUs=" << result.validation.audioDurationUs
+              << std::endl;
+}
+
 // 30000/1001 and 60 fps exercise the rational time base: the AAC track and the
 // CFR video track must still end within one frame of each other.
 TEST(ExportMatrix, FractionalAndHighFrameRatesKeepAvWithinOneFrame)
 {
-    if (!gpuAvailable())
+    if (!d3d11Available())
         GTEST_SKIP() << "no D3D11 device";
     const EncoderCatalog catalog = detectEncodersForTest(320, 180, Rational{30, 1});
     for (const Rational fps : {Rational{30000, 1001}, Rational{60, 1}}) {
@@ -91,10 +145,12 @@ TEST(ExportMatrix, FractionalAndHighFrameRatesKeepAvWithinOneFrame)
         settings.bitrateKbps = 4000;
         settings.outputPath = dir.filePath(QStringLiteral("fps.mp4"));
         settings.segmentTargetUs = 500'000;
+        const Project project = makeExportProject(VIDEOEDITOR_FIXTURE_DIR);
+        ASSERT_TRUE(exportProjectAssetsProbed(project))
+            << "fixture probe failed";
         ExportPipeline pipeline;
-        const ExportResult result = pipeline.run(
-            makeExportProject(VIDEOEDITOR_FIXTURE_DIR), settings, catalog,
-            false, {});
+        const ExportResult result =
+            pipeline.run(project, settings, catalog, false, {});
         ASSERT_TRUE(result.ok) << result.error.toStdString();
         ASSERT_TRUE(result.validation.ok) << result.validation.error.toStdString();
         const int64_t frameUs = (1'000'000LL * fps.den + fps.num / 2) / fps.num;
@@ -114,7 +170,7 @@ TEST(ExportMatrix, FractionalAndHighFrameRatesKeepAvWithinOneFrame)
 // in Chinese, using the catalog's own gate reason.
 TEST(ExportMatrix, H265ProducesValidMp4WhenHardwareExists)
 {
-    if (!gpuAvailable())
+    if (!d3d11Available())
         GTEST_SKIP() << "no D3D11 device";
     const EncoderCatalog catalog = detectEncodersForTest(320, 180, Rational{30, 1});
     bool hardware = false;
@@ -138,10 +194,11 @@ TEST(ExportMatrix, H265ProducesValidMp4WhenHardwareExists)
     settings.bitrateKbps = 3000;
     settings.outputPath = dir.filePath(QStringLiteral("h265.mp4"));
     settings.segmentTargetUs = 500'000;
+    const Project project = makeExportProject(VIDEOEDITOR_FIXTURE_DIR);
+    ASSERT_TRUE(exportProjectAssetsProbed(project)) << "fixture probe failed";
     ExportPipeline pipeline;
-    const ExportResult result = pipeline.run(
-        makeExportProject(VIDEOEDITOR_FIXTURE_DIR), settings, catalog, false,
-        {});
+    const ExportResult result =
+        pipeline.run(project, settings, catalog, false, {});
     ASSERT_TRUE(result.ok) << result.error.toStdString();
     EXPECT_TRUE(result.usedHardware);
     EXPECT_TRUE(result.encoderId.endsWith(QStringLiteral("@hw")));
@@ -158,6 +215,20 @@ TEST(ExportMatrix, H265ProducesValidMp4WhenHardwareExists)
 TEST(ExportMatrix, H265IsExplicitlyDisabledWithoutHardware)
 {
     const EncoderCatalog catalog = EncoderCatalog::withoutHardwareForTest();
+    // Lock the gate's user-visible Chinese reason directly, independent of the
+    // pipeline error plumbing.
+    bool gateHardware = true;
+    QString gateReason;
+    EXPECT_TRUE(catalog
+                    .selectEncoder(ExportVideoCodec::H265, true, &gateHardware,
+                                   &gateReason)
+                    .isEmpty());
+    EXPECT_FALSE(gateHardware);
+    EXPECT_NE(gateReason.indexOf(QStringLiteral("H.265")), -1)
+        << gateReason.toStdString();
+    EXPECT_NE(gateReason.indexOf(QStringLiteral("硬件")), -1)
+        << gateReason.toStdString();
+
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     ExportSettings settings;
@@ -182,7 +253,7 @@ TEST(ExportMatrix, H265IsExplicitlyDisabledWithoutHardware)
 // is available; the threshold itself is never weakened.
 TEST(ExportMatrix, HardwareH264IsAtLeastRealtimeAt1080p)
 {
-    if (!gpuAvailable())
+    if (!d3d11Available())
         GTEST_SKIP() << "no D3D11 device";
     const EncoderCatalog catalog = detectEncodersForTest(1920, 1080, Rational{30, 1});
     bool hardware = false;
@@ -193,6 +264,7 @@ TEST(ExportMatrix, HardwareH264IsAtLeastRealtimeAt1080p)
         GTEST_SKIP() << "no H.264 hardware encoder: " << reason.toStdString();
     }
     Project project = makeExportProject(VIDEOEDITOR_FIXTURE_DIR);
+    ASSERT_TRUE(exportProjectAssetsProbed(project)) << "fixture probe failed";
     project.timeline.width = 1920;
     project.timeline.height = 1080;
     QTemporaryDir dir;

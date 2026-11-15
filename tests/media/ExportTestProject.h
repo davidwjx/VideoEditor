@@ -21,26 +21,80 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#ifdef _WIN32
+#include <objbase.h>
+#endif
+
+#include "D3D11Context.h"
 #include "ExportEncoderCatalog.h"
+#include "ExportPipeline.h"
 #include "MediaProbe.h"
 #include "Project.h"
 
 namespace VideoEditor {
 
+inline bool d3d11Available(QString *error = nullptr)
+{
+    return D3D11Context::create(true, error) != nullptr
+           || D3D11Context::create(false, error) != nullptr;
+}
+
 // Production probes encoders in the export QThread, never on the GUI thread.
 // Doing it on a QGuiApplication main thread (COM initialized as STA) leaves
 // the AMF/Media Foundation probes half-initialized and crashes Qt's teardown
-// after the tests pass. A plain worker thread mirrors the export worker's
-// apartment and keeps every test process clean.
+// after the tests pass. A plain worker thread with an explicit MTA apartment
+// mirrors the export worker and keeps every test process clean.
 inline EncoderCatalog detectEncodersForTest(int width, int height,
                                             const Rational &fps)
 {
     EncoderCatalog catalog;
     std::thread worker([&catalog, width, height, fps] {
+#ifdef _WIN32
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
         catalog = detectEncoders(width, height, fps);
+#ifdef _WIN32
+        if (SUCCEEDED(com))
+            CoUninitialize();
+#endif
     });
     worker.join();
     return catalog;
+}
+
+// Runs one export on a worker thread with an explicit MTA apartment, exactly
+// like ExportWorker does in production. This matters for Media Foundation's
+// software encoder (h264_mf@sw): opening it on the GUI main thread, whose COM
+// apartment is STA, passes the test but leaves MF half-initialized and crashes
+// QGuiApplication teardown.
+inline ExportResult runExportForTest(const Project &project,
+                                     const ExportSettings &settings,
+                                     const EncoderCatalog &catalog,
+                                     bool resume = false,
+                                     const ExportPipeline::Hooks &hooks = {})
+{
+    ExportResult result;
+    std::thread worker([&] {
+#ifdef _WIN32
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
+        result = ExportPipeline().run(project, settings, catalog, resume, hooks);
+#ifdef _WIN32
+        if (SUCCEEDED(com))
+            CoUninitialize();
+#endif
+    });
+    worker.join();
+    return result;
+}
+
+// The fixture probes must succeed before a test exports; a missing fixture is
+// an environment problem, not a silent project with zero-length assets.
+inline bool exportProjectAssetsProbed(const Project &project)
+{
+    const Asset *video = project.assetById(QStringLiteral("v1"));
+    const Asset *audio = project.assetById(QStringLiteral("a1"));
+    return video && video->info.hasVideo && audio && audio->info.hasAudio;
 }
 
 // 320x180 / 30 fps / 2 s project:
@@ -91,6 +145,40 @@ inline Project makeExportProject(const QString &fixtureDir)
         }
         // Subtitle track: intentionally empty; tests that exercise burn-in
         // append the cue they need.
+    }
+    return project;
+}
+
+// 320x180 / 30 fps / 1 s project built from the flat-colour red.mp4 (64x64,
+// letterboxed by the default fit transform). Used for a full-resolution parity
+// gate where 4:2:0 chroma subsampling does not dominate the error.
+inline Project makeFlatColorProject(const QString &fixtureDir)
+{
+    Project project;
+    project.name = QStringLiteral("平色验收工程");
+    project.timeline.width = 320;
+    project.timeline.height = 180;
+    project.timeline.fps = Rational{30, 1};
+    project.timeline.sampleRate = 48000;
+
+    Asset video;
+    video.id = QStringLiteral("v1");
+    video.path = QDir(fixtureDir).filePath(QStringLiteral("red.mp4"));
+    if (const auto probed = MediaProbe::probe(video.path))
+        video.info = *probed;
+    project.assets.append(video);
+
+    project.ensureDefaultTracks();
+    for (Track &track : project.tracks) {
+        if (track.type != TrackType::Video)
+            continue;
+        Clip clip;
+        clip.id = QStringLiteral("redc1");
+        clip.assetId = video.id;
+        clip.sourceInUs = 0;
+        clip.sourceOutUs = 1'000'000;
+        clip.timelineStartUs = 0;
+        track.clips.append(clip);
     }
     return project;
 }
@@ -226,8 +314,11 @@ inline std::vector<uint8_t> decodeFrameRgba(const QString &path, int64_t ptsUs,
         }
         if (read < 0)
             return fail(QStringLiteral("读取视频包失败。"));
-        if (state.packet->stream_index == videoStream)
-            avcodec_send_packet(state.codec, state.packet);
+        if (state.packet->stream_index == videoStream) {
+            const int sent = avcodec_send_packet(state.codec, state.packet);
+            if (sent < 0 && sent != AVERROR(EAGAIN))
+                return fail(QStringLiteral("提交视频包失败。"));
+        }
         av_packet_unref(state.packet);
     }
     if (!gotFrame)
