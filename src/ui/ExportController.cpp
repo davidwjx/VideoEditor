@@ -275,14 +275,17 @@ QString ExportController::validate()
     // problem. The checker owns the cache/model types; the controller only
     // forwards the verdict.
     if (m_removalChecker) {
-        const RemovalPreflightResult result =
-            m_removalChecker(m_document.project());
-        syncRemovalState(&result);
-        if (!result.ok) {
-            return result.message.isEmpty()
+        if (!m_removalPreflightValid) {
+            m_removalPreflightResult =
+                m_removalChecker(m_document.project());
+            m_removalPreflightValid = true;
+        }
+        syncRemovalState(&m_removalPreflightResult);
+        if (!m_removalPreflightResult.ok) {
+            return m_removalPreflightResult.message.isEmpty()
                        ? QStringLiteral(
                              "AI 修复结果缺失或已过期。请先生成修复，再导出。")
-                       : result.message;
+                       : m_removalPreflightResult.message;
         }
         return {};
     }
@@ -675,7 +678,15 @@ void ExportController::cleanupThread()
 void ExportController::setRemovalChecker(RemovalChecker checker)
 {
     m_removalChecker = std::move(checker);
+    invalidateRemovalPreflight();
     refreshValidation();
+}
+
+void ExportController::invalidateRemovalPreflight()
+{
+    m_removalPreflightValid = false;
+    m_removalPreflightResult = {};
+    syncRemovalState(nullptr);
 }
 
 void ExportController::syncRemovalState(const RemovalPreflightResult *result)
@@ -687,6 +698,10 @@ void ExportController::syncRemovalState(const RemovalPreflightResult *result)
                               "AI 修复结果缺失或已过期。请先生成修复，再导出。")
                         : result->message)
                  : QString();
+    const QString warning =
+        (result && result->ok && !result->message.isEmpty())
+            ? result->message
+            : QString();
     if (required != m_removalRequired) {
         m_removalRequired = required;
         emit removalRequiredChanged();
@@ -694,6 +709,10 @@ void ExportController::syncRemovalState(const RemovalPreflightResult *result)
     if (message != m_removalMessage) {
         m_removalMessage = message;
         emit removalMessageChanged();
+    }
+    if (warning != m_removalWarning) {
+        m_removalWarning = warning;
+        emit removalWarningChanged();
     }
 }
 

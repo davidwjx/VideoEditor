@@ -24,9 +24,19 @@ public:
                                        const RemovalLayer &layer,
                                        const ModelRegistry &models);
 
+    // modelsAlreadyVerified skips featureEnabled()'s model-file hashing when
+    // AiFeatureGate::enabled() already proved the files for this session.
     static RemovalPreflightResult check(const Project &project,
                                         const RemovalCache &cache,
-                                        const ModelRegistry &models);
+                                        const ModelRegistry &models,
+                                        bool modelsAlreadyVerified = false);
+
+    // Null-registry path: the model manifest could not be loaded, so there is
+    // no registry to inspect. Still honours track/clip/layer enablement and
+    // source-range overlap; returns ok when no enabled removal layer is
+    // actually in effect.
+    static RemovalPreflightResult checkWithoutModels(const Project &project,
+                                                     const QString &reason);
 };
 
 } // namespace VideoEditor

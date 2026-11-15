@@ -170,39 +170,26 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         const ModelRegistry *registry =
             m_aiGate ? m_aiGate->registry() : nullptr;
         if (!registry) {
-            RemovalPreflightResult result;
             const QString reason =
                 m_aiGate
                     ? m_aiGate->disabledReason()
                     : QStringLiteral("AI 消除功能未启用：未加载模型清单。");
-            QStringList lines;
-            for (const Track &track : project.tracks) {
-                if (track.type != TrackType::Video)
-                    continue;
-                for (const Clip &clip : track.clips) {
-                    if (clip.removalLayerId.isEmpty())
-                        continue;
-                    const RemovalLayer *layer =
-                        project.removalLayerById(clip.removalLayerId);
-                    if (!layer || !layer->enabled)
-                        continue;
-                    RemovalPreflightIssue issue;
-                    issue.clipId = clip.id;
-                    issue.layerId = layer->id;
-                    issue.startUs = clip.timelineStartUs;
-                    issue.endUs = clip.timelineEndUs();
-                    issue.reason = reason;
-                    result.issues.append(issue);
-                    lines.append(QStringLiteral("片段“%1”：%2")
-                                     .arg(clip.id, reason));
-                }
-            }
-            result.ok = result.issues.isEmpty();
-            result.message = lines.join(QLatin1Char('\n'));
-            return result;
+            return RemovalPreflight::checkWithoutModels(project, reason);
         }
-        return RemovalPreflight::check(project, *m_removalCache, *registry);
+        // AiFeatureGate::reload() only enables the feature after hashing the
+        // model files, so a loaded enabled gate does not need the preflight to
+        // hash them again on every export-dialog edit.
+        return RemovalPreflight::check(
+            project, *m_removalCache, *registry,
+            m_aiGate && m_aiGate->enabled());
     });
+    // The preflight result depends on the document; a cache hit must not
+    // survive an edit. `changed` covers every command (including removal layer
+    // and clip/track edits); projectReplaced covers load/recovery.
+    connect(m_document, &ProjectDocument::changed, m_export.get(),
+            &ExportController::invalidateRemovalPreflight);
+    connect(m_document, &ProjectDocument::projectReplaced, m_export.get(),
+            &ExportController::invalidateRemovalPreflight);
     m_export->setRemovalCacheRoot(m_removalCache->root());
     m_preview->setRemovalCacheRoot(m_removalCache->root());
     // Task 8 replaces the placeholder with the real generate-and-export flow.

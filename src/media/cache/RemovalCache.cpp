@@ -228,6 +228,60 @@ QString manifestPath(const QString &cacheDir)
     return QDir(cacheDir).filePath(QStringLiteral("manifest.json"));
 }
 
+// A complete manifest must list every 30-frame chunk covering totalFrames with
+// the exact chunk-aligned range, and each chunk index must exist. A truncated
+// chunk list would otherwise make every missing frame look "sparse" (no hole),
+// letting export silently encode the original.
+bool validateCompleteCoverage(const QString &cacheDir,
+                              const RemovalCacheManifest &manifest,
+                              QString *reason)
+{
+    if (manifest.totalFrames <= 0) {
+        setError(reason, QStringLiteral("修复缓存帧数无效。"));
+        return false;
+    }
+    const int chunkCount = (manifest.totalFrames + 29) / 30;
+    QHash<int, const RemovalCacheChunk *> byIndex;
+    for (const RemovalCacheChunk &chunk : manifest.chunks) {
+        if (chunk.index >= 0 && chunk.index < chunkCount)
+            byIndex.insert(chunk.index, &chunk);
+    }
+    for (int index = 0; index < chunkCount; ++index) {
+        const int expectedFirst = index * 30;
+        const int expectedCount =
+            std::min(30, manifest.totalFrames - expectedFirst);
+        const auto it = byIndex.constFind(index);
+        if (it == byIndex.constEnd()) {
+            setError(reason, QStringLiteral("修复缓存缺少分块 %1。")
+                                .arg(index));
+            return false;
+        }
+        const RemovalCacheChunk &chunk = *it.value();
+        if (chunk.firstFrame != expectedFirst
+            || chunk.frameCount != expectedCount) {
+            setError(reason,
+                     QStringLiteral("修复缓存分块 %1 的范围不匹配。")
+                         .arg(index));
+            return false;
+        }
+        if (chunk.treeSha256.isEmpty()) {
+            setError(reason,
+                     QStringLiteral("修复缓存分块 %1 缺少校验值。")
+                         .arg(index));
+            return false;
+        }
+        const QString chunkPath = chunkDir(cacheDir, index);
+        if (!QDir(chunkPath).exists()
+            || !QFileInfo::exists(
+                QDir(chunkPath).filePath(QStringLiteral("index.json")))) {
+            setError(reason,
+                     QStringLiteral("修复缓存缺少分块 %1。").arg(index));
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 RemovalCache::RemovalCache(QString root)
@@ -602,13 +656,10 @@ RemovalCacheState RemovalCache::state(const QString &cacheKey,
         return RemovalCacheState::Corrupt;
     }
 
-    for (const RemovalCacheChunk &chunk : manifest->chunks) {
-        const QString chunkPath = chunkDir(dir, chunk.index);
-        if (!QDir(chunkPath).exists()
-            || !QFileInfo::exists(QDir(chunkPath).filePath(QStringLiteral("index.json")))) {
-            setError(reason, QStringLiteral("修复缓存缺少分块 %1。").arg(chunk.index));
-            return RemovalCacheState::Corrupt;
-        }
+    QString coverageError;
+    if (!validateCompleteCoverage(dir, *manifest, &coverageError)) {
+        setError(reason, coverageError);
+        return RemovalCacheState::Corrupt;
     }
     return RemovalCacheState::Complete;
 }
@@ -626,6 +677,13 @@ bool RemovalCache::verify(const QString &cacheKey, QString *reason) const
         return false;
 
     const QString dir = cacheDir(cacheKey);
+    // Re-check explicitly so verify() never relies solely on state()'s earlier
+    // verdict if the manifest changes between the two reads.
+    QString coverageError;
+    if (!validateCompleteCoverage(dir, *manifest, &coverageError)) {
+        setError(reason, coverageError);
+        return false;
+    }
     for (const RemovalCacheChunk &chunk : manifest->chunks) {
         const QString chunkPath = chunkDir(dir, chunk.index);
         const QString actual = treeHash(chunkPath);

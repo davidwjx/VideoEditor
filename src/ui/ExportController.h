@@ -65,6 +65,8 @@ class ExportController : public QObject {
                    NOTIFY removalRequiredChanged)
     Q_PROPERTY(QString removalMessage READ removalMessage
                    NOTIFY removalMessageChanged)
+    Q_PROPERTY(QString removalWarning READ removalWarning
+                   NOTIFY removalWarningChanged)
 
 public:
     using ProgressCallback = std::function<void(const ExportProgress &)>;
@@ -112,6 +114,8 @@ public:
     QString encoderName() const { return m_encoderName; }
     bool removalRequired() const { return m_removalRequired; }
     QString removalMessage() const { return m_removalMessage; }
+    // Non-blocking preflight notes (for example low-confidence tracking).
+    QString removalWarning() const { return m_removalWarning; }
 
     Q_INVOKABLE void applyPreset(const QString &id);
     // Re-probes encoders for the current resolution unless a catalog was
@@ -139,6 +143,10 @@ public:
     // Injected by AppController. Not owned: the lambda captures the removal
     // cache and model registry, which outlive this controller.
     void setRemovalChecker(RemovalChecker checker);
+    // Drops the cached preflight verdict so the next validate() re-runs the
+    // checker. AppController calls this on document changes; typing in the
+    // export dialog does not.
+    void invalidateRemovalPreflight();
     // Repair cache root forwarded to the export worker.
     void setRemovalCacheRoot(const QString &root) { m_removalCacheRoot = root; }
 
@@ -176,6 +184,7 @@ signals:
     void encoderNameChanged();
     void removalRequiredChanged();
     void removalMessageChanged();
+    void removalWarningChanged();
     // Emitted instead of starting an export that would silently encode the
     // original in place of a required repair. Task 8 connects this to the
     // removal generation flow.
@@ -240,6 +249,11 @@ private:
     QString m_encoderName;
     bool m_removalRequired = false;
     QString m_removalMessage;
+    QString m_removalWarning;
+    // Preflight hashes model bundles and every cached patch. Cache the verdict
+    // until the document changes; the export worker still runs it once.
+    bool m_removalPreflightValid = false;
+    RemovalPreflightResult m_removalPreflightResult;
     RemovalChecker m_removalChecker;
     QString m_removalCacheRoot;
 

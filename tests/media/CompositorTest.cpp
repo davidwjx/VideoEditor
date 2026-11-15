@@ -291,6 +291,38 @@ TEST(Compositor, DrawsNormalizedClipFrameConvertedInsidePass)
     EXPECT_TRUE(visible);
 }
 
+TEST(Compositor, ImageTextureCacheIsBoundedAndClearable)
+{
+    QString error;
+    auto context = D3D11Context::create(false, &error);
+    if (!context)
+        GTEST_SKIP() << "D3D11 unavailable: " << error.toStdString();
+
+    SharedTextureRing ring(*context);
+    ASSERT_TRUE(ring.create(64, 64, 3, &error)) << error.toStdString();
+    LayerCompositor compositor;
+    ASSERT_TRUE(compositor.initialize(*context, 64, 64, &error))
+        << error.toStdString();
+
+    IDXGIKeyedMutex *mutex = ring.mutex(0);
+    ASSERT_NE(mutex, nullptr);
+    ASSERT_EQ(mutex->AcquireSync(0, 5000), S_OK);
+    compositor.begin(ring.rtv(0), true);
+    for (int i = 0; i < 10; ++i) {
+        QImage image(16 + i, 16, QImage::Format_ARGB32);
+        image.fill(QColor(20 * i, 40, 60, 255));
+        ASSERT_TRUE(compositor.drawImage(image, LayerRect{0, 0, 1, 1}, 1.0f,
+                                         &error))
+            << error.toStdString();
+    }
+    // Distinct crop sizes must not grow the upload cache without bound.
+    EXPECT_LE(compositor.imageTextureCountForTest(), 8);
+    compositor.clearTextureCache();
+    EXPECT_EQ(compositor.imageTextureCountForTest(), 0);
+    compositor.end();
+    mutex->ReleaseSync(1);
+}
+
 TEST(LayerGeometry, FitsAndOffsetsTransform)
 {
     const LayerRect fit = layerRectFor(Transform{}, 1920, 1080, 1920, 1080);

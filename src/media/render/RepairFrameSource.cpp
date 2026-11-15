@@ -55,6 +55,10 @@ std::unique_ptr<RepairFrameSource> RepairFrameSource::open(
                                        .arg(manifest->status)));
         return nullptr;
     }
+    if (manifest->width <= 0 || manifest->height <= 0) {
+        setError(error, cacheError(QStringLiteral("修复缓存尺寸无效。")));
+        return nullptr;
+    }
 
     auto source = std::unique_ptr<RepairFrameSource>(
         new RepairFrameSource(cache.root(), *manifest));
@@ -73,8 +77,27 @@ std::unique_ptr<RepairFrameSource> RepairFrameSource::open(
                                            : indexError));
             return nullptr;
         }
-        for (const RemovalChunkFrame &frame : index->frames)
+        for (const RemovalChunkFrame &frame : index->frames) {
+            // A corrupt index must not be able to stretch a patch over the
+            // whole layer. Validate the global frame and its crop against the
+            // display-sized source before accepting the chunk.
+            if (frame.frame < 0 || frame.frame >= manifest->totalFrames) {
+                setError(error,
+                         cacheError(QStringLiteral("第 %1 帧序号越界。")
+                                        .arg(frame.frame)));
+                return nullptr;
+            }
+            const QRect &crop = frame.crop;
+            if (!crop.isValid() || crop.x() < 0 || crop.y() < 0
+                || crop.x() + crop.width() > manifest->width
+                || crop.y() + crop.height() > manifest->height) {
+                setError(error,
+                         cacheError(QStringLiteral("第 %1 帧裁剪区域无效。")
+                                        .arg(frame.frame)));
+                return nullptr;
+            }
             source->m_locations.insert(frame.frame, frame);
+        }
     }
 
     source->m_complete = true;

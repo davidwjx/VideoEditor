@@ -57,7 +57,10 @@ public:
     // Hashes only the requested model ids; used by the engine so a technical
     // run only needs the files it will actually load.
     bool verifyFiles(const QStringList &ids, QString *error = nullptr) const;
-    bool featureEnabled(QString *reason = nullptr) const;
+    // verifyModelFiles=false skips hashing the model binaries when the caller
+    // already proved them (for example AiFeatureGate::reload()).
+    bool featureEnabled(QString *reason = nullptr,
+                        bool verifyModelFiles = true) const;
     const AiModelRecord *model(const QString &id) const;
     // Returns the record only when it is commercially approved, so engine
     // callers can never load an unapproved id while the gate is enabled.

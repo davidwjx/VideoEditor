@@ -35,10 +35,13 @@ Project redProject(const QString &fixtureDir)
     project.timeline.width = kWidth;
     project.timeline.height = kHeight;
     project.timeline.fps = Rational{30, 1};
+    const auto probed = MediaProbe::probe(path);
+    if (!probed)
+        return project; // no assets: callers skip or fail explicitly
     Asset asset;
     asset.id = QStringLiteral("asset-1");
     asset.path = path;
-    asset.info = *MediaProbe::probe(path);
+    asset.info = *probed;
     project.assets.append(asset);
     Track track;
     track.id = QStringLiteral("track-v");
@@ -193,6 +196,8 @@ protected:
                 .filePath(QStringLiteral("red.mp4"));
         if (!QFileInfo::exists(red))
             GTEST_SKIP() << "missing red.mp4";
+        if (!MediaProbe::probe(red))
+            GTEST_SKIP() << "red.mp4 could not be probed";
     }
 };
 
@@ -201,6 +206,7 @@ TEST_F(RemovalRenderTest, DrawsRepairOverOriginalAndCompareModesDiffer)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     // A solid blue patch covering the whole frame makes the comparison mode
     // unambiguous against the red source.
     addRepairLayer(&project, dir.path(), 0, 1'000'000, 0, 30, QColor(0, 0, 255));
@@ -241,6 +247,7 @@ TEST_F(RemovalRenderTest, SplitWipeHonoursThePermilleFraction)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     addRepairLayer(&project, dir.path(), 0, 1'000'000, 0, 30, QColor(0, 0, 255));
 
     TimelineCompositor compositor;
@@ -261,6 +268,7 @@ TEST_F(RemovalRenderTest, OutsideLayerRangeDrawsOriginal)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     // Layer covers only 0.5 s..1.0 s of the source.
     addRepairLayer(&project, dir.path(), 500'000, 1'000'000, 7, 15,
                    QColor(0, 0, 255));
@@ -291,6 +299,7 @@ TEST_F(RemovalRenderTest, MissingCacheFallsBackToOriginalAndWarnsOnce)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     RemovalLayer layer;
     layer.id = QStringLiteral("rl-missing");
     layer.clipId = QStringLiteral("c1");
@@ -316,6 +325,66 @@ TEST_F(RemovalRenderTest, MissingCacheFallsBackToOriginalAndWarnsOnce)
     const auto second = compose(compositor, 0, &error);
     ASSERT_FALSE(second.empty()) << error.toStdString();
     EXPECT_EQ(warnings, 1) << "the missing cache must warn once per layer";
+    // The failed key is cached: playback must not re-parse the manifest or
+    // every chunk index on each frame.
+    EXPECT_EQ(compositor.failedRepairKeyCountForTest(), 1);
+}
+
+TEST_F(RemovalRenderTest, EmptyCacheRootWarnsOnceAndCachesTheFailure)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
+    RemovalLayer layer;
+    layer.id = QStringLiteral("rl-no-root");
+    layer.clipId = QStringLiteral("c1");
+    layer.sourceInUs = 0;
+    layer.sourceOutUs = 1'000'000;
+    layer.cacheKey = QString(64, QLatin1Char('a'));
+    layer.trackingState = RemovalTrackingState::Complete;
+    project.removalLayers.append(layer);
+    project.tracks[0].clips[0].removalLayerId = layer.id;
+
+    TimelineCompositor compositor;
+    int warnings = 0;
+    compositor.setWarningCallback(
+        [&warnings](const QString &) { ++warnings; });
+    QString error;
+    ASSERT_TRUE(compositor.open(project, kWidth, kHeight, false, &error))
+        << error.toStdString();
+
+    ASSERT_FALSE(compose(compositor, 0, &error).empty());
+    ASSERT_FALSE(compose(compositor, 0, &error).empty());
+    EXPECT_EQ(warnings, 1);
+    EXPECT_EQ(compositor.failedRepairKeyCountForTest(), 1);
+}
+
+TEST_F(RemovalRenderTest, SplitWipeExtremesShowOnlyOneSide)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
+    addRepairLayer(&project, dir.path(), 0, 1'000'000, 0, 30, QColor(0, 0, 255));
+
+    TimelineCompositor compositor;
+    compositor.setRemovalCacheRoot(dir.path());
+    QString error;
+    ASSERT_TRUE(compositor.open(project, kWidth, kHeight, false, &error))
+        << error.toStdString();
+
+    compositor.setRemovalCompareMode(RemovalCompareMode::SplitWipe, 0);
+    const auto none = compose(compositor, 0, &error);
+    ASSERT_FALSE(none.empty()) << error.toStdString();
+    EXPECT_TRUE(isRed(pixel(none, 2, 32)));
+    EXPECT_TRUE(isRed(pixel(none, 32, 32)));
+
+    compositor.setRemovalCompareMode(RemovalCompareMode::SplitWipe, 1000);
+    const auto all = compose(compositor, 0, &error);
+    ASSERT_FALSE(all.empty()) << error.toStdString();
+    EXPECT_TRUE(isBlue(pixel(all, 2, 32)));
+    EXPECT_TRUE(isBlue(pixel(all, 32, 32)));
 }
 
 TEST_F(RemovalRenderTest, FailOnMissingRemovalReturnsError)
@@ -323,6 +392,7 @@ TEST_F(RemovalRenderTest, FailOnMissingRemovalReturnsError)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     RemovalLayer layer;
     layer.id = QStringLiteral("rl-missing");
     layer.clipId = QStringLiteral("c1");

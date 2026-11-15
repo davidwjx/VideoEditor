@@ -65,7 +65,7 @@ bool writeCache(RemovalCache &cache, const QString &key,
 
 } // namespace
 
-TEST(RepairFrameSource, MapsSourceTimeToPatchAndCrop)
+TEST(RepairSource, MapsSourceTimeToPatchAndCrop)
 {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -91,7 +91,7 @@ TEST(RepairFrameSource, MapsSourceTimeToPatchAndCrop)
     EXPECT_EQ(frame->patch.pixelColor(0, 0), QColor(200, 0, 0, 255));
 }
 
-TEST(RepairFrameSource, ReturnsNullForPartialOrMissingCache)
+TEST(RepairSource, ReturnsNullForPartialOrMissingCache)
 {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -112,7 +112,7 @@ TEST(RepairFrameSource, ReturnsNullForPartialOrMissingCache)
         << error.toStdString();
 }
 
-TEST(RepairFrameSource, LoadsSparseFramesAndSkipsFramesWithoutPatch)
+TEST(RepairSource, LoadsSparseFramesAndSkipsFramesWithoutPatch)
 {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -140,7 +140,7 @@ TEST(RepairFrameSource, LoadsSparseFramesAndSkipsFramesWithoutPatch)
     EXPECT_EQ(first, second);
 }
 
-TEST(RepairFrameSource, ReturnsNullOutsideSourceRangeAndClampsInside)
+TEST(RepairSource, ReturnsNullOutsideSourceRangeAndClampsInside)
 {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -164,7 +164,7 @@ TEST(RepairFrameSource, ReturnsNullOutsideSourceRangeAndClampsInside)
     EXPECT_NE(source->frameAt(1'999'999, &error), nullptr);
 }
 
-TEST(RepairFrameSource, RejectsManifestWhoseChunkIndexIsUnreadable)
+TEST(RepairSource, RejectsManifestWhoseChunkIndexIsUnreadable)
 {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -180,5 +180,63 @@ TEST(RepairFrameSource, RejectsManifestWhoseChunkIndexIsUnreadable)
 
     EXPECT_FALSE(RepairFrameSource::open(cache, key, &error));
     EXPECT_TRUE(error.contains(QStringLiteral("缺失或损坏")))
+        << error.toStdString();
+}
+
+TEST(RepairSource, RejectsTruncatedCompleteManifest)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+    const QString key(64, QLatin1Char('a'));
+    QString error;
+
+    // Two real chunks, but the "complete" manifest lists only chunk 0. Every
+    // missing frame must not be mistaken for a sparse (hole-free) frame.
+    RemovalChunkIndex first;
+    RemovalChunkIndex second;
+    ASSERT_TRUE(cache.writeChunkFrames(key, 0, {0}, {patchImage(10, 20, 30)},
+                                       {QRect(4, 4, 16, 16)}, &first, &error))
+        << error.toStdString();
+    ASSERT_TRUE(cache.writeChunkFrames(key, 1, {30}, {patchImage(10, 20, 30)},
+                                       {QRect(4, 4, 16, 16)}, &second, &error))
+        << error.toStdString();
+
+    RemovalCacheManifest manifest =
+        manifestFor(key, 0, 2'000'000, 60);
+    manifest.chunks.append(RemovalCacheChunk{0, 0, 30, first.treeSha256});
+    ASSERT_TRUE(cache.writeManifest(manifest, &error)) << error.toStdString();
+
+    EXPECT_EQ(cache.state(key, &error), RemovalCacheState::Corrupt);
+    EXPECT_FALSE(cache.verify(key, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("缺少分块")))
+        << error.toStdString();
+    error.clear();
+    EXPECT_FALSE(RepairFrameSource::open(cache, key, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("缺少分块")))
+        << error.toStdString();
+}
+
+TEST(RepairSource, RejectsOutOfBoundsPatchCrop)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+    const QString key(64, QLatin1Char('b'));
+    QString error;
+
+    RemovalChunkIndex index;
+    ASSERT_TRUE(cache.writeChunkFrames(key, 0, {0}, {patchImage(1, 2, 3)},
+                                       {QRect(60, 60, 32, 32)}, &index, &error))
+        << error.toStdString();
+    RemovalCacheManifest manifest = manifestFor(key, 0, 1'000'000, 30);
+    manifest.chunks.append(
+        RemovalCacheChunk{0, 0, 30, index.treeSha256});
+    ASSERT_TRUE(cache.writeManifest(manifest, &error)) << error.toStdString();
+    // The manifest coverage itself is valid; only the crop is corrupt.
+    EXPECT_EQ(cache.state(key, &error), RemovalCacheState::Complete);
+
+    EXPECT_FALSE(RepairFrameSource::open(cache, key, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("裁剪区域无效")))
         << error.toStdString();
 }

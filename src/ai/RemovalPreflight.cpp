@@ -34,6 +34,81 @@ QString cacheMessageFor(const QString &clipId)
         .arg(clipId);
 }
 
+QString inpaintModelHint(RepairMode mode)
+{
+    // The engine resolves the mode's default record by these id fragments:
+    // Fast -> MI-GAN, Quality -> LaMa. Keep the cache key aligned with the
+    // pixels the generator will actually produce.
+    return mode == RepairMode::Quality ? QStringLiteral("lama")
+                                       : QStringLiteral("migan");
+}
+
+struct RemovalTarget {
+    const Clip *clip = nullptr;
+    const RemovalLayer *layer = nullptr;
+};
+
+// Enabled removal layers that can actually affect an enabled clip. A layer
+// whose source range does not overlap the clip's source range (a trimmed
+// clip) never becomes active in the evaluator and must not block export.
+QList<RemovalTarget> activeRemovalTargets(const Project &project)
+{
+    QList<RemovalTarget> targets;
+    for (const Track &track : project.tracks) {
+        if (track.type != TrackType::Video || !track.enabled)
+            continue;
+        for (const Clip &clip : track.clips) {
+            if (!clip.enabled || clip.removalLayerId.isEmpty())
+                continue;
+            const RemovalLayer *layer =
+                project.removalLayerById(clip.removalLayerId);
+            if (layer) {
+                if (!layer->enabled)
+                    continue;
+                if (layer->sourceOutUs <= clip.sourceInUs
+                    || layer->sourceInUs >= clip.sourceOutUs) {
+                    continue;
+                }
+            }
+            targets.append(RemovalTarget{&clip, layer});
+        }
+    }
+    return targets;
+}
+
+void addIssue(RemovalPreflightResult *result, const Clip &clip,
+              const RemovalLayer *layer, const QString &reason)
+{
+    RemovalPreflightIssue issue;
+    issue.clipId = clip.id;
+    issue.layerId = layer ? layer->id : QString();
+    issue.startUs = clip.timelineStartUs;
+    issue.endUs = clip.timelineEndUs();
+    issue.reason = reason;
+    result->issues.append(issue);
+}
+
+RemovalPreflightResult gateFailure(const QList<RemovalTarget> &targets,
+                                   const QString &gateReason)
+{
+    RemovalPreflightResult result;
+    QStringList lines;
+    for (const RemovalTarget &target : targets) {
+        if (!target.layer) {
+            const QString reason = QStringLiteral("AI 修复层缺失。");
+            addIssue(&result, *target.clip, nullptr, reason);
+            lines.append(cacheMessageFor(target.clip->id));
+            continue;
+        }
+        addIssue(&result, *target.clip, target.layer, gateReason);
+        lines.append(
+            QStringLiteral("片段“%1”：%2").arg(target.clip->id, gateReason));
+    }
+    result.ok = result.issues.isEmpty();
+    result.message = lines.join(QLatin1Char('\n'));
+    return result;
+}
+
 } // namespace
 
 RemovalKeyInput RemovalPreflight::keyInputFor(const Project &project,
@@ -50,7 +125,8 @@ RemovalKeyInput RemovalPreflight::keyInputFor(const Project &project,
     input.parameters = layer.parameters;
 
     const AiModelRecord *tracking = models.defaultTrackingModel();
-    const AiModelRecord *inpaint = models.defaultInpaintModel(QString());
+    const AiModelRecord *inpaint =
+        models.defaultInpaintModel(inpaintModelHint(layer.parameters.mode));
     input.trackingModelId = tracking ? tracking->id : QString();
     input.trackingModelHash = modelBundleHash(tracking);
     input.inpaintModelId = inpaint ? inpaint->id : QString();
@@ -76,109 +152,90 @@ RemovalKeyInput RemovalPreflight::keyInputFor(const Project &project,
 
 RemovalPreflightResult RemovalPreflight::check(const Project &project,
                                                const RemovalCache &cache,
-                                               const ModelRegistry &models)
+                                               const ModelRegistry &models,
+                                               bool modelsAlreadyVerified)
 {
     RemovalPreflightResult result;
+    // Cheap first pass: export dialogs call this on every setting change.
+    // Without an active removal layer there is nothing to verify and no need
+    // to hash model bundles or cache chunks.
+    const QList<RemovalTarget> targets = activeRemovalTargets(project);
+    if (targets.isEmpty())
+        return result;
 
     QString gateReason;
-    const bool enabled = models.featureEnabled(&gateReason);
+    const bool enabled =
+        models.featureEnabled(&gateReason, !modelsAlreadyVerified);
+    if (!enabled)
+        return gateFailure(targets, gateReason);
+
     QStringList messageLines;
-
-    const auto addIssue = [&result](const QString &clipId,
-                                    const RemovalLayer &layer,
-                                    const Clip &clip, const QString &reason) {
-        RemovalPreflightIssue issue;
-        issue.clipId = clipId;
-        issue.layerId = layer.id;
-        issue.startUs = clip.timelineStartUs;
-        issue.endUs = clip.timelineEndUs();
-        issue.reason = reason;
-        result.issues.append(issue);
-    };
-
-    for (const Track &track : project.tracks) {
-        if (track.type != TrackType::Video || !track.enabled)
+    for (const RemovalTarget &target : targets) {
+        const Clip &clip = *target.clip;
+        const RemovalLayer *layer = target.layer;
+        if (!layer) {
+            addIssue(&result, clip, nullptr, QStringLiteral("AI 修复层缺失。"));
+            messageLines.append(cacheMessageFor(clip.id));
             continue;
-        for (const Clip &clip : track.clips) {
-            if (!clip.enabled || clip.removalLayerId.isEmpty())
-                continue;
-            const RemovalLayer *layer =
-                project.removalLayerById(clip.removalLayerId);
-            if (!layer) {
-                RemovalPreflightIssue issue;
-                issue.clipId = clip.id;
-                issue.startUs = clip.timelineStartUs;
-                issue.endUs = clip.timelineEndUs();
-                issue.reason = QStringLiteral("AI 修复层缺失。");
-                result.issues.append(issue);
-                messageLines.append(cacheMessageFor(clip.id));
-                continue;
-            }
-            if (!layer->enabled)
-                continue;
+        }
 
-            // When the feature is disabled the real problem is the missing
-            // model/approval, not an "expired cache". Report the gate's own
-            // reason so a model install failure is never misdiagnosed.
-            if (!enabled) {
-                addIssue(clip.id, *layer, clip, gateReason);
-                messageLines.append(QStringLiteral("片段“%1”：%2")
-                                        .arg(clip.id, gateReason));
-                continue;
-            }
+        if (layer->trackingState == RemovalTrackingState::Tracking
+            || layer->trackingState == RemovalTrackingState::Partial
+            || layer->trackingState == RemovalTrackingState::Failed) {
+            addIssue(&result, clip, layer, QStringLiteral("AI 跟踪尚未完成。"));
+            messageLines.append(
+                QStringLiteral("片段“%1”的 AI 跟踪尚未完成。"
+                               "请先生成修复，再导出。")
+                    .arg(clip.id));
+            continue;
+        }
 
-            if (layer->trackingState == RemovalTrackingState::Tracking
-                || layer->trackingState == RemovalTrackingState::Partial
-                || layer->trackingState == RemovalTrackingState::Failed) {
-                addIssue(clip.id, *layer, clip,
-                         QStringLiteral("AI 跟踪尚未完成。"));
-                messageLines.append(
-                    QStringLiteral("片段“%1”的 AI 跟踪尚未完成。"
-                                   "请先生成修复，再导出。")
-                        .arg(clip.id));
-                continue;
-            }
+        const Asset *asset = project.assetById(clip.assetId);
+        if (!asset) {
+            addIssue(&result, clip, layer, QStringLiteral("素材缺失"));
+            messageLines.append(cacheMessageFor(clip.id));
+            continue;
+        }
 
-            const Asset *asset = project.assetById(clip.assetId);
-            if (!asset) {
-                addIssue(clip.id, *layer, clip,
-                         QStringLiteral("素材缺失"));
-                messageLines.append(cacheMessageFor(clip.id));
-                continue;
-            }
+        const RemovalKeyInput input = keyInputFor(project, clip, *layer, models);
+        const QString key = computeRemovalCacheKey(input);
+        if (key != layer->cacheKey) {
+            addIssue(&result, clip, layer,
+                     QStringLiteral(
+                         "AI 修复结果已过期（素材、遮罩、参数或模型已变化）。"));
+            messageLines.append(cacheMessageFor(clip.id));
+            continue;
+        }
 
-            const RemovalKeyInput input =
-                keyInputFor(project, clip, *layer, models);
-            const QString key = computeRemovalCacheKey(input);
-            if (key != layer->cacheKey) {
-                addIssue(clip.id, *layer, clip,
-                         QStringLiteral(
-                             "AI 修复结果已过期（素材、遮罩、参数或模型已变化）。"));
-                messageLines.append(cacheMessageFor(clip.id));
-                continue;
-            }
+        QString verifyError;
+        if (!cache.verify(key, &verifyError)) {
+            addIssue(&result, clip, layer,
+                     QStringLiteral("AI 修复结果缺失或已损坏。"));
+            messageLines.append(cacheMessageFor(clip.id));
+            continue;
+        }
 
-            QString verifyError;
-            if (!cache.verify(key, &verifyError)) {
-                addIssue(clip.id, *layer, clip,
-                         QStringLiteral("AI 修复结果缺失或已损坏。"));
-                messageLines.append(cacheMessageFor(clip.id));
-                continue;
-            }
-
-            if (layer->trackingState == RemovalTrackingState::LowConfidence) {
-                // Low confidence is actionable but does not block export.
-                messageLines.append(
-                    QStringLiteral("片段“%1”的跟踪置信度较低，"
-                                   "导出前建议检查修复结果。")
-                        .arg(clip.id));
-            }
+        if (layer->trackingState == RemovalTrackingState::LowConfidence) {
+            // Low confidence is actionable but does not block export.
+            messageLines.append(
+                QStringLiteral("片段“%1”的跟踪置信度较低，"
+                               "导出前建议检查修复结果。")
+                    .arg(clip.id));
         }
     }
 
     result.ok = result.issues.isEmpty();
     result.message = messageLines.join(QLatin1Char('\n'));
     return result;
+}
+
+RemovalPreflightResult RemovalPreflight::checkWithoutModels(
+    const Project &project, const QString &reason)
+{
+    const QList<RemovalTarget> targets = activeRemovalTargets(project);
+    if (targets.isEmpty())
+        return RemovalPreflightResult{};
+    return gateFailure(targets, reason);
 }
 
 } // namespace VideoEditor

@@ -50,6 +50,7 @@ void TimelineCompositor::close()
     // file locations from a project snapshot and cannot outlive it either.
     m_sources.clear();
     m_repairSources.clear();
+    m_failedRepairKeys.clear();
     m_failedClips.clear();
     m_reportedErrors.clear();
     m_converters.reset();
@@ -73,6 +74,7 @@ bool TimelineCompositor::open(const Project &project, int width, int height,
     // the snapshot's cache keys and must be rebuilt from the new manifest.
     m_sources.clear();
     m_repairSources.clear();
+    m_failedRepairKeys.clear();
     m_failedClips.clear();
     m_reportedErrors.clear();
     m_subtitleKey.clear();
@@ -117,6 +119,7 @@ void TimelineCompositor::setRemovalCacheRoot(const QString &root)
     // Existing sources were opened below the previous root; never serve them
     // against a new cache location.
     m_repairSources.clear();
+    m_failedRepairKeys.clear();
 }
 
 void TimelineCompositor::setRemovalCompareMode(RemovalCompareMode mode,
@@ -200,26 +203,37 @@ TimelineCompositor::repairSourceFor(const RemovalLayer &layer, QString *error)
     if (existing != m_repairSources.end())
         return existing->second.get();
 
-    if (m_removalCacheRoot.isEmpty()) {
+    // A failed key is remembered until the snapshot/root changes. Otherwise a
+    // paused preview would re-parse a missing manifest and every chunk index
+    // on every frame.
+    if (m_failedRepairKeys.contains(key)) {
         if (error)
-            *error = QStringLiteral(
-                "AI 修复缓存缺失或损坏：未设置修复缓存目录。");
+            *error = QStringLiteral("AI 修复缓存缺失或损坏。");
         return nullptr;
+    }
+
+    const auto fail = [&](const QString &message) -> RepairFrameSource * {
+        m_failedRepairKeys.insert(key);
+        reportOnce(QStringLiteral("removal:") + layer.id,
+                   QStringLiteral("AI 修复结果缺失，当前显示原片；请重新生成。"));
+        if (error) {
+            *error = message.isEmpty()
+                         ? QStringLiteral("AI 修复缓存缺失或损坏。")
+                         : message;
+        }
+        return nullptr;
+    };
+
+    if (m_removalCacheRoot.isEmpty()) {
+        return fail(QStringLiteral(
+            "AI 修复缓存缺失或损坏：未设置修复缓存目录。"));
     }
 
     const RemovalCache cache(m_removalCacheRoot);
     QString openError;
     auto source = RepairFrameSource::open(cache, layer.cacheKey, &openError);
-    if (!source) {
-        reportOnce(QStringLiteral("removal:") + layer.id,
-                   QStringLiteral("AI 修复结果缺失，当前显示原片；请重新生成。"));
-        if (error) {
-            *error = openError.isEmpty()
-                         ? QStringLiteral("AI 修复缓存缺失或损坏。")
-                         : openError;
-        }
-        return nullptr;
-    }
+    if (!source)
+        return fail(openError);
 
     RepairFrameSource *raw = source.get();
     m_repairSources.emplace(key, std::move(source));
@@ -347,9 +361,17 @@ int TimelineCompositor::drawFrame(int64_t timelineUs,
         if (m_compositor->drawImage(patch->patch, patchRect, opacity,
                                     &patchError)) {
             ++drawnLayers;
-        } else if (!patchError.isEmpty()) {
-            reportOnce(QStringLiteral("draw:removal:") + layer.clipId,
-                       patchError);
+        } else {
+            if (m_compare == RemovalCompareMode::SplitWipe)
+                m_compositor->setScissorRect(nullptr);
+            // A failed patch draw is as fatal as an unreadable patch for
+            // export: never warn and then encode the original frame.
+            if (m_failOnMissingRemoval)
+                return failDraw(patchError);
+            if (!patchError.isEmpty()) {
+                reportOnce(QStringLiteral("draw:removal:") + layer.clipId,
+                           patchError);
+            }
         }
         if (m_compare == RemovalCompareMode::SplitWipe)
             m_compositor->setScissorRect(nullptr);

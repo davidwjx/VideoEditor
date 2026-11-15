@@ -69,6 +69,10 @@ public:
     void setFailOnMissingRemoval(bool fail) { m_failOnMissingRemoval = fail; }
     bool failOnMissingRemoval() const { return m_failOnMissingRemoval; }
     int removalLayerCountForTest() const { return int(m_repairSources.size()); }
+    int failedRepairKeyCountForTest() const
+    {
+        return int(m_failedRepairKeys.size());
+    }
 
     // Composes the frame covering timelineUs into target and returns the number
     // of video layers actually drawn. clearBlack clears the target first.
@@ -106,6 +110,9 @@ private:
     // Keyed by "layerId|cacheKey" so a regenerated layer never reuses the
     // previous manifest's frame locations.
     std::map<QString, std::unique_ptr<RepairFrameSource>> m_repairSources;
+    // Missing keys stay here until the next open()/cache-root change so a
+    // paused preview does not re-read a manifest/index every frame.
+    QSet<QString> m_failedRepairKeys;
     QString m_removalCacheRoot;
     RemovalCompareMode m_compare = RemovalCompareMode::Repair;
     int m_splitPermille = 500;

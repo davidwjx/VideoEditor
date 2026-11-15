@@ -51,14 +51,17 @@ public:
     void end();
 
     // Drop cached views over textures that are about to be released (evicted
-    // clip sources or a project switch).
+    // clip sources or a project switch). clearTextureCache() also releases
+    // every size-keyed upload texture.
     void forgetTexture(ID3D11Texture2D *texture);
     void clearTextureCache();
+    int imageTextureCountForTest() const { return int(m_imageTextures.size()); }
 
 private:
     struct ImageTexture {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        quint64 lastUsed = 0;
     };
 
     bool drawTexture(ID3D11ShaderResourceView *srv, const LayerRect &rect,
@@ -84,6 +87,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_sampler;
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> m_rasterizer;
     std::unordered_map<quint64, ImageTexture> m_imageTextures;
+    quint64 m_imageSerial = 0;
     QString m_cachedImageKey;
     int m_cachedImageWidth = 0;
     int m_cachedImageHeight = 0;

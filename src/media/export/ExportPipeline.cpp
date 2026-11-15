@@ -167,6 +167,10 @@ ExportResult ExportPipeline::run(const Project &project,
                     : preflight.message;
             return result;
         }
+        // Low-confidence tracking is a non-blocking preflight note. Keep it so
+        // the finished export still tells the user to inspect the repair.
+        if (!preflight.message.isEmpty())
+            result.warning = preflight.message;
     }
     const ExportTiming timing = computeExportTiming(
         durationUs, frozenSettings.fps, kSampleRate,
@@ -224,8 +228,12 @@ ExportResult ExportPipeline::run(const Project &project,
     result.usedHardware = hardware;
     if (frozenSettings.codec == ExportVideoCodec::H264 && !hardware
         && frozenSettings.preferHardware) {
-        result.warning = QStringLiteral(
-            "未找到可用的 H.264 硬件编码器，已使用软件编码（速度较慢）。");
+        // Append, never replace: the preflight may already have recorded a
+        // low-confidence warning before the encoder was selected.
+        appendWarning(
+            &result,
+            QStringLiteral(
+                "未找到可用的 H.264 硬件编码器，已使用软件编码（速度较慢）。"));
     }
 
     // Freeze the project once: later edits cannot change this export.
@@ -843,9 +851,11 @@ ExportResult ExportPipeline::run(const Project &project,
     result.ok = true;
     result.audioPeak = peak;
     QStringList allWarnings;
-    const QString hardwareWarning = result.warning; // set before rendering
-    if (!hardwareWarning.isEmpty())
-        allWarnings.append(hardwareWarning);
+    // Preserved preflight/low-confidence and encoder warnings. Failure paths
+    // leave them in result.warning because they return before this point.
+    const QString preservedWarning = result.warning;
+    if (!preservedWarning.isEmpty())
+        allWarnings.append(preservedWarning);
     if (orphanClipCount > 0) {
         allWarnings.append(
             QStringLiteral("有 %1 个片段引用的素材缺失，已按黑场处理。")

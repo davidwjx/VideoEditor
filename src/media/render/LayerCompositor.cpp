@@ -277,7 +277,18 @@ void LayerCompositor::forgetTexture(ID3D11Texture2D *texture)
 
 void LayerCompositor::clearTextureCache()
 {
+    // Views over external decoder textures are cheap to recreate; size-keyed
+    // upload textures can be large (one per distinct patch crop), so release
+    // them and force the next drawImageCached to re-upload.
+    if (m_context) {
+        ID3D11ShaderResourceView *nullSrv = nullptr;
+        m_context->PSSetShaderResources(0, 1, &nullSrv);
+    }
     m_textureSrvs.clear();
+    m_imageTextures.clear();
+    m_cachedImageKey.clear();
+    m_cachedImageWidth = 0;
+    m_cachedImageHeight = 0;
 }
 
 bool LayerCompositor::drawTexture(ID3D11ShaderResourceView *srv,
@@ -314,8 +325,31 @@ LayerCompositor::imageTextureFor(int width, int height, QString *error)
 {
     const quint64 key = (quint64(quint32(width)) << 32) | quint32(height);
     auto existing = m_imageTextures.find(key);
-    if (existing != m_imageTextures.end())
+    if (existing != m_imageTextures.end()) {
+        existing->second.lastUsed = ++m_imageSerial;
         return &existing->second;
+    }
+
+    // Repair patches have many crop sizes in a long export. Bound the cache
+    // and evict the least recently used texture; its ComPtr SRV is released
+    // with the map entry, and the next draw rebinds its own SRV.
+    constexpr size_t kMaxImageTextures = 8;
+    if (m_imageTextures.size() >= kMaxImageTextures) {
+        auto oldest = m_imageTextures.end();
+        for (auto it = m_imageTextures.begin(); it != m_imageTextures.end();
+             ++it) {
+            if (oldest == m_imageTextures.end()
+                || it->second.lastUsed < oldest->second.lastUsed) {
+                oldest = it;
+            }
+        }
+        if (oldest != m_imageTextures.end())
+            m_imageTextures.erase(oldest);
+        // The upload shortcut may point at a texture that no longer exists.
+        m_cachedImageKey.clear();
+        m_cachedImageWidth = 0;
+        m_cachedImageHeight = 0;
+    }
 
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = UINT(width);
@@ -337,6 +371,7 @@ LayerCompositor::imageTextureFor(int width, int height, QString *error)
         setError(error, QStringLiteral("无法创建图层纹理视图。"));
         return nullptr;
     }
+    entry.lastUsed = ++m_imageSerial;
 
     auto inserted = m_imageTextures.emplace(key, std::move(entry));
     return &inserted.first->second;

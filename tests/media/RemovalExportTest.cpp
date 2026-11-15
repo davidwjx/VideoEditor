@@ -37,11 +37,15 @@ Project redProject(const QString &fixtureDir)
     project.timeline.width = kWidth;
     project.timeline.height = kHeight;
     project.timeline.fps = Rational{30, 1};
+    const QString path =
+        QDir(fixtureDir).filePath(QStringLiteral("red.mp4"));
+    const auto probed = MediaProbe::probe(path);
+    if (!probed)
+        return project; // no assets: callers assert probe success
     Asset asset;
     asset.id = QStringLiteral("red");
-    asset.path =
-        QDir(fixtureDir).filePath(QStringLiteral("red.mp4"));
-    asset.info = *MediaProbe::probe(asset.path);
+    asset.path = path;
+    asset.info = *probed;
     project.assets.append(asset);
 
     Track track;
@@ -183,6 +187,7 @@ TEST(RemovalExport, FailsBeforeWritingOutputWhenCacheMissing)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     attachRepairLayer(&project, QString(64, QLatin1Char('f')));
 
     const QString output = dir.filePath(QStringLiteral("missing.mp4"));
@@ -218,6 +223,7 @@ TEST(RemovalExport, PreviewAndExportMatchWithFixedCache)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     attachRepairLayer(&project, writeRepairCache(dir.path(), 30, {0}));
 
     // Preview path: the same TimelineCompositor the render worker uses,
@@ -263,6 +269,7 @@ TEST(RemovalExport, MissingCacheMidExportAbortsWithoutOriginalPixels)
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
     QList<int> allFrames;
     for (int i = 0; i < 30; ++i)
         allFrames.append(i);
@@ -272,6 +279,7 @@ TEST(RemovalExport, MissingCacheMidExportAbortsWithoutOriginalPixels)
     ASSERT_TRUE(QDir().mkpath(cacheRoot));
     const QString key = writeRepairCache(cacheRoot, 30, allFrames);
     attachRepairLayer(&project, key);
+
 
     const QString output = dir.filePath(QStringLiteral("abort.mp4"));
     bool deleted = false;
@@ -300,4 +308,31 @@ TEST(RemovalExport, MissingCacheMidExportAbortsWithoutOriginalPixels)
     const QString partsDir = partsDirectoryFor(output);
     EXPECT_TRUE(QFileInfo::exists(
         QDir(partsDir).filePath(QStringLiteral("checkpoint.json"))));
+}
+
+TEST(RemovalExport, PreflightLowConfidenceWarningSurvivesIntoExportResult)
+{
+    if (!d3d11Available())
+        GTEST_SKIP() << "D3D11 unavailable";
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
+
+    const QString warning =
+        QStringLiteral("片段“c1”的跟踪置信度较低，导出前建议检查修复结果。");
+    ExportPipeline::Hooks hooks;
+    hooks.removalPreflight = [warning](const Project &) {
+        RemovalPreflightResult result;
+        result.ok = true; // low confidence must not block export
+        result.message = warning;
+        return result;
+    };
+    const QString output = dir.filePath(QStringLiteral("warning.mp4"));
+    const ExportResult result = runExportForTest(
+        project, settingsFor(output),
+        detectEncodersForTest(kWidth, kHeight, Rational{30, 1}), false, hooks);
+    ASSERT_TRUE(result.ok) << result.error.toStdString();
+    EXPECT_TRUE(result.warning.contains(QStringLiteral("置信度较低")))
+        << result.warning.toStdString();
 }

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <QColor>
 #include <QImage>
 #include <QTemporaryDir>
@@ -34,6 +36,14 @@ ModelManifest approvedManifest()
           AiModelFile{QStringLiteral("unused.onnx"),
                       QString(64, QLatin1Char('b'))}}},
         {}});
+    manifest.models.append(AiModelRecord{
+        QStringLiteral("lama-512-int8-allowzero0"), QStringLiteral("inpaint"),
+        QStringLiteral("1.0.0"), QStringLiteral("Apache-2.0"),
+        QStringLiteral("Apache-2.0"), {}, true,
+        {{QStringLiteral("model"),
+          AiModelFile{QStringLiteral("unused-lama.onnx"),
+                      QString(64, QLatin1Char('c'))}}},
+        {}});
     return manifest;
 }
 
@@ -54,14 +64,7 @@ void writeCompleteCache(const QString &root, const QString &key,
                         const RemovalKeyInput &input)
 {
     RemovalCache cache(root);
-    QImage patch(16, 16, QImage::Format_ARGB32);
-    patch.fill(QColor(10, 200, 20, 255));
-    RemovalChunkIndex index;
-    QString error;
-    ASSERT_TRUE(cache.writeChunkFrames(key, 0, {0}, {patch},
-                                       {QRect(0, 0, 16, 16)}, &index, &error))
-        << error.toStdString();
-
+    constexpr int kTotalFrames = 300;
     RemovalCacheManifest manifest;
     manifest.schema = QStringLiteral("m4.removal.cache.1");
     manifest.cacheKey = key;
@@ -75,9 +78,30 @@ void writeCompleteCache(const QString &root, const QString &key,
     manifest.inpaintModelId = input.inpaintModelId;
     manifest.pipelineVersion = input.pipelineVersion;
     manifest.status = QStringLiteral("complete");
-    manifest.totalFrames = 300;
-    manifest.chunks.append(
-        RemovalCacheChunk{0, 0, manifest.totalFrames, index.treeSha256});
+    manifest.totalFrames = kTotalFrames;
+
+    QString error;
+    const int chunkCount = (kTotalFrames + 29) / 30;
+    for (int chunk = 0; chunk < chunkCount; ++chunk) {
+        QList<int> frames;
+        QList<QImage> patches;
+        QList<QRect> crops;
+        if (chunk == 0) {
+            QImage patch(16, 16, QImage::Format_ARGB32);
+            patch.fill(QColor(10, 200, 20, 255));
+            frames.append(0);
+            patches.append(patch);
+            crops.append(QRect(0, 0, 16, 16));
+        }
+        RemovalChunkIndex index;
+        ASSERT_TRUE(cache.writeChunkFrames(key, chunk, frames, patches, crops,
+                                           &index, &error))
+            << error.toStdString();
+        const int firstFrame = chunk * 30;
+        manifest.chunks.append(RemovalCacheChunk{
+            chunk, firstFrame, std::min(30, kTotalFrames - firstFrame),
+            index.treeSha256});
+    }
     ASSERT_TRUE(cache.writeManifest(manifest, &error)) << error.toStdString();
     ASSERT_TRUE(cache.verify(key, &error)) << error.toStdString();
 }
@@ -162,6 +186,131 @@ TEST(RemovalPreflight, GateDisabledReportsTheGateReasonNotAnExpiredCache)
         << result.message.toStdString();
     EXPECT_FALSE(result.message.contains(QStringLiteral("已过期")))
         << result.message.toStdString();
+}
+
+TEST(RemovalPreflight, SkipsDisabledTracksClipsAndNonOverlappingLayers)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+    const ModelRegistry registry = ModelRegistry::forTest(approvedManifest());
+
+    Project project;
+    RemovalLayer layer;
+    projectWithRemovalLayer(registry, &project, &layer);
+
+    // A disabled track makes the layer unreachable in the evaluator, so an
+    // empty cache must not block export.
+    project.tracks[0].enabled = false;
+    EXPECT_TRUE(RemovalPreflight::check(project, cache, registry).ok);
+    EXPECT_TRUE(RemovalPreflight::checkWithoutModels(
+                    project, QStringLiteral("未启用"))
+                    .ok);
+
+    project.tracks[0].enabled = true;
+    project.tracks[0].clips[0].enabled = false;
+    EXPECT_TRUE(RemovalPreflight::check(project, cache, registry).ok);
+    EXPECT_TRUE(RemovalPreflight::checkWithoutModels(
+                    project, QStringLiteral("未启用"))
+                    .ok);
+
+    // Enabled again, but the clip was trimmed outside the generated range.
+    project.tracks[0].clips[0].enabled = true;
+    project.tracks[0].clips[0].sourceInUs = 20'000'000;
+    project.tracks[0].clips[0].sourceOutUs = 30'000'000;
+    EXPECT_TRUE(RemovalPreflight::check(project, cache, registry).ok)
+        << "a layer outside the clip's source range cannot be active";
+}
+
+TEST(RemovalPreflight, NullRegistryHonoursDisabledTrackAndClip)
+{
+    ModelManifest manifest = approvedManifest();
+    const ModelRegistry registry = ModelRegistry::forTest(manifest);
+
+    Project project;
+    RemovalLayer layer;
+    projectWithRemovalLayer(registry, &project, &layer);
+
+    project.tracks[0].enabled = false;
+    EXPECT_TRUE(RemovalPreflight::checkWithoutModels(
+                    project, QStringLiteral("AI 消除功能未启用。"))
+                    .ok);
+    project.tracks[0].enabled = true;
+    project.tracks[0].clips[0].enabled = false;
+    EXPECT_TRUE(RemovalPreflight::checkWithoutModels(
+                    project, QStringLiteral("AI 消除功能未启用。"))
+                    .ok);
+}
+
+TEST(RemovalPreflight, CacheKeyUsesTheModeSpecificInpaintModel)
+{
+    const ModelRegistry registry = ModelRegistry::forTest(approvedManifest());
+    Project project;
+    RemovalLayer layer;
+    projectWithRemovalLayer(registry, &project, &layer);
+
+    RemovalLayer fast = layer;
+    fast.parameters.mode = RepairMode::Fast;
+    const RemovalKeyInput fastInput = RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], fast, registry);
+    EXPECT_EQ(fastInput.inpaintModelId, QStringLiteral("migan-512"));
+
+    RemovalLayer quality = layer;
+    quality.parameters.mode = RepairMode::Quality;
+    const RemovalKeyInput qualityInput = RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], quality, registry);
+    EXPECT_EQ(qualityInput.inpaintModelId,
+              QStringLiteral("lama-512-int8-allowzero0"));
+    EXPECT_NE(qualityInput.inpaintModelHash, fastInput.inpaintModelHash);
+    EXPECT_NE(computeRemovalCacheKey(fastInput),
+              computeRemovalCacheKey(qualityInput));
+}
+
+TEST(RemovalPreflight, TruncatedCompleteManifestIsReportedAsDamaged)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+    const ModelRegistry registry = ModelRegistry::forTest(approvedManifest());
+
+    Project project;
+    RemovalLayer layer;
+    const QString key = projectWithRemovalLayer(registry, &project, &layer);
+    const RemovalKeyInput input = RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], layer, registry);
+
+    // 300 frames need 10 chunks; list only chunk 0 and call it complete.
+    QImage patch(16, 16, QImage::Format_ARGB32);
+    patch.fill(QColor(1, 2, 3, 255));
+    RemovalChunkIndex index;
+    QString error;
+    ASSERT_TRUE(cache.writeChunkFrames(key, 0, {0}, {patch},
+                                       {QRect(0, 0, 16, 16)}, &index, &error))
+        << error.toStdString();
+    RemovalCacheManifest manifest;
+    manifest.cacheKey = key;
+    manifest.clipId = QStringLiteral("clip-1");
+    manifest.sourceInUs = input.sourceInUs;
+    manifest.sourceOutUs = input.sourceOutUs;
+    manifest.width = input.width;
+    manifest.height = input.height;
+    manifest.fps = input.fps;
+    manifest.status = QStringLiteral("complete");
+    manifest.totalFrames = 300;
+    manifest.chunks.append(RemovalCacheChunk{0, 0, 30, index.treeSha256});
+    ASSERT_TRUE(cache.writeManifest(manifest, &error)) << error.toStdString();
+    EXPECT_EQ(cache.state(key, &error), RemovalCacheState::Corrupt);
+    EXPECT_FALSE(cache.verify(key, &error));
+
+    project.removalLayers[0].cacheKey = key;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+    const RemovalPreflightResult result =
+        RemovalPreflight::check(project, cache, registry);
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.issues.size(), 1);
+    EXPECT_TRUE(result.issues.first().reason.contains(
+        QStringLiteral("缺失或已损坏")))
+        << result.issues.first().reason.toStdString();
 }
 
 TEST(RemovalPreflight, IncompleteTrackingBlocksButLowConfidenceOnlyWarns)

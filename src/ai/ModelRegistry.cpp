@@ -351,7 +351,7 @@ bool ModelRegistry::verifyFiles(const QStringList &ids, QString *error) const
     return true;
 }
 
-bool ModelRegistry::featureEnabled(QString *reason) const
+bool ModelRegistry::featureEnabled(QString *reason, bool verifyModelFiles) const
 {
     const auto deny = [reason](const QString &message) {
         if (reason)
@@ -392,7 +392,7 @@ bool ModelRegistry::featureEnabled(QString *reason) const
                         .arg(missing.join(QLatin1Char('/'))));
     }
 
-    if (!m_testMode) {
+    if (verifyModelFiles && !m_testMode) {
         QString fileError;
         if (!verifyFiles(&fileError)) {
             return deny(QStringLiteral("AI 消除功能未启用：模型文件缺失或校验"

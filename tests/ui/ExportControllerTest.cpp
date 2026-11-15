@@ -150,6 +150,52 @@ TEST(ExportController, ValidationStaysSilentUntilTheProbeCompletes)
     EXPECT_TRUE(controller.validate().isEmpty());
 }
 
+TEST(ExportController, RemovalPreflightIsCachedAndWarnsWithoutBlocking)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ProjectDocument document;
+    Project project;
+    project.timeline.width = 320;
+    project.timeline.height = 180;
+    project.timeline.fps = Rational{30, 1};
+    document.setProject(project);
+
+    ExportController controller(document, QString());
+    controller.setCatalogForTest(EncoderCatalog::withoutHardwareForTest());
+    controller.refreshCapabilities();
+    controller.applyPreset(QStringLiteral("h264-720p30"));
+    controller.setOutputPath(dir.filePath(QStringLiteral("out.mp4")));
+
+    int calls = 0;
+    const QString warning =
+        QStringLiteral("片段“c1”的跟踪置信度较低，导出前建议检查修复结果。");
+    controller.setRemovalChecker([&calls, warning](const Project &) {
+        ++calls;
+        RemovalPreflightResult result;
+        result.ok = true;
+        result.message = warning;
+        return result;
+    });
+    ASSERT_TRUE(controller.validate().isEmpty());
+    EXPECT_FALSE(controller.removalRequired());
+    EXPECT_EQ(controller.removalWarning(), warning);
+    EXPECT_EQ(calls, 1);
+
+    // Ordinary setting edits re-validate, but the checker verdict is reused
+    // (model/cache hashing must not run on every keystroke).
+    controller.setBitrateKbps(3000);
+    EXPECT_TRUE(controller.validate().isEmpty());
+    EXPECT_EQ(calls, 1);
+
+    // A document edit invalidates it; the next validate re-runs the checker.
+    controller.invalidateRemovalPreflight();
+    EXPECT_TRUE(controller.removalWarning().isEmpty());
+    EXPECT_TRUE(controller.validate().isEmpty());
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(controller.removalWarning(), warning);
+}
+
 TEST(ExportController, SyncRunnerDrivesProgressAndFinish)
 {
     ProjectDocument document;
