@@ -22,6 +22,8 @@ add_library(videoeditor_core STATIC
   TimelineEditor.cpp
   Srt.h
   Srt.cpp
+  ExportSettings.h
+  ExportSettings.cpp
   commands/AddAssetCommand.h
   commands/AddAssetCommand.cpp
   commands/RemoveAssetCommand.h
