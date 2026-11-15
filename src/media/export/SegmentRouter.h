@@ -49,6 +49,7 @@ public:
 
 private:
     bool ensureWriter(int segmentIndex, QString *error);
+    bool validateSegmentRanges(QString *error) const;
     int segmentForVideo(int64_t pts, QString *error);
     bool closeWriter(int segmentIndex, QString *error);
     bool validateWriter(int segmentIndex, SegmentWriter *writer,

@@ -50,6 +50,30 @@ bool SegmentRouter::ensureWriter(int segmentIndex, QString *error)
     return true;
 }
 
+bool SegmentRouter::validateSegmentRanges(QString *error) const
+{
+    if (!m_fps.isValid() || m_timing.segmentCount <= 0
+        || m_timing.segmentSamples <= 0) {
+        if (error)
+            *error = QStringLiteral("导出时间线没有有效的分段信息。");
+        return false;
+    }
+    for (int i = 0; i < m_timing.segmentCount; ++i) {
+        int64_t vBegin = 0;
+        int64_t vEnd = 0;
+        videoFrameRangeForSegment(m_timing, m_fps, i, &vBegin, &vEnd);
+        if (vEnd <= vBegin) {
+            if (error)
+                *error = QStringLiteral(
+                             "分段 %1 的时间范围不包含任何视频帧，"
+                             "无法生成有效的 MP4 分段。")
+                             .arg(i);
+            return false;
+        }
+    }
+    return true;
+}
+
 int SegmentRouter::segmentForVideo(int64_t pts, QString *error)
 {
     if (!m_fps.isValid() || m_timing.segmentCount <= 0
@@ -100,6 +124,10 @@ bool SegmentRouter::routeVideo(const EncodedPacket &packet, QString *error)
             *error = QStringLiteral("分段路由缺少视频编码器上下文。");
         return false;
     }
+    // Reject a timeline with an empty (zero-frame) segment before writing any
+    // part; such a segment can never be routed and would leave a missing MP4.
+    if (m_firstSegment < 0 && !validateSegmentRanges(error))
+        return false;
     const int segment = segmentForVideo(packet.pts, error);
     if (segment < 0)
         return false;
@@ -203,9 +231,14 @@ bool SegmentRouter::finishAll(bool allowPartialLastSegment, QString *error)
         m_writers.erase(m_writers.begin());
     }
     if (ok && allowPartialLastSegment) {
-        const int totalInThisRun =
-            m_firstSegment >= 0 ? m_timing.segmentCount - m_firstSegment
-                                : m_timing.segmentCount;
+        // A resume whose checkpoint already covered every segment routes no
+        // packets at all: all parts are already complete on disk and the
+        // assembler will rebuild the final file from them. Treat this as a
+        // successful no-op. (A genuinely empty fresh export still fails in
+        // Mp4Assembler when it opens the first missing part.)
+        if (m_firstSegment < 0)
+            return true;
+        const int totalInThisRun = m_timing.segmentCount - m_firstSegment;
         if (m_lastCompleted != m_timing.segmentCount - 1
             || m_completedCount != totalInThisRun) {
             if (error)

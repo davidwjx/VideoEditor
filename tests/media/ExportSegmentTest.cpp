@@ -26,6 +26,7 @@ extern "C" {
 #include "MediaProbe.h"
 #include "Project.h"
 #include "SegmentRouter.h"
+#include "SegmentWriter.h"
 #include "TimelineMixer.h"
 #include "VideoEncoder.h"
 
@@ -349,6 +350,10 @@ TEST(ExportSegment, RouterWritesTwoValidSegmentsAndAssemblerJoinsThem)
     EXPECT_EQ(audio.streamDuration, timing.totalSamples);
     EXPECT_EQ(audio.lastPts + audio.lastDuration, timing.totalSamples);
     EXPECT_EQ(audio.lastDuration, 1024 - paddedSamples);
+    // Note: Mp4Assembler also sets AV_PKT_DATA_SKIP_SAMPLES discard_padding on
+    // this final packet, but movenc represents end padding as the shortened
+    // final sample duration above (as ffmpeg CLI does) and does not persist the
+    // discard field as packet side data, so lastDiscardPadding is not asserted.
 }
 
 TEST(ExportSegment, ResumedRouterCountsOnlySegmentsWrittenInThisRun)
@@ -449,4 +454,250 @@ TEST(ExportSegment, CancelClosesAndDeletesPartialLastSegment)
     EXPECT_TRUE(inspectSegment(segmentPath(parts, 0), &counts, &error))
         << error.toStdString();
     EXPECT_EQ(counts.videoPackets, 48);
+}
+
+TEST(ExportSegment, RouterRejectsZeroFrameSegment)
+{
+    // Handcrafted timeline whose last segment starts exactly at totalFrames:
+    // 48 frames cover segment 0, so segment 1 has no video frames and could
+    // never produce a valid MP4 part. Routing must fail with a clear message
+    // before writing anything.
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("emptysegment.mp4"));
+    const QString parts = partsDirectoryFor(output);
+    clearParts(parts);
+
+    ExportTiming timing;
+    timing.totalFrames = 48;
+    timing.totalSamples = 76801;
+    timing.segmentSamples = 76800;
+    timing.segmentCount = 2;
+    timing.sampleRate = 48000;
+
+    ExportSettings settings;
+    settings.codec = ExportVideoCodec::Mpeg4Part2;
+    settings.width = 320;
+    settings.height = 180;
+    settings.fps = Rational{30, 1};
+    settings.rateControl = ExportRateControl::Bitrate;
+    settings.bitrateKbps = 4000;
+
+    Encoders encoders;
+    QString error;
+    ASSERT_TRUE(openEncoders(&encoders, settings, &error)) << error.toStdString();
+    SegmentRouter router(parts, timing, settings.fps, encoders.video.context());
+    std::vector<EncodedPacket> packets;
+    ASSERT_TRUE(encoders.video.encodeBlack(0, true, &packets, &error))
+        << error.toStdString();
+    ASSERT_FALSE(packets.empty());
+    EXPECT_FALSE(router.routeVideo(packets.front(), &error));
+    EXPECT_NE(error.indexOf(QStringLiteral("不包含任何视频帧")), -1)
+        << error.toStdString();
+    EXPECT_FALSE(QFile::exists(segmentPath(parts, 0)));
+}
+
+TEST(ExportSegment, FinishAllAcceptsResumeWithNoRemainingSegments)
+{
+    // After a crash during finalization, Task 7 resumes with
+    // checkpoint.completedSegments == segmentCount. The router then receives
+    // no packets at all; finishAll(true) must succeed so the assembler can
+    // retry from the existing parts instead of failing the export forever.
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("complete.mp4"));
+    const QString parts = partsDirectoryFor(output);
+    clearParts(parts);
+    const ExportTiming timing =
+        computeExportTiming(3'000'000, Rational{30, 1}, 48000, 1'600'000);
+    ASSERT_EQ(timing.segmentCount, 2);
+
+    SegmentRouter router(parts, timing, Rational{30, 1}, nullptr);
+    QString error;
+    EXPECT_TRUE(router.finishAll(true, &error)) << error.toStdString();
+    EXPECT_TRUE(error.isEmpty());
+    EXPECT_EQ(router.completedSegments(), 0);
+    EXPECT_EQ(router.bytesWritten(), 0);
+}
+
+TEST(ExportSegment, AssemblerRejectsAudioPartWithoutPriming)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("nopriming.mp4"));
+    const QString parts = partsDirectoryFor(output);
+    clearParts(parts);
+
+    ExportSettings settings;
+    settings.codec = ExportVideoCodec::Mpeg4Part2;
+    settings.width = 320;
+    settings.height = 180;
+    settings.fps = Rational{30, 1};
+    settings.rateControl = ExportRateControl::Bitrate;
+    settings.bitrateKbps = 4000;
+    const ExportTiming timing =
+        computeExportTiming(500'000, settings.fps, 48000, 8'000'000);
+    ASSERT_EQ(timing.segmentCount, 1);
+    ASSERT_EQ(timing.totalFrames, 15);
+
+    Encoders encoders;
+    QString error;
+    ASSERT_TRUE(openEncoders(&encoders, settings, &error)) << error.toStdString();
+    SegmentRouter router(parts, timing, settings.fps, encoders.video.context());
+    for (int64_t frame = 0; frame < timing.totalFrames; ++frame) {
+        std::vector<EncodedPacket> packets;
+        ASSERT_TRUE(encoders.video.encodeBlack(frame, frame == 0, &packets, &error))
+            << error.toStdString();
+        for (const EncodedPacket &packet : packets)
+            ASSERT_TRUE(router.routeVideo(packet, &error)) << error.toStdString();
+    }
+    std::vector<EncodedPacket> tail;
+    ASSERT_TRUE(encoders.video.flush(&tail, &error)) << error.toStdString();
+    for (const EncodedPacket &packet : tail)
+        ASSERT_TRUE(router.routeVideo(packet, &error)) << error.toStdString();
+    ASSERT_TRUE(router.finishAll(true, &error)) << error.toStdString();
+
+    // Simulate a part written by a muxer that folded the AAC pre-roll into
+    // sample 0: the first demuxed packet must be at pts 0, not -1024.
+    const QString audioPath = QDir(parts).filePath(QStringLiteral("audio.mp4"));
+    AudioTrackWriter audioTrack;
+    ASSERT_TRUE(audioTrack.open(audioPath, 48000, encoders.audio.context(),
+                                timing.totalSamples, &error))
+        << error.toStdString();
+    EncodedPacket primingless;
+    primingless.data = {0x21, 0x10, 0x00};
+    primingless.pts = 0;
+    primingless.dts = 0;
+    primingless.duration = 1024;
+    primingless.key = true;
+    ASSERT_TRUE(audioTrack.write(primingless, &error)) << error.toStdString();
+    ASSERT_TRUE(audioTrack.finish(&error)) << error.toStdString();
+
+    const QString temp = assemblyTempPathFor(output);
+    EXPECT_FALSE(Mp4Assembler::assemble(
+        parts, audioPath, timing, settings.fps, encoders.video.context(),
+        encoders.audio.context(), encoders.audio.encoderDelaySamples(), 0, temp,
+        &error));
+    EXPECT_NE(error.indexOf(QStringLiteral("预延迟")), -1) << error.toStdString();
+    EXPECT_FALSE(QFile::exists(temp));
+}
+
+TEST(ExportSegment, AssemblerRejectsMismatchedEncoderParameters)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("extradata.mp4"));
+    const QString parts = partsDirectoryFor(output);
+    clearParts(parts);
+
+    ExportSettings settings;
+    settings.codec = ExportVideoCodec::Mpeg4Part2;
+    settings.width = 320;
+    settings.height = 180;
+    settings.fps = Rational{30, 1};
+    settings.rateControl = ExportRateControl::Bitrate;
+    settings.bitrateKbps = 4000;
+    const ExportTiming timing =
+        computeExportTiming(3'000'000, settings.fps, 48000, 1'600'000);
+    ASSERT_EQ(timing.segmentCount, 2);
+
+    Encoders encoders;
+    QString error;
+    ASSERT_TRUE(openEncoders(&encoders, settings, &error)) << error.toStdString();
+    SegmentRouter router(parts, timing, settings.fps, encoders.video.context());
+    for (int64_t frame = 0; frame < timing.totalFrames; ++frame) {
+        std::vector<EncodedPacket> packets;
+        ASSERT_TRUE(encoders.video.encodeBlack(frame, frame == 0, &packets, &error))
+            << error.toStdString();
+        for (const EncodedPacket &packet : packets)
+            ASSERT_TRUE(router.routeVideo(packet, &error)) << error.toStdString();
+    }
+    std::vector<EncodedPacket> tail;
+    ASSERT_TRUE(encoders.video.flush(&tail, &error)) << error.toStdString();
+    for (const EncodedPacket &packet : tail)
+        ASSERT_TRUE(router.routeVideo(packet, &error)) << error.toStdString();
+    ASSERT_TRUE(router.finishAll(true, &error)) << error.toStdString();
+
+    // Replace the second part with one encoded at another resolution: its
+    // VOL/SPS extradata no longer matches part 0 and must not be concatenated.
+    ExportSettings other = settings;
+    other.width = 322;
+    VideoEncoder otherVideo;
+    ASSERT_TRUE(otherVideo.open(mpeg4(), other, &error)) << error.toStdString();
+    SegmentWriter writer;
+    ASSERT_TRUE(writer.open(segmentPath(parts, 1), settings.fps,
+                            otherVideo.context(), 48, &error))
+        << error.toStdString();
+    for (int64_t frame = 48; frame < timing.totalFrames; ++frame) {
+        std::vector<EncodedPacket> packets;
+        ASSERT_TRUE(otherVideo.encodeBlack(frame, frame == 48, &packets, &error))
+            << error.toStdString();
+        for (const EncodedPacket &packet : packets)
+            ASSERT_TRUE(writer.writeVideo(packet, &error)) << error.toStdString();
+    }
+    std::vector<EncodedPacket> otherTail;
+    ASSERT_TRUE(otherVideo.flush(&otherTail, &error)) << error.toStdString();
+    for (const EncodedPacket &packet : otherTail)
+        ASSERT_TRUE(writer.writeVideo(packet, &error)) << error.toStdString();
+    ASSERT_TRUE(writer.finish(&error)) << error.toStdString();
+
+    const QString temp = assemblyTempPathFor(output);
+    EXPECT_FALSE(Mp4Assembler::assemble(
+        parts, QDir(parts).filePath(QStringLiteral("audio.mp4")), timing,
+        settings.fps, encoders.video.context(), encoders.audio.context(),
+        encoders.audio.encoderDelaySamples(), 0, temp, &error));
+    EXPECT_NE(error.indexOf(QStringLiteral("编码参数不一致")), -1)
+        << error.toStdString();
+    EXPECT_FALSE(QFile::exists(temp));
+}
+
+TEST(ExportSegment, AssemblerRejectsSegmentWithWrongFrameCount)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("count.mp4"));
+    const QString parts = partsDirectoryFor(output);
+    clearParts(parts);
+
+    ExportSettings settings;
+    settings.codec = ExportVideoCodec::Mpeg4Part2;
+    settings.width = 320;
+    settings.height = 180;
+    settings.fps = Rational{30, 1};
+    settings.rateControl = ExportRateControl::Bitrate;
+    settings.bitrateKbps = 4000;
+    const ExportTiming timing =
+        computeExportTiming(3'000'000, settings.fps, 48000, 1'600'000);
+    ASSERT_EQ(timing.segmentCount, 2);
+
+    Encoders encoders;
+    QString error;
+    ASSERT_TRUE(openEncoders(&encoders, settings, &error)) << error.toStdString();
+    SegmentRouter router(parts, timing, settings.fps, encoders.video.context());
+    for (int64_t frame = 0; frame < timing.totalFrames; ++frame) {
+        std::vector<EncodedPacket> packets;
+        ASSERT_TRUE(encoders.video.encodeBlack(frame, frame == 0, &packets, &error))
+            << error.toStdString();
+        for (const EncodedPacket &packet : packets)
+            ASSERT_TRUE(router.routeVideo(packet, &error)) << error.toStdString();
+    }
+    std::vector<EncodedPacket> tail;
+    ASSERT_TRUE(encoders.video.flush(&tail, &error)) << error.toStdString();
+    for (const EncodedPacket &packet : tail)
+        ASSERT_TRUE(router.routeVideo(packet, &error)) << error.toStdString();
+    ASSERT_TRUE(router.finishAll(true, &error)) << error.toStdString();
+
+    // Part 1 must hold 42 frames; replacing it with the 48-frame part 0 leaves
+    // the global frame offset monotonic but with four extra frames.
+    ASSERT_TRUE(QFile::remove(segmentPath(parts, 1)));
+    ASSERT_TRUE(QFile::copy(segmentPath(parts, 0), segmentPath(parts, 1)));
+
+    const QString temp = assemblyTempPathFor(output);
+    EXPECT_FALSE(Mp4Assembler::assemble(
+        parts, QDir(parts).filePath(QStringLiteral("audio.mp4")), timing,
+        settings.fps, encoders.video.context(), encoders.audio.context(),
+        encoders.audio.encoderDelaySamples(), 0, temp, &error));
+    EXPECT_NE(error.indexOf(QStringLiteral("时间线要求")), -1)
+        << error.toStdString();
+    EXPECT_FALSE(QFile::exists(temp));
 }
