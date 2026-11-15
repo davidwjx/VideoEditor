@@ -63,6 +63,10 @@ public:
     Q_INVOKABLE void setClipPan(const QString &clipId, int panMilli);
     Q_INVOKABLE void setClipFades(const QString &clipId, qint64 fadeInUs,
                                   qint64 fadeOutUs);
+    // Single-field fade setters preserve the other fade and all other audio
+    // parameters, so dragging one inspector slider cannot zero its sibling.
+    Q_INVOKABLE void setClipFadeIn(const QString &clipId, qint64 fadeInUs);
+    Q_INVOKABLE void setClipFadeOut(const QString &clipId, qint64 fadeOutUs);
     Q_INVOKABLE void setClipTransform(const QString &clipId, int scaleMilli,
                                       int offsetXPermille, int offsetYPermille,
                                       int opacityMilli);

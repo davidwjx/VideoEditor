@@ -32,12 +32,16 @@ ScrollView {
                     speedIndexFor(clipField("speedMilli", 1000))]
     }
 
-    function commitFades() {
-        if (!hasClip())
-            return
-        Timeline.setClipFades(Timeline.selectedClipId,
-                              Math.round(fadeIn.pendingValue * 1e6),
-                              Math.round(fadeOut.pendingValue * 1e6))
+    function commitFadeIn(seconds) {
+        if (hasClip())
+            Timeline.setClipFadeIn(Timeline.selectedClipId,
+                                   Math.round(seconds * 1e6))
+    }
+
+    function commitFadeOut(seconds) {
+        if (hasClip())
+            Timeline.setClipFadeOut(Timeline.selectedClipId,
+                                    Math.round(seconds * 1e6))
     }
 
     ColumnLayout {
@@ -170,14 +174,14 @@ ScrollView {
                 if (pressed) {
                     pendingValue = value
                 } else if (inspector.hasClip()) {
-                    inspector.commitFades()
+                    inspector.commitFadeIn(value)
                 }
             }
             onPressedChanged: {
                 if (pressed) {
                     pendingValue = value
                 } else if (inspector.hasClip()) {
-                    inspector.commitFades()
+                    inspector.commitFadeIn(pendingValue)
                 }
             }
             Binding {
@@ -201,14 +205,14 @@ ScrollView {
                 if (pressed) {
                     pendingValue = value
                 } else if (inspector.hasClip()) {
-                    inspector.commitFades()
+                    inspector.commitFadeOut(value)
                 }
             }
             onPressedChanged: {
                 if (pressed) {
                     pendingValue = value
                 } else if (inspector.hasClip()) {
-                    inspector.commitFades()
+                    inspector.commitFadeOut(pendingValue)
                 }
             }
             Binding {

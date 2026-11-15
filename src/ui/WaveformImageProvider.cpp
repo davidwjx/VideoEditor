@@ -43,8 +43,11 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
                              + QString::number(width) + QLatin1Char('x')
                              + QString::number(height) + QLatin1Char('/')
                              + QString::number(peaks.bucketCount());
-    if (const QImage *cached = m_cache.object(cacheKey))
-        return *cached;
+    {
+        QMutexLocker locker(&m_cacheMutex);
+        if (const QImage *cached = m_cache.object(cacheKey))
+            return QImage(*cached);
+    }
 
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, false);
@@ -65,7 +68,10 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
         painter.drawLine(QPointF(x, top), QPointF(x, bottom));
     }
     painter.end();
-    m_cache.insert(cacheKey, new QImage(image));
+    {
+        QMutexLocker locker(&m_cacheMutex);
+        m_cache.insert(cacheKey, new QImage(image));
+    }
     return image;
 }
 

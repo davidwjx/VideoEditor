@@ -574,6 +574,32 @@ void TimelineController::setClipFades(const QString &clipId, qint64 fadeInUs,
     m_editor.setClipAudio(trackId, clipId, params);
 }
 
+void TimelineController::setClipFadeIn(const QString &clipId, qint64 fadeInUs)
+{
+    QString trackId;
+    if (!trackForClip(clipId, &trackId))
+        return;
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip)
+        return;
+    AudioParams params = clip->audio;
+    params.fadeInUs = fadeInUs;
+    m_editor.setClipAudio(trackId, clipId, params);
+}
+
+void TimelineController::setClipFadeOut(const QString &clipId, qint64 fadeOutUs)
+{
+    QString trackId;
+    if (!trackForClip(clipId, &trackId))
+        return;
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip)
+        return;
+    AudioParams params = clip->audio;
+    params.fadeOutUs = fadeOutUs;
+    m_editor.setClipAudio(trackId, clipId, params);
+}
+
 void TimelineController::setClipTransform(const QString &clipId, int scaleMilli,
                                           int offsetXPermille,
                                           int offsetYPermille, int opacityMilli)

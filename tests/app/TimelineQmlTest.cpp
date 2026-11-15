@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPointF>
 #include <QQmlComponent>
@@ -109,6 +110,17 @@ const Clip *firstClip(const Project &project)
     return nullptr;
 }
 
+const Clip *findClip(const Project &project, const QString &clipId)
+{
+    for (const Track &track : project.tracks) {
+        for (const Clip &clip : track.clips) {
+            if (clip.id == clipId)
+                return &clip;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
@@ -126,6 +138,11 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
     const QString clipId = controller.timeline()->addAssetToTimeline(
         assetId, QStringLiteral("track-v1"), 0);
     ASSERT_FALSE(clipId.isEmpty());
+
+    // A cue exercises the subtitle panel's edit field while the QML loads.
+    const QString cueId = controller.timeline()->addCueAtPlayhead();
+    ASSERT_FALSE(cueId.isEmpty());
+    controller.timeline()->setCueText(cueId, QStringLiteral("测试字幕"));
 
     // Long, zoomed-in timeline: the 2 s clip is 800 px wide while the visible
     // timeline viewport is roughly 700 px, so the Flickable may try to steal a
@@ -155,9 +172,23 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
 
     auto *window = qobject_cast<QQuickWindow *>(root.data());
     ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for gesture delivery";
     window->show();
-    ASSERT_TRUE(QTest::qWaitForWindowExposed(window));
+    if (!QTest::qWaitForWindowExposed(window, 5000))
+        GTEST_SKIP() << "window was not exposed (no desktop/D3D session)";
     QTest::qWait(300);
+
+    QQuickItem *cueText = findItem(window, QStringLiteral("cue-text-") + cueId);
+    ASSERT_NE(cueText, nullptr);
+    EXPECT_EQ(cueText->property("text").toString(), QStringLiteral("测试字幕"));
+    cueText->forceActiveFocus();
+    QTest::qWait(50);
+    if (cueText->hasActiveFocus()) {
+        EXPECT_EQ(cueText->property("text").toString(),
+                  QStringLiteral("测试字幕"))
+            << "the caption must remain visible while the field is focused";
+    }
 
     QQuickItem *clip = findItem(window, QStringLiteral("clip-") + clipId);
     ASSERT_NE(clip, nullptr);
@@ -178,6 +209,50 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
     EXPECT_NEAR(volume->property("value").toDouble(), 150.0, 0.001);
     EXPECT_NEAR(scale->property("value").toDouble(), 150.0, 0.001);
     EXPECT_NEAR(opacity->property("value").toDouble(), 50.0, 0.001);
+
+    // Dragging one fade slider must preserve the other fade, even after
+    // switching selection between clips with different fade values.
+    const QString clip2Id = controller.timeline()->addAssetToTimeline(
+        assetId, QStringLiteral("track-v1"), 5'000'000);
+    ASSERT_FALSE(clip2Id.isEmpty());
+    controller.timeline()->setClipFades(clipId, 300'000, 400'000);
+    controller.timeline()->setClipFades(clip2Id, 100'000, 900'000);
+    controller.timeline()->selectClip(clip2Id);
+    QTest::qWait(80);
+    controller.timeline()->selectClip(clipId);
+    QTest::qWait(80);
+
+    QQuickItem *fadeIn = findItem(window, QStringLiteral("inspector-fadeIn"));
+    QQuickItem *fadeOut = findItem(window, QStringLiteral("inspector-fadeOut"));
+    ASSERT_NE(fadeIn, nullptr);
+    ASSERT_NE(fadeOut, nullptr);
+
+    const auto dragSlider = [window](QQuickItem *slider, double fromFraction,
+                                     double toFraction) {
+        const QPointF from = slider->mapToScene(
+            QPointF(slider->width() * fromFraction, slider->height() / 2.0));
+        const QPointF to = from
+                           + QPointF(slider->width()
+                                         * (toFraction - fromFraction), 0);
+        dragMouse(window, from, to);
+    };
+
+    dragSlider(fadeIn, 0.5, 0.8);
+    const Clip *afterFadeIn =
+        findClip(controller.document()->project(), clipId);
+    ASSERT_NE(afterFadeIn, nullptr);
+    const qint64 fadeInAfterDrag = afterFadeIn->audio.fadeInUs;
+    EXPECT_NE(fadeInAfterDrag, 300'000);
+    EXPECT_EQ(afterFadeIn->audio.fadeOutUs, 400'000)
+        << "dragging fade-in must preserve the sibling fade-out";
+
+    dragSlider(fadeOut, 0.8, 0.3);
+    const Clip *afterFadeOut =
+        findClip(controller.document()->project(), clipId);
+    ASSERT_NE(afterFadeOut, nullptr);
+    EXPECT_EQ(afterFadeOut->audio.fadeInUs, fadeInAfterDrag)
+        << "dragging fade-out must preserve the sibling fade-in";
+    EXPECT_NE(afterFadeOut->audio.fadeOutUs, 400'000);
 
     const QPointF dragFrom = clip->mapToScene(
         QPointF(clip->width() / 2.0, clip->height() / 2.0));

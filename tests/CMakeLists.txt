@@ -98,10 +98,13 @@ target_link_libraries(app_qml_tests PRIVATE
 target_compile_definitions(app_qml_tests PRIVATE
   VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
   VIDEOEDITOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-gtest_discover_tests(app_qml_tests PROPERTIES
-  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+add_test(NAME TimelineQml
+         COMMAND app_qml_tests --gtest_filter=TimelineQml.*)
+set_tests_properties(TimelineQml PROPERTIES
   ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
-  DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  LABELS "gpu"
+  TIMEOUT 60)
 
 add_test(NAME preview_selftest
          COMMAND VideoEditor --selftest "${CMAKE_SOURCE_DIR}/tests/fixtures/h264.mp4")

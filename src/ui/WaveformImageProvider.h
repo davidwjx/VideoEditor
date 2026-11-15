@@ -2,6 +2,7 @@
 
 #include <QCache>
 #include <QImage>
+#include <QMutex>
 #include <QString>
 #include <QQuickImageProvider>
 
@@ -23,6 +24,7 @@ private:
     // Rendered waveforms are deterministic per asset/width/height; caching
     // them avoids repainting all peaks on every zoom step.
     mutable QCache<QString, QImage> m_cache{64};
+    mutable QMutex m_cacheMutex;
 };
 
 } // namespace VideoEditor

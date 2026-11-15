@@ -103,7 +103,9 @@ ColumnLayout {
 
                 TextField {
                     id: cueText
+                    objectName: "cue-text-" + model.itemId
                     Layout.fillWidth: true
+                    text: model.text
                     placeholderText: "字幕文本"
                     // Capture what the user typed before the focus-loss
                     // Binding below restores the model value.
