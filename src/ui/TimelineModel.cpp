@@ -183,6 +183,26 @@ QVariant TimelineModel::data(const QModelIndex &index, int role) const
         return isClip ? QString() : row.cue.styleId;
     case SelectedRole:
         return row.id == m_selectedId;
+    case KeyframeCountRole:
+        return isClip ? int(row.clip.audio.keyframes.size()) : 0;
+    case KeyframesRole: {
+        QVariantList keyframes;
+        if (isClip) {
+            for (const VolumeKeyframe &keyframe : row.clip.audio.keyframes) {
+                QVariantMap entry;
+                entry.insert(QStringLiteral("timeUs"),
+                             QVariant::fromValue<qint64>(keyframe.timeUs));
+                entry.insert(QStringLiteral("volumeMilli"),
+                             keyframe.volumeMilli);
+                keyframes.append(entry);
+            }
+        }
+        return keyframes;
+    }
+    case PositionXPermilleRole:
+        return isClip ? 0 : row.cue.positionXPermille;
+    case PositionYPermilleRole:
+        return isClip ? 0 : row.cue.positionYPermille;
     default:
         return {};
     }
@@ -210,6 +230,10 @@ QHash<int, QByteArray> TimelineModel::roleNames() const
         {TextRole, QByteArrayLiteral("text")},
         {StyleIdRole, QByteArrayLiteral("styleId")},
         {SelectedRole, QByteArrayLiteral("selected")},
+        {KeyframeCountRole, QByteArrayLiteral("keyframeCount")},
+        {KeyframesRole, QByteArrayLiteral("keyframes")},
+        {PositionXPermilleRole, QByteArrayLiteral("positionXPermille")},
+        {PositionYPermilleRole, QByteArrayLiteral("positionYPermille")},
     };
 }
 

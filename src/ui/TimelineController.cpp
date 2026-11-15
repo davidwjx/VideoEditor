@@ -86,6 +86,57 @@ QVariantMap TimelineController::selectedClip() const
                clip->transform.offsetYPermille);
     map.insert(QStringLiteral("opacityMilli"),
                clip->transform.opacityMilli);
+    map.insert(QStringLiteral("startUs"),
+               QVariant::fromValue<qint64>(clip->timelineStartUs));
+    map.insert(QStringLiteral("durationUs"),
+               QVariant::fromValue<qint64>(clip->timelineDurationUs()));
+
+    QVariantList keyframes;
+    for (const VolumeKeyframe &keyframe : clip->audio.keyframes) {
+        QVariantMap entry;
+        entry.insert(QStringLiteral("timeUs"),
+                     QVariant::fromValue<qint64>(keyframe.timeUs));
+        entry.insert(QStringLiteral("volumeMilli"), keyframe.volumeMilli);
+        keyframes.append(entry);
+    }
+    map.insert(QStringLiteral("keyframeCount"), keyframes.size());
+    map.insert(QStringLiteral("keyframes"), keyframes);
+    return map;
+}
+
+QVariantMap TimelineController::selectedCue() const
+{
+    if (m_selectedCueId.isEmpty())
+        return {};
+
+    QString trackId;
+    const SubtitleCue *cue = nullptr;
+    for (const Track &track : m_document.project().tracks) {
+        for (const SubtitleCue &candidate : track.cues) {
+            if (candidate.id == m_selectedCueId) {
+                trackId = track.id;
+                cue = &candidate;
+                break;
+            }
+        }
+        if (cue)
+            break;
+    }
+    if (!cue)
+        return {};
+
+    QVariantMap map;
+    map.insert(QStringLiteral("id"), cue->id);
+    map.insert(QStringLiteral("trackId"), trackId);
+    map.insert(QStringLiteral("startUs"),
+               QVariant::fromValue<qint64>(cue->startUs));
+    map.insert(QStringLiteral("endUs"),
+               QVariant::fromValue<qint64>(cue->endUs));
+    map.insert(QStringLiteral("text"), cue->text);
+    map.insert(QStringLiteral("styleId"), cue->styleId);
+    map.insert(QStringLiteral("positionXPermille"), cue->positionXPermille);
+    map.insert(QStringLiteral("positionYPermille"), cue->positionYPermille);
+    map.insert(QStringLiteral("enabled"), cue->enabled);
     return map;
 }
 
@@ -108,8 +159,9 @@ void TimelineController::refreshFromDocument()
         emit selectionChanged();
     }
     // Clip properties may have changed while the same clip stayed selected;
-    // the inspector binds to this map, so refresh it on every edit.
+    // the inspector binds to these maps, so refresh them on every edit.
     emit selectedClipChanged();
+    emit selectedCueChanged();
 
     // Track commands emit tracksChanged and timelineChanged back to back; only
     // notify bindings when the duration actually changed.
@@ -600,6 +652,61 @@ void TimelineController::setClipFadeOut(const QString &clipId, qint64 fadeOutUs)
     m_editor.setClipAudio(trackId, clipId, params);
 }
 
+bool TimelineController::addVolumeKeyframe(const QString &trackId,
+                                           const QString &clipId,
+                                           int64_t timeUs, int volumeMilli)
+{
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->locked)
+        return false;
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip)
+        return false;
+    // Keyframe time is relative to the clip start and must stay inside it.
+    if (timeUs < 0 || timeUs > clip->timelineDurationUs())
+        return false;
+
+    AudioParams params = clip->audio;
+    const VolumeKeyframe keyframe{timeUs,
+                                  qBound(0, volumeMilli, 2000)};
+    int insertAt = params.keyframes.size();
+    for (int i = 0; i < params.keyframes.size(); ++i) {
+        if (params.keyframes.at(i).timeUs == timeUs) {
+            insertAt = i;
+            break;
+        }
+        if (params.keyframes.at(i).timeUs > timeUs) {
+            insertAt = i;
+            break;
+        }
+    }
+    if (insertAt < params.keyframes.size()
+        && params.keyframes.at(insertAt).timeUs == timeUs) {
+        params.keyframes[insertAt] = keyframe;
+    } else {
+        params.keyframes.insert(insertAt, keyframe);
+    }
+
+    m_editor.setClipAudio(trackId, clipId, params);
+    return true;
+}
+
+bool TimelineController::removeVolumeKeyframe(const QString &trackId,
+                                              const QString &clipId, int index)
+{
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->locked)
+        return false;
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip || index < 0 || index >= clip->audio.keyframes.size())
+        return false;
+
+    AudioParams params = clip->audio;
+    params.keyframes.removeAt(index);
+    m_editor.setClipAudio(trackId, clipId, params);
+    return true;
+}
+
 void TimelineController::setClipTransform(const QString &clipId, int scaleMilli,
                                           int offsetXPermille,
                                           int offsetYPermille, int opacityMilli)
@@ -650,6 +757,7 @@ void TimelineController::selectClip(const QString &clipId)
     m_timelineModel->selectItem(clipId);
     emit selectionChanged();
     emit selectedClipChanged();
+    emit selectedCueChanged();
 }
 
 void TimelineController::selectCue(const QString &cueId)
@@ -661,6 +769,7 @@ void TimelineController::selectCue(const QString &cueId)
     m_timelineModel->selectItem(cueId);
     emit selectionChanged();
     emit selectedClipChanged();
+    emit selectedCueChanged();
 }
 
 QString TimelineController::addCueAtPlayhead()
@@ -707,6 +816,26 @@ void TimelineController::setCueText(const QString &cueId, const QString &text)
     SubtitleCue updated = *cue;
     updated.text = text;
     m_editor.updateSubtitleCue(trackId, cueId, updated);
+}
+
+bool TimelineController::setCuePosition(const QString &trackId,
+                                        const QString &cueId, int xPermille,
+                                        int yPermille)
+{
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->type != TrackType::Subtitle || track->locked)
+        return false;
+    const SubtitleCue *cue = findCue(trackId, cueId);
+    if (!cue)
+        return false;
+
+    // Copy the whole cue and change only the position so text, style, timing
+    // and enabled state survive the single undo step.
+    SubtitleCue updated = *cue;
+    updated.positionXPermille = qBound(0, xPermille, 1000);
+    updated.positionYPermille = qBound(0, yPermille, 1000);
+    m_editor.updateSubtitleCue(trackId, cueId, updated);
+    return true;
 }
 
 void TimelineController::deleteSelectedCue()

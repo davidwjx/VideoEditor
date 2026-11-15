@@ -30,7 +30,11 @@ public:
         FadeOutUsRole,
         TextRole,
         StyleIdRole,
-        SelectedRole
+        SelectedRole,
+        KeyframeCountRole,
+        KeyframesRole,
+        PositionXPermilleRole,
+        PositionYPermilleRole
     };
 
     explicit TimelineModel(QObject *parent = nullptr);

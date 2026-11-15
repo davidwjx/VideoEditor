@@ -9,6 +9,28 @@ ColumnLayout {
     id: panel
     spacing: 6
 
+    function cueField(name, fallback) {
+        const map = Timeline.selectedCue
+        const value = map ? map[name] : undefined
+        return value === undefined ? fallback : value
+    }
+
+    function commitPositionX(permille) {
+        if (Timeline.selectedCueId !== "")
+            Timeline.setCuePosition(panel.cueField("trackId", ""),
+                                    Timeline.selectedCueId,
+                                    Math.round(permille),
+                                    panel.cueField("positionYPermille", 880))
+    }
+
+    function commitPositionY(permille) {
+        if (Timeline.selectedCueId !== "")
+            Timeline.setCuePosition(panel.cueField("trackId", ""),
+                                    Timeline.selectedCueId,
+                                    panel.cueField("positionXPermille", 500),
+                                    Math.round(permille))
+    }
+
     Label {
         text: "字幕"
         font.bold: true
@@ -45,6 +67,68 @@ ColumnLayout {
         textRole: "name"
         valueRole: "id"
         onActivated: Timeline.applySubtitleStyle(currentValue)
+    }
+
+    Label { text: "位置 X（‰）"; color: "#cccccc" }
+    Slider {
+        id: positionX
+        objectName: "subtitle-position-x"
+        Layout.fillWidth: true
+        from: 0
+        to: 1000
+        enabled: Timeline.selectedCueId !== ""
+        property real pendingValue: 500
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (enabled) {
+                panel.commitPositionX(value)
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (enabled) {
+                panel.commitPositionX(pendingValue)
+            }
+        }
+        Binding {
+            target: positionX
+            property: "value"
+            value: panel.cueField("positionXPermille", 500)
+            when: !positionX.pressed
+        }
+    }
+
+    Label { text: "位置 Y（‰）"; color: "#cccccc" }
+    Slider {
+        id: positionY
+        objectName: "subtitle-position-y"
+        Layout.fillWidth: true
+        from: 0
+        to: 1000
+        enabled: Timeline.selectedCueId !== ""
+        property real pendingValue: 880
+        onMoved: {
+            if (pressed) {
+                pendingValue = value
+            } else if (enabled) {
+                panel.commitPositionY(value)
+            }
+        }
+        onPressedChanged: {
+            if (pressed) {
+                pendingValue = value
+            } else if (enabled) {
+                panel.commitPositionY(pendingValue)
+            }
+        }
+        Binding {
+            target: positionY
+            property: "value"
+            value: panel.cueField("positionYPermille", 880)
+            when: !positionY.pressed
+        }
     }
 
     ListView {

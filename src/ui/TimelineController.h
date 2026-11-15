@@ -27,6 +27,8 @@ class TimelineController : public QObject {
     Q_PROPERTY(QString selectedCueId READ selectedCueId NOTIFY selectionChanged)
     Q_PROPERTY(QVariantMap selectedClip READ selectedClip
                    NOTIFY selectedClipChanged)
+    Q_PROPERTY(QVariantMap selectedCue READ selectedCue
+                   NOTIFY selectedCueChanged)
 
 public:
     explicit TimelineController(ProjectDocument &document, QObject *parent = nullptr);
@@ -43,6 +45,7 @@ public:
     QString selectedClipId() const { return m_selectedClipId; }
     QString selectedCueId() const { return m_selectedCueId; }
     QVariantMap selectedClip() const;
+    QVariantMap selectedCue() const;
 
     Q_INVOKABLE void seekUs(qint64 positionUs);
     Q_INVOKABLE void stepFrames(int delta);
@@ -67,6 +70,13 @@ public:
     // parameters, so dragging one inspector slider cannot zero its sibling.
     Q_INVOKABLE void setClipFadeIn(const QString &clipId, qint64 fadeInUs);
     Q_INVOKABLE void setClipFadeOut(const QString &clipId, qint64 fadeOutUs);
+    // Volume keyframes are authored as a discrete, time-sorted list. timeUs is
+    // relative to the clip start; the same time replaces the existing entry.
+    Q_INVOKABLE bool addVolumeKeyframe(const QString &trackId,
+                                       const QString &clipId, int64_t timeUs,
+                                       int volumeMilli);
+    Q_INVOKABLE bool removeVolumeKeyframe(const QString &trackId,
+                                          const QString &clipId, int index);
     Q_INVOKABLE void setClipTransform(const QString &clipId, int scaleMilli,
                                       int offsetXPermille, int offsetYPermille,
                                       int opacityMilli);
@@ -78,6 +88,9 @@ public:
     Q_INVOKABLE void selectCue(const QString &cueId);
     Q_INVOKABLE QString addCueAtPlayhead();
     Q_INVOKABLE void setCueText(const QString &cueId, const QString &text);
+    Q_INVOKABLE bool setCuePosition(const QString &trackId,
+                                    const QString &cueId, int xPermille,
+                                    int yPermille);
     Q_INVOKABLE void deleteSelectedCue();
     Q_INVOKABLE void applySubtitleStyle(const QString &styleId,
                                         const QString &cueId = {});
@@ -102,6 +115,7 @@ signals:
     void viewChanged();
     void selectionChanged();
     void selectedClipChanged();
+    void selectedCueChanged();
     void editFailed(QString message);
 
 private:

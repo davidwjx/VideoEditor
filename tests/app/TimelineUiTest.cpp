@@ -14,6 +14,8 @@
 #include "AudioEngine.h"
 #include "AudioSink.h"
 #include "PreviewController.h"
+#include "ProjectDocument.h"
+#include "ProjectSerializer.h"
 #include "TimelineController.h"
 #include "TimelineModel.h"
 
@@ -43,6 +45,62 @@ const Clip *findClip(const Project &project, const QString &clipId)
         }
     }
     return nullptr;
+}
+
+const SubtitleCue *findCue(const Project &project, const QString &cueId)
+{
+    for (const Track &track : project.tracks) {
+        for (const SubtitleCue &cue : track.cues) {
+            if (cue.id == cueId)
+                return &cue;
+        }
+    }
+    return nullptr;
+}
+
+Asset audioAsset(int64_t durationUs)
+{
+    MediaInfo info;
+    info.path = QStringLiteral("C:/videos/a.mp4");
+    info.container = QStringLiteral("MP4");
+    info.videoCodec = QStringLiteral("h264");
+    info.width = 1920;
+    info.height = 1080;
+    info.frameRate = Rational{30, 1};
+    info.durationUs = durationUs;
+    info.hasAudio = true;
+    info.hasVideo = true;
+    info.kind = MediaKind::Video;
+    info.supported = true;
+    return Asset{QStringLiteral("asset-v"), info.path, info, {}};
+}
+
+QString addAudioClip(TimelineController &controller)
+{
+    Clip clip;
+    clip.id = QStringLiteral("clip-a");
+    clip.assetId = QStringLiteral("asset-v");
+    clip.sourceInUs = 0;
+    clip.sourceOutUs = 5'000'000;
+    clip.timelineStartUs = 0;
+    return controller.addClipForTest(QStringLiteral("track-a1"), clip);
+}
+
+int rowForItem(const TimelineModel *model, const QString &itemId)
+{
+    for (int i = 0; i < model->rowCount(); ++i) {
+        if (model->data(model->index(i, 0), TimelineModel::ItemIdRole).toString()
+            == itemId) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+QVariantList keyframeList(const TimelineModel *model, int row)
+{
+    return model->data(model->index(row, 0), TimelineModel::KeyframesRole)
+        .toList();
 }
 
 } // namespace
@@ -252,4 +310,244 @@ TEST(TimelineUi, EditsRefreshPreviewAndAudioWithoutRestart)
     EXPECT_EQ(audioClip->timelineStartUs, 2'000'000);
     EXPECT_EQ(controller.preview()->positionMs(), 1000);
     EXPECT_FALSE(controller.preview()->playing());
+}
+
+TEST(TimelineUi, VolumeKeyframesAddSortedAndUndoOneStepEach)
+{
+    ProjectDocument document;
+    document.addAsset(audioAsset(10'000'000));
+    TimelineController controller(document);
+    const QString clipId = addAudioClip(controller);
+    ASSERT_FALSE(clipId.isEmpty());
+    controller.selectClip(clipId);
+
+    EXPECT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             1'000'000, 1500));
+    EXPECT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             3'000'000, 800));
+
+    TimelineModel *model = controller.timelineModel();
+    const int row = rowForItem(model, clipId);
+    ASSERT_GE(row, 0);
+    EXPECT_EQ(model->data(model->index(row, 0),
+                          TimelineModel::KeyframeCountRole)
+                  .toInt(),
+              2);
+    QVariantList list = keyframeList(model, row);
+    ASSERT_EQ(list.size(), 2);
+    EXPECT_EQ(list.at(0).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              1'000'000);
+    EXPECT_EQ(list.at(0).toMap().value(QStringLiteral("volumeMilli")).toInt(),
+              1500);
+    EXPECT_EQ(list.at(1).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              3'000'000);
+    EXPECT_EQ(list.at(1).toMap().value(QStringLiteral("volumeMilli")).toInt(),
+              800);
+
+    const QVariantMap selected = controller.selectedClip();
+    EXPECT_EQ(selected.value(QStringLiteral("keyframeCount")).toInt(), 2);
+    EXPECT_EQ(selected.value(QStringLiteral("keyframes")).toList().size(), 2);
+
+    // Each add is its own undo step: one undo drops the 3 s keyframe, the
+    // second drops the 1 s keyframe.
+    document.undo();
+    list = keyframeList(model, rowForItem(model, clipId));
+    ASSERT_EQ(list.size(), 1);
+    EXPECT_EQ(list.first().toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              1'000'000);
+    document.undo();
+    EXPECT_TRUE(keyframeList(model, rowForItem(model, clipId)).isEmpty());
+
+    document.redo();
+    document.redo();
+    list = keyframeList(model, rowForItem(model, clipId));
+    ASSERT_EQ(list.size(), 2);
+    EXPECT_EQ(list.at(0).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              1'000'000);
+    EXPECT_EQ(list.at(1).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              3'000'000);
+}
+
+TEST(TimelineUi, VolumeKeyframesReplaceRejectInvalidAndClampVolume)
+{
+    ProjectDocument document;
+    document.addAsset(audioAsset(10'000'000));
+    TimelineController controller(document);
+    const QString clipId = addAudioClip(controller);
+    ASSERT_FALSE(clipId.isEmpty());
+
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             2'000'000, 1200));
+    int undoIndex = document.undoStack()->index();
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             2'000'000, 700));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+    QVariantList list = keyframeList(controller.timelineModel(),
+                                     rowForItem(controller.timelineModel(),
+                                                clipId));
+    ASSERT_EQ(list.size(), 1) << "same-time add must replace, not duplicate";
+    EXPECT_EQ(list.first().toMap().value(QStringLiteral("volumeMilli")).toInt(),
+              700);
+
+    document.undo();
+    list = keyframeList(controller.timelineModel(),
+                        rowForItem(controller.timelineModel(), clipId));
+    ASSERT_EQ(list.size(), 1);
+    EXPECT_EQ(list.first().toMap().value(QStringLiteral("volumeMilli")).toInt(),
+              1200);
+
+    // Out-of-range times are rejected without touching the undo stack.
+    undoIndex = document.undoStack()->index();
+    EXPECT_FALSE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                              -1, 1000));
+    EXPECT_FALSE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                              5'000'001, 1000));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex);
+    EXPECT_EQ(keyframeList(controller.timelineModel(),
+                           rowForItem(controller.timelineModel(), clipId))
+                  .size(),
+              1);
+
+    // Volume outside 0..2000 is clamped rather than allowed through.
+    EXPECT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             2'000'000, 3000));
+    list = keyframeList(controller.timelineModel(),
+                        rowForItem(controller.timelineModel(), clipId));
+    ASSERT_EQ(list.size(), 1);
+    EXPECT_EQ(list.first().toMap().value(QStringLiteral("volumeMilli")).toInt(),
+              2000);
+}
+
+TEST(TimelineUi, RemoveVolumeKeyframeKeepsOrderAndUndo)
+{
+    ProjectDocument document;
+    document.addAsset(audioAsset(10'000'000));
+    TimelineController controller(document);
+    const QString clipId = addAudioClip(controller);
+    ASSERT_FALSE(clipId.isEmpty());
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             1'000'000, 1100));
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             2'000'000, 1200));
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             3'000'000, 1300));
+
+    const int undoIndex = document.undoStack()->index();
+    EXPECT_TRUE(controller.removeVolumeKeyframe(QStringLiteral("track-a1"),
+                                                clipId, 1));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+
+    QVariantList list = keyframeList(controller.timelineModel(),
+                                     rowForItem(controller.timelineModel(),
+                                                clipId));
+    ASSERT_EQ(list.size(), 2);
+    EXPECT_EQ(list.at(0).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              1'000'000);
+    EXPECT_EQ(list.at(1).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              3'000'000);
+
+    document.undo();
+    list = keyframeList(controller.timelineModel(),
+                        rowForItem(controller.timelineModel(), clipId));
+    ASSERT_EQ(list.size(), 3);
+    EXPECT_EQ(list.at(1).toMap().value(QStringLiteral("timeUs")).toLongLong(),
+              2'000'000);
+    document.redo();
+    EXPECT_EQ(keyframeList(controller.timelineModel(),
+                           rowForItem(controller.timelineModel(), clipId))
+                  .size(),
+              2);
+
+    const int undoBeforeInvalid = document.undoStack()->index();
+    EXPECT_FALSE(controller.removeVolumeKeyframe(QStringLiteral("track-a1"),
+                                                 clipId, 9));
+    EXPECT_EQ(document.undoStack()->index(), undoBeforeInvalid);
+}
+
+TEST(TimelineUi, VolumeKeyframesSurviveSerializerRoundTrip)
+{
+    ProjectDocument document;
+    document.addAsset(audioAsset(10'000'000));
+    TimelineController controller(document);
+    const QString clipId = addAudioClip(controller);
+    ASSERT_FALSE(clipId.isEmpty());
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             500'000, 900));
+    ASSERT_TRUE(controller.addVolumeKeyframe(QStringLiteral("track-a1"), clipId,
+                                             4'000'000, 1800));
+
+    QString error;
+    const auto restored =
+        ProjectSerializer::fromJson(ProjectSerializer::toJson(document.project()),
+                                    &error);
+    ASSERT_TRUE(restored.has_value()) << error.toStdString();
+    const Clip *clip = findClip(*restored, clipId);
+    ASSERT_NE(clip, nullptr);
+    ASSERT_EQ(clip->audio.keyframes.size(), 2);
+    EXPECT_EQ(clip->audio.keyframes.at(0).timeUs, 500'000);
+    EXPECT_EQ(clip->audio.keyframes.at(0).volumeMilli, 900);
+    EXPECT_EQ(clip->audio.keyframes.at(1).timeUs, 4'000'000);
+    EXPECT_EQ(clip->audio.keyframes.at(1).volumeMilli, 1800);
+}
+
+TEST(TimelineUi, CuePositionPreservesFieldsClampsAndUndoes)
+{
+    ProjectDocument document;
+    TimelineController controller(document);
+    const QString cueId = controller.addCueAtPlayhead();
+    ASSERT_FALSE(cueId.isEmpty());
+    controller.setCueText(cueId, QStringLiteral("测试字幕"));
+    controller.applySubtitleStyle(QStringLiteral("bold-outline"), cueId);
+    controller.selectCue(cueId);
+
+    const SubtitleCue before = *findCue(document.project(), cueId);
+    const int undoIndex = document.undoStack()->index();
+    EXPECT_TRUE(controller.setCuePosition(QStringLiteral("track-s1"), cueId, 250,
+                                          800));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+
+    const SubtitleCue *cue = findCue(document.project(), cueId);
+    ASSERT_NE(cue, nullptr);
+    EXPECT_EQ(cue->positionXPermille, 250);
+    EXPECT_EQ(cue->positionYPermille, 800);
+    EXPECT_EQ(cue->text, before.text);
+    EXPECT_EQ(cue->styleId, before.styleId);
+    EXPECT_EQ(cue->id, before.id);
+    EXPECT_EQ(cue->startUs, before.startUs);
+    EXPECT_EQ(cue->endUs, before.endUs);
+
+    const QVariantMap selected = controller.selectedCue();
+    EXPECT_EQ(selected.value(QStringLiteral("positionXPermille")).toInt(), 250);
+    EXPECT_EQ(selected.value(QStringLiteral("positionYPermille")).toInt(), 800);
+    EXPECT_EQ(selected.value(QStringLiteral("text")).toString(),
+              before.text);
+
+    const int cueRow = rowForItem(controller.timelineModel(), cueId);
+    ASSERT_GE(cueRow, 0);
+    EXPECT_EQ(controller.timelineModel()
+                  ->data(controller.timelineModel()->index(cueRow, 0),
+                         TimelineModel::PositionXPermilleRole)
+                  .toInt(),
+              250);
+    EXPECT_EQ(controller.timelineModel()
+                  ->data(controller.timelineModel()->index(cueRow, 0),
+                         TimelineModel::PositionYPermilleRole)
+                  .toInt(),
+              800);
+
+    document.undo();
+    cue = findCue(document.project(), cueId);
+    ASSERT_NE(cue, nullptr);
+    EXPECT_EQ(cue->positionXPermille, 500);
+    EXPECT_EQ(cue->positionYPermille, 880);
+    EXPECT_EQ(cue->text, before.text);
+    EXPECT_EQ(cue->styleId, before.styleId);
+
+    // Out-of-range positions are clamped to 0..1000.
+    EXPECT_TRUE(controller.setCuePosition(QStringLiteral("track-s1"), cueId, -50,
+                                          2000));
+    cue = findCue(document.project(), cueId);
+    ASSERT_NE(cue, nullptr);
+    EXPECT_EQ(cue->positionXPermille, 0);
+    EXPECT_EQ(cue->positionYPermille, 1000);
 }

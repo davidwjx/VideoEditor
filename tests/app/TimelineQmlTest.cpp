@@ -101,6 +101,17 @@ void dragMouse(QQuickWindow *window, const QPointF &from, const QPointF &to,
     QTest::qWait(100);
 }
 
+void clickItem(QQuickWindow *window, QQuickItem *item)
+{
+    const QPointF point = item->mapToScene(
+        QPointF(item->width() / 2.0, item->height() / 2.0));
+    sendMouse(window, QEvent::MouseButtonPress, point, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(window, QEvent::MouseButtonRelease, point, Qt::LeftButton,
+              Qt::NoButton);
+    QTest::qWait(100);
+}
+
 const Clip *firstClip(const Project &project)
 {
     for (const Track &track : project.tracks) {
@@ -285,4 +296,148 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
         << "right trim must not move the clip start";
     EXPECT_LT(trimmed->timelineDurationUs(), durationAfterDrag)
         << "clip trim was stolen or not committed";
+}
+
+TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    ASSERT_EQ(controller.mediaModel()->rowCount(), 1);
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+
+    const Project &project = controller.document()->project();
+    ASSERT_EQ(project.tracks.at(1).clips.size(), 1);
+    const QString audioClipId = project.tracks.at(1).clips.first().id;
+    controller.timeline()->selectClip(audioClipId);
+    const QString cueId = controller.timeline()->addCueAtPlayhead();
+    ASSERT_FALSE(cueId.isEmpty());
+    controller.timeline()->seekUs(500'000);
+
+    QQmlEngine engine;
+    engine.addImageProvider(QStringLiteral("waveform"),
+                            new WaveformImageProvider(controller.waveforms()));
+    engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
+                                             controller.preview());
+    engine.rootContext()->setContextProperty(QStringLiteral("Timeline"),
+                                             controller.timeline());
+    engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
+                                             controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
+                                             QStringLiteral("test"));
+
+    QQmlComponent component(
+        &engine,
+        QUrl::fromLocalFile(QStringLiteral(VIDEOEDITOR_SOURCE_DIR
+                                           "/src/app/Main.qml")));
+    QScopedPointer<QObject> root(component.create());
+    ASSERT_FALSE(component.isError()) << component.errorString().toStdString();
+    ASSERT_NE(root.data(), nullptr);
+
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for gesture delivery";
+    window->show();
+    if (!QTest::qWaitForWindowExposed(window, 5000))
+        GTEST_SKIP() << "window was not exposed (no desktop/D3D session)";
+    QTest::qWait(300);
+
+    QQuickItem *addKeyframe =
+        findItem(window, QStringLiteral("inspector-add-keyframe"));
+    QQuickItem *keyframeList =
+        findItem(window, QStringLiteral("inspector-keyframe-list"));
+    ASSERT_NE(addKeyframe, nullptr);
+    ASSERT_NE(keyframeList, nullptr);
+    EXPECT_EQ(keyframeList->property("count").toInt(), 0);
+
+    clickItem(window, addKeyframe);
+    controller.timeline()->seekUs(1'500'000);
+    QTest::qWait(100);
+    clickItem(window, addKeyframe);
+
+    EXPECT_EQ(keyframeList->property("count").toInt(), 2);
+    const Clip *audioClip =
+        findClip(controller.document()->project(), audioClipId);
+    ASSERT_NE(audioClip, nullptr);
+    ASSERT_EQ(audioClip->audio.keyframes.size(), 2);
+    EXPECT_EQ(audioClip->audio.keyframes.at(0).timeUs, 500'000);
+    EXPECT_EQ(audioClip->audio.keyframes.at(1).timeUs, 1'500'000);
+
+    QQuickItem *deleteKeyframe =
+        findItem(window, QStringLiteral("inspector-keyframe-delete-0"));
+    ASSERT_NE(deleteKeyframe, nullptr);
+    clickItem(window, deleteKeyframe);
+    EXPECT_EQ(keyframeList->property("count").toInt(), 1);
+    audioClip = findClip(controller.document()->project(), audioClipId);
+    ASSERT_NE(audioClip, nullptr);
+    ASSERT_EQ(audioClip->audio.keyframes.size(), 1);
+    EXPECT_EQ(audioClip->audio.keyframes.first().timeUs, 1'500'000);
+
+    // Position sliders bind to the selected cue and commit once on release.
+    controller.timeline()->selectCue(cueId);
+    QTest::qWait(100);
+    QQuickItem *positionX =
+        findItem(window, QStringLiteral("subtitle-position-x"));
+    QQuickItem *positionY =
+        findItem(window, QStringLiteral("subtitle-position-y"));
+    ASSERT_NE(positionX, nullptr);
+    ASSERT_NE(positionY, nullptr);
+
+    const auto dragSlider = [window](QQuickItem *slider, double fromFraction,
+                                     double toFraction) {
+        const QPointF from = slider->mapToScene(
+            QPointF(slider->width() * fromFraction, slider->height() / 2.0));
+        const QPointF to = from
+                           + QPointF(slider->width()
+                                         * (toFraction - fromFraction), 0);
+        dragMouse(window, from, to);
+    };
+
+    int undoIndex = controller.document()->undoStack()->index();
+    dragSlider(positionX, 0.5, 0.8);
+    EXPECT_EQ(controller.document()->undoStack()->index(), undoIndex + 1)
+        << "dragging the X slider must produce exactly one undo step";
+    undoIndex = controller.document()->undoStack()->index();
+    dragSlider(positionY, 0.5, 0.3);
+    EXPECT_EQ(controller.document()->undoStack()->index(), undoIndex + 1)
+        << "dragging the Y slider must produce exactly one undo step";
+
+    const SubtitleCue *cue = nullptr;
+    for (const Track &track : controller.document()->project().tracks) {
+        for (const SubtitleCue &candidate : track.cues) {
+            if (candidate.id == cueId)
+                cue = &candidate;
+        }
+    }
+    ASSERT_NE(cue, nullptr);
+    EXPECT_NE(cue->positionXPermille, 500);
+    EXPECT_NE(cue->positionYPermille, 880);
+
+    const TimelineModel *model = controller.timeline()->timelineModel();
+    int cueRow = -1;
+    for (int i = 0; i < model->rowCount(); ++i) {
+        if (model->data(model->index(i, 0), TimelineModel::ItemIdRole).toString()
+            == cueId) {
+            cueRow = i;
+        }
+    }
+    ASSERT_GE(cueRow, 0);
+    EXPECT_EQ(model->data(model->index(cueRow, 0),
+                          TimelineModel::PositionXPermilleRole)
+                  .toInt(),
+              cue->positionXPermille);
+    EXPECT_EQ(model->data(model->index(cueRow, 0),
+                          TimelineModel::PositionYPermilleRole)
+                  .toInt(),
+              cue->positionYPermille);
 }

@@ -44,6 +44,25 @@ ScrollView {
                                     Math.round(seconds * 1e6))
     }
 
+    // The controller stores keyframe time relative to the clip start, while
+    // the playhead is a timeline-global position.
+    function addKeyframeAtPlayhead() {
+        if (!hasClip())
+            return
+        const startUs = clipField("startUs", 0)
+        Timeline.addVolumeKeyframe(clipField("trackId", ""),
+                                   Timeline.selectedClipId,
+                                   Math.round(Timeline.positionUs - startUs),
+                                   clipField("volumeMilli", 1000))
+    }
+
+    function removeKeyframe(index) {
+        if (!hasClip())
+            return
+        Timeline.removeVolumeKeyframe(clipField("trackId", ""),
+                                      Timeline.selectedClipId, index)
+    }
+
     ColumnLayout {
         width: inspector.availableWidth
         spacing: 4
@@ -125,6 +144,57 @@ ScrollView {
                 property: "value"
                 value: inspector.clipField("volumeMilli", 1000) / 10
                 when: !volume.pressed
+            }
+        }
+
+        Label { text: "音量关键帧"; color: "#cccccc" }
+        ListView {
+            id: keyframeList
+            objectName: "inspector-keyframe-list"
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(96, contentHeight)
+            clip: true
+            model: inspector.clipField("keyframes", [])
+
+            delegate: RowLayout {
+                required property int index
+                required property var modelData
+
+                width: ListView.view.width
+                spacing: 4
+
+                Label {
+                    text: (modelData.timeUs / 1e6).toFixed(2) + "s"
+                    color: "#999999"
+                    font.pixelSize: 11
+                }
+                Label {
+                    text: Math.round(modelData.volumeMilli / 10) + "%"
+                    color: "#cccccc"
+                    font.pixelSize: 11
+                    Layout.fillWidth: true
+                }
+                ToolButton {
+                    objectName: "inspector-keyframe-delete-" + index
+                    text: "删"
+                    padding: 2
+                    font.pixelSize: 11
+                    onClicked: inspector.removeKeyframe(index)
+                }
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Button {
+                objectName: "inspector-add-keyframe"
+                text: "添加关键帧"
+                enabled: inspector.hasClip()
+                onClicked: inspector.addKeyframeAtPlayhead()
+            }
+            Label {
+                text: "共 " + inspector.clipField("keyframeCount", 0)
+                color: "#999999"
+                font.pixelSize: 11
             }
         }
 

@@ -7043,3 +7043,81 @@ git commit -m "test(m2): add timeline self-tests, performance gate and M2 docume
 - **字幕字体**：`Microsoft YaHei` 在精简 Windows 安装可能缺失，`QFont` 会回退到系统字体；渲染测试只验证有字形输出，不绑定具体字体。
 - **Task 4 的命令快照粒度**：整轨 clips 列表作为 before/after，编辑 1000 个片段的轨道时每条命令约 200 KB；M2 可接受，M5 若成为问题再改为按片段 id 的增量补丁。
 
+
+---
+
+### Task 13: M2 补充——音量关键帧与字幕位置 UI
+
+**Files:**
+- Modify: `src/ui/TimelineModel.h`
+- Modify: `src/ui/TimelineModel.cpp`
+- Modify: `src/ui/TimelineController.h`
+- Modify: `src/ui/TimelineController.cpp`
+- Modify: `src/app/InspectorPanel.qml`
+- Modify: `src/app/SubtitlePanel.qml`
+- Modify: `tests/app/TimelineUiTest.cpp`
+- Modify: `tests/app/TimelineQmlTest.cpp`
+- Modify: `README.md`
+
+**Interfaces:**
+- `TimelineController::addVolumeKeyframe(const QString &trackId, const QString &clipId, int64_t timeUs, int volumeMilli) -> bool`
+- `TimelineController::removeVolumeKeyframe(const QString &trackId, const QString &clipId, int index) -> bool`
+- `TimelineController::setCuePosition(const QString &trackId, const QString &cueId, int xPermille, int yPermille) -> bool`
+- `TimelineModel` 新增角色：`keyframeCount`（int）、`keyframes`（QVariantList of `{timeUs, volumeMilli}`）、`positionXPermille`/`positionYPermille`（cue）。
+- `TimelineController::selectedClip` map 增加 `keyframes` 数组；`selectedCue` map 增加 `positionXPermille`/`positionYPermille`。
+
+- [x] **Step 1: 写失败测试**
+
+在 `TimelineUiTest.cpp` 增加：
+- 选择音频片段，在 1 s 和 3 s 添加音量关键帧，断言 `keyframeCount==2`、按时间排序、undo 一次恢复到 0、redo 恢复 2。
+- 同一时间再次添加关键帧替换原值（不产生重复时间），越界时间/音量被拒绝且不产生 undo。
+- 删除中间关键帧后剩余顺序正确，undo 恢复。
+- 保存工程后重新加载，关键帧时间和值保留（可用 ProjectSerializer 直接 round-trip）。
+- 选择字幕 cue，调用 `setCuePosition(..., 250, 800)`，断言 cue 位置、文本/样式不变、一次 undo 恢复；越界位置被钳制到 0–1000。
+
+在 `TimelineQmlTest.cpp` 增加：
+- 选中音频片段，点击“添加关键帧”按钮两次，列表显示两条；点击删除后剩一条。
+- 选中字幕 cue，拖动 X/Y 滑块后松手，cue 的 position 角色更新且只产生一个 undo 步骤。
+
+- [x] **Step 2: 运行测试确认失败**
+
+```bash
+cmake --preset windows-x64-release
+cmake --build --preset windows-x64-release
+ctest --preset windows-x64-release -R "TimelineUi|TimelineQml" --output-on-failure
+```
+
+预期：新测试因缺少接口/角色/UI 失败。
+
+- [x] **Step 3: 实现模型与控制器**
+
+- `TimelineModel` 在音频 clip 的 `keyframeCount`/`keyframes` 角色中返回 `clip.audio.keyframes`；字幕 cue 返回 `positionXPermille`/`positionYPermille`。
+- 控制器从 `m_document.project()` 按 id 找到当前 clip/cue，复制完整 `AudioParams`/`SubtitleCue`，只改关键帧或位置，再调用 `setClipAudio`/`updateSubtitleCue`，保证一次撤销且保留其余字段。
+- 关键帧按 `timeUs` 升序插入；同一时间替换；时间限制在 clip 的源/时间线范围内；音量钳制 0–2000；位置钳制 0–1000。
+- 更新 `selectedClip`/`selectedCue` map 并在文档刷新时重新计算。
+
+- [x] **Step 4: 实现 QML**
+
+- `InspectorPanel.qml` 在音频属性区增加“音量关键帧”列表（时间码 + 音量）、`添加关键帧`（当前播放头）、`删除`按钮；绑定 `selectedClip.keyframes`/`keyframeCount`；按钮和删除各只提交一次命令。
+- `SubtitlePanel.qml` 为当前 cue 增加 X/Y 滑块（0–1000），使用 `Binding { when: !pressed }`，松手提交 `setCuePosition`；文本/样式控件保留。
+- 关键帧/位置变化后 `TimelineModel` 通过 `dataChanged` 刷新，不 reset。
+
+- [x] **Step 5: 运行测试确认通过**
+
+```bash
+cmake --build --preset windows-x64-release
+ctest --preset windows-x64-release --output-on-failure
+```
+
+预期：新测试与全部既有测试通过；`timeline_selftest`/`timeline_perf` 仍通过。
+
+- [x] **Step 6: 更新 README**
+
+删除“关键帧/字幕位置无 UI”的限制说明；补充操作步骤：在检查器中添加/删除音量关键帧、在字幕面板调整位置。保留“关键帧曲线编辑不在 M2”的说明（仅支持离散关键帧列表）。
+
+- [x] **Step 7: 提交**
+
+```bash
+git add src/ui src/app tests README.md docs/superpowers/plans/2026-11-15-m2-editing-audio-subtitles.md
+git commit -m "feat(ui): author volume keyframes and subtitle positions"
+```
