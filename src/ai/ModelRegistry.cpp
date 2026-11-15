@@ -146,6 +146,66 @@ bool parseModel(const QJsonObject &json, AiModelRecord *model, QString *error)
     return true;
 }
 
+bool verifyRecordFiles(const AiModelRecord &model, const QString &rootDir,
+                       const QString &rootCanonical, QString *error)
+{
+    if (model.files.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("%1 缺少文件清单").arg(model.id);
+        return false;
+    }
+    for (auto it = model.files.constBegin(); it != model.files.constEnd();
+         ++it) {
+        const AiModelFile &file = it.value();
+        if (!isSafeRelativePath(file.path)) {
+            if (error) {
+                *error = QStringLiteral("%1/%2 路径不安全")
+                             .arg(model.id, it.key());
+            }
+            return false;
+        }
+        const QString resolved = QDir(rootDir).filePath(file.path);
+        // canonicalFilePath() is empty for a missing file and resolves
+        // junctions/symlinks; requiring both makes the check fail closed.
+        const QString canonical = QFileInfo(resolved).canonicalFilePath();
+        if (canonical.isEmpty()) {
+            if (error) {
+                *error = QStringLiteral("%1/%2 文件缺失或无法解析")
+                             .arg(model.id, it.key());
+            }
+            return false;
+        }
+        if (!isCanonicalUnder(rootCanonical, canonical)) {
+            if (error) {
+                *error = QStringLiteral("%1/%2 路径越界")
+                             .arg(model.id, it.key());
+            }
+            return false;
+        }
+        QFile handle(canonical);
+        if (!handle.open(QIODevice::ReadOnly)) {
+            if (error)
+                *error = QStringLiteral("%1/%2 文件缺失").arg(model.id, it.key());
+            return false;
+        }
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (!hash.addData(&handle)) {
+            if (error)
+                *error = QStringLiteral("%1/%2 无法读取")
+                             .arg(model.id, it.key());
+            return false;
+        }
+        const QString actual = QString::fromLatin1(hash.result().toHex());
+        if (actual.compare(file.sha256, Qt::CaseInsensitive) != 0) {
+            if (error)
+                *error = QStringLiteral("%1/%2 SHA-256 不匹配")
+                             .arg(model.id, it.key());
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 bool AiModelRecord::isTracking() const
@@ -252,45 +312,39 @@ bool ModelRegistry::verifyFiles(QString *error) const
         return false;
     };
 
-    const QString rootCanonical =
-        QFileInfo(m_rootDir).canonicalFilePath();
+    const QString rootCanonical = QFileInfo(m_rootDir).canonicalFilePath();
     if (rootCanonical.isEmpty())
         return fail(QStringLiteral("模型根目录无法解析"));
 
     for (const AiModelRecord &model : m_manifest.models) {
-        if (model.files.isEmpty())
-            return fail(QStringLiteral("%1 缺少文件清单").arg(model.id));
-        for (auto it = model.files.constBegin(); it != model.files.constEnd();
-             ++it) {
-            const AiModelFile &file = it.value();
-            if (!isSafeRelativePath(file.path))
-                return fail(QStringLiteral("%1/%2 路径不安全")
-                                .arg(model.id, it.key()));
-            const QString resolved = QDir(m_rootDir).filePath(file.path);
-            // canonicalFilePath() is empty for a missing file and resolves
-            // junctions/symlinks; requiring both makes the check fail closed.
-            const QString canonical =
-                QFileInfo(resolved).canonicalFilePath();
-            if (canonical.isEmpty())
-                return fail(QStringLiteral("%1/%2 文件缺失或无法解析")
-                                .arg(model.id, it.key()));
-            if (!isCanonicalUnder(rootCanonical, canonical))
-                return fail(QStringLiteral("%1/%2 路径越界")
-                                .arg(model.id, it.key()));
-            QFile handle(canonical);
-            if (!handle.open(QIODevice::ReadOnly))
-                return fail(QStringLiteral("%1/%2 文件缺失")
-                                .arg(model.id, it.key()));
-            QCryptographicHash hash(QCryptographicHash::Sha256);
-            if (!hash.addData(&handle))
-                return fail(QStringLiteral("%1/%2 无法读取")
-                                .arg(model.id, it.key()));
-            const QString actual =
-                QString::fromLatin1(hash.result().toHex());
-            if (actual.compare(file.sha256, Qt::CaseInsensitive) != 0)
-                return fail(QStringLiteral("%1/%2 SHA-256 不匹配")
-                                .arg(model.id, it.key()));
+        if (!verifyRecordFiles(model, m_rootDir, rootCanonical, error))
+            return false;
+    }
+    if (error)
+        error->clear();
+    return true;
+}
+
+bool ModelRegistry::verifyFiles(const QStringList &ids, QString *error) const
+{
+    if (m_testMode)
+        return true;
+
+    const QString rootCanonical = QFileInfo(m_rootDir).canonicalFilePath();
+    if (rootCanonical.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("模型根目录无法解析");
+        return false;
+    }
+    for (const QString &id : ids) {
+        const AiModelRecord *record = model(id);
+        if (!record) {
+            if (error)
+                *error = QStringLiteral("未知模型 id：%1").arg(id);
+            return false;
         }
+        if (!verifyRecordFiles(*record, m_rootDir, rootCanonical, error))
+            return false;
     }
     if (error)
         error->clear();
@@ -372,15 +426,48 @@ const AiModelRecord *ModelRegistry::approvedModel(const QString &id) const
 
 const AiModelRecord *ModelRegistry::defaultTrackingModel() const
 {
+    // The offline pipeline needs image_encoder + prompt_encoder +
+    // mask_decoder; prefer an fp32 record because the fp16 EfficientTAM bundle
+    // is explicitly rejected. Fall back to the historical first-record
+    // behaviour only when no offline-capable tracker exists.
+    const auto offlineCapable = [](const AiModelRecord &record) {
+        return record.files.contains(QStringLiteral("image_encoder"))
+            && record.files.contains(QStringLiteral("prompt_encoder"))
+            && record.files.contains(QStringLiteral("mask_decoder"));
+    };
+
+    const AiModelRecord *approvedCompatible = nullptr;
+    const AiModelRecord *compatibleFp32 = nullptr;
+    const AiModelRecord *compatibleFallback = nullptr;
     const AiModelRecord *fallback = nullptr;
     for (const AiModelRecord &record : m_manifest.models) {
         if (!record.isTracking())
             continue;
-        if (record.commercialApproved)
-            return &record;
         if (!fallback)
             fallback = &record;
+        if (!offlineCapable(record))
+            continue;
+        const bool fp32 = record.id.contains(QStringLiteral("fp32"),
+                                             Qt::CaseInsensitive)
+            || record.version.contains(QStringLiteral("fp32"),
+                                       Qt::CaseInsensitive);
+        if (!compatibleFallback)
+            compatibleFallback = &record;
+        if (fp32 && !compatibleFp32)
+            compatibleFp32 = &record;
+        if (!record.commercialApproved)
+            continue;
+        if (fp32)
+            return &record;
+        if (!approvedCompatible)
+            approvedCompatible = &record;
     }
+    if (approvedCompatible)
+        return approvedCompatible;
+    if (compatibleFp32)
+        return compatibleFp32;
+    if (compatibleFallback)
+        return compatibleFallback;
     return fallback;
 }
 

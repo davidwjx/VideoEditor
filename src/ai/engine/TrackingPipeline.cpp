@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonDocument>
+#include <QMap>
 #include <QSize>
 
 #include "Confidence.h"
@@ -35,6 +36,11 @@ struct TrackingPipeline::Impl {
     struct Anchor {
         int index = 0;
         BinaryMask mask;
+    };
+
+    struct PendingSample {
+        ConfidenceSample sample;
+        bool forcedFair = false;
     };
 
     void emitProgress(const TrackingRunCallbacks &callbacks, int frame,
@@ -194,6 +200,48 @@ struct TrackingPipeline::Impl {
         return anchors;
     }
 
+    // Fills the sample from DIS metrics and optionally refines with the
+    // tracker. Returns true when a failed refinement forced the sample to
+    // Fair (the caller must then preserve that state when reordering).
+    void refineOrFallback(int frameIndex, const QImage &image,
+                          QSize displaySize, BinaryMask &mask, int &area,
+                          bool flowOk, ConfidenceSample *sample,
+                          bool *forcedFair) const
+    {
+        if (forcedFair)
+            *forcedFair = false;
+        if (!tracker || (frameIndex % kRefineInterval) != 0)
+            return;
+        const TrackingPrompt prompt = Sam2Tracker::promptFromMask(mask);
+        if (prompt.points.isEmpty())
+            return;
+        QString segmentError;
+        const auto refined = tracker->segment(image, prompt, &segmentError);
+        bool plausible = false;
+        if (refined && refined->mask.isValid() && refined->areaPx > 0) {
+            const int framePixels = displaySize.width() * displaySize.height();
+            const float change = areaChangePercent(refined->areaPx, area);
+            plausible = refined->areaPx <= framePixels * 3 / 5
+                && change <= 60.0f;
+        }
+        if (plausible) {
+            mask = refined->mask;
+            area = refined->areaPx;
+            sample->predictedIou = refined->predictedIou;
+            sample->occlusion = refined->occlusion;
+            sample->areaPx = area;
+        } else if (flowOk) {
+            // Keep the propagated mask, force Fair so a failed refinement
+            // never reads as Good.
+            sample->predictedIou = 0.70f;
+            sample->occlusion = 0.0f;
+            sample->previousAreaPx = area;
+            sample->areaPx = area;
+            if (forcedFair)
+                *forcedFair = true;
+        }
+    }
+
     TrackingRunResult runCore(
         const AiJobSpec &spec, int totalFrames, QSize displaySize,
         const std::function<QImage(int, QString *)> &frameAt,
@@ -225,7 +273,8 @@ struct TrackingPipeline::Impl {
         };
 
         // Frames before the first keyframe copy the authored mask with Fair
-        // confidence (documented deviation: no backward propagation).
+        // confidence (documented deviation: no backward propagation before the
+        // first authored frame).
         const Anchor &first = anchors.first();
         const int firstArea = maskArea(first.mask);
         bool wasCancelled = false;
@@ -267,14 +316,18 @@ struct TrackingPipeline::Impl {
             emitProgress(callbacks, anchor.index, totalFrames, samples.size(),
                          clock);
 
-            const int end = (k + 1 < anchors.size())
-                ? anchors.at(k + 1).index
-                : totalFrames;
-            BinaryMask currentMask = anchor.mask;
-            int currentArea = anchorArea;
-            QImage previousImage;
+            const bool hasRightAnchor = (k + 1 < anchors.size());
+            const int rightIndex =
+                hasRightAnchor ? anchors.at(k + 1).index : totalFrames;
+            const int midpoint = hasRightAnchor
+                ? (anchor.index + rightIndex) / 2
+                : totalFrames - 1;
+
             QString frameError;
-            if (anchor.index + 1 < end) {
+            BinaryMask forwardMask = anchor.mask;
+            int forwardArea = anchorArea;
+            QImage previousImage;
+            if (midpoint > anchor.index) {
                 previousImage = frameAt(anchor.index, &frameError);
                 if (previousImage.isNull()) {
                     return fail(frameError.isEmpty()
@@ -283,7 +336,8 @@ struct TrackingPipeline::Impl {
                 }
             }
 
-            for (int i = anchor.index + 1; i < end; ++i) {
+            // Forward from the left anchored keyframe to the midpoint.
+            for (int i = anchor.index + 1; i <= midpoint; ++i) {
                 if (cancelled()) {
                     wasCancelled = true;
                     break;
@@ -296,12 +350,12 @@ struct TrackingPipeline::Impl {
                 }
 
                 const FlowPropagationResult flow = m_flow.propagate(
-                    previousImage, currentImage, currentMask);
-                BinaryMask mask = currentMask;
-                int area = currentArea;
+                    previousImage, currentImage, forwardMask);
+                BinaryMask mask = forwardMask;
+                int area = forwardArea;
                 ConfidenceSample sample;
                 sample.timeUs = spec.sourceInUs + framesToMicros(i, spec.fps);
-                sample.previousAreaPx = currentArea;
+                sample.previousAreaPx = forwardArea;
                 if (flow.ok) {
                     mask = flow.mask;
                     area = flow.areaPx;
@@ -314,51 +368,103 @@ struct TrackingPipeline::Impl {
                     sample.occlusion = 0.5f;
                 }
                 sample.areaPx = area;
-
-                if (tracker && (i % kRefineInterval) == 0) {
-                    const TrackingPrompt prompt =
-                        Sam2Tracker::promptFromMask(mask);
-                    if (!prompt.points.isEmpty()) {
-                        QString segmentError;
-                        const auto refined = tracker->segment(
-                            currentImage, prompt, &segmentError);
-                        bool plausible = false;
-                        if (refined && refined->mask.isValid()
-                            && refined->areaPx > 0) {
-                            const int framePixels =
-                                displaySize.width() * displaySize.height();
-                            const float change = areaChangePercent(
-                                refined->areaPx, area);
-                            plausible =
-                                refined->areaPx <= framePixels * 3 / 5
-                                && change <= 60.0f;
-                        }
-                        if (plausible) {
-                            mask = refined->mask;
-                            area = refined->areaPx;
-                            sample.predictedIou = refined->predictedIou;
-                            sample.occlusion = refined->occlusion;
-                            sample.areaPx = area;
-                        } else if (flow.ok) {
-                            // Keep the propagated mask, force Fair so a failed
-                            // refinement never reads as Good.
-                            sample.predictedIou = 0.70f;
-                            sample.occlusion = 0.0f;
-                            sample.previousAreaPx = area;
-                            sample.areaPx = area;
-                        }
-                    }
-                }
+                bool forcedFair = false;
+                refineOrFallback(i, currentImage, displaySize, mask, area,
+                                 flow.ok, &sample, &forcedFair);
 
                 if (!writeMask(spec, i, mask, &result.error))
                     return fail(result.error);
                 samples.append(sample);
                 emitProgress(callbacks, i, totalFrames, samples.size(), clock);
 
-                currentMask = std::move(mask);
-                currentArea = area;
+                forwardMask = std::move(mask);
+                forwardArea = area;
                 previousImage = currentImage;
             }
+            if (wasCancelled)
+                break;
+
+            // Backward from the right anchored keyframe to midpoint+1. This
+            // keeps drift bounded when the object moves both ways between
+            // authored keyframes.
+            if (!hasRightAnchor || rightIndex - 1 <= midpoint)
+                continue;
+
+            BinaryMask backwardMask = anchors.at(k + 1).mask;
+            int backwardArea = maskArea(backwardMask);
+            QImage sourceImage = frameAt(rightIndex, &frameError);
+            if (sourceImage.isNull()) {
+                return fail(frameError.isEmpty()
+                                ? QStringLiteral("读取跟踪帧失败。")
+                                : frameError);
+            }
+            QMap<int, PendingSample> pending;
+            for (int i = rightIndex - 1; i > midpoint; --i) {
+                if (cancelled()) {
+                    wasCancelled = true;
+                    break;
+                }
+                QImage previousFrame = frameAt(i, &frameError);
+                if (previousFrame.isNull()) {
+                    return fail(frameError.isEmpty()
+                                    ? QStringLiteral("读取跟踪帧失败。")
+                                    : frameError);
+                }
+
+                const FlowPropagationResult flow = m_flow.propagateBackward(
+                    previousFrame, sourceImage, backwardMask);
+                BinaryMask mask = backwardMask;
+                int area = backwardArea;
+                ConfidenceSample sample;
+                sample.timeUs = spec.sourceInUs + framesToMicros(i, spec.fps);
+                sample.previousAreaPx = backwardArea;
+                if (flow.ok) {
+                    mask = flow.mask;
+                    area = flow.areaPx;
+                    sample.predictedIou = std::clamp(
+                        1.0f - flow.areaChangePercent / 200.0f, 0.0f, 1.0f);
+                    sample.occlusion =
+                        std::clamp(flow.meanFlowPx / 50.0f, 0.0f, 1.0f);
+                } else {
+                    sample.predictedIou = 0.0f;
+                    sample.occlusion = 0.5f;
+                }
+                sample.areaPx = area;
+                bool forcedFair = false;
+                refineOrFallback(i, previousFrame, displaySize, mask, area,
+                                 flow.ok, &sample, &forcedFair);
+
+                if (!writeMask(spec, i, mask, &result.error))
+                    return fail(result.error);
+                pending.insert(i, PendingSample{sample, forcedFair});
+
+                backwardMask = std::move(mask);
+                backwardArea = area;
+                sourceImage = previousFrame;
+            }
+            // Samples must stay in temporal order in the confidence JSON; the
+            // backward pass discovered them in reverse, so emit the pending
+            // entries ascending. A cancel mid-backward still preserves the
+            // masks already written and their confidence samples.
+            int previousTemporalArea = forwardArea;
+            bool firstPending = true;
+            for (auto it = pending.constBegin(); it != pending.constEnd();
+                 ++it) {
+                ConfidenceSample sample = it.value().sample;
+                if (firstPending && it.key() > midpoint + 1)
+                    previousTemporalArea = sample.areaPx;
+                firstPending = false;
+                if (!it.value().forcedFair)
+                    sample.previousAreaPx = previousTemporalArea;
+                samples.append(sample);
+                emitProgress(callbacks, it.key(), totalFrames, samples.size(),
+                             clock);
+                previousTemporalArea = sample.areaPx;
+            }
+            if (wasCancelled)
+                break;
+            if (pending.size() != rightIndex - midpoint - 1)
+                return fail(QStringLiteral("跟踪帧数不完整。"));
         }
 
         if (wasCancelled) {

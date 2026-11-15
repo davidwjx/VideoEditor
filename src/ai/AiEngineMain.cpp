@@ -41,25 +41,29 @@ using MessageSink = std::function<void(const QJsonObject &)>;
 // loop, so the pipeline can poll once per frame.
 class CommandPoller {
 public:
-    enum class Command { None, Cancel, Pause, Resume };
-
     explicit CommandPoller(QLocalSocket &socket)
         : m_socket(socket)
     {
     }
 
-    Command poll()
+    // Returns true when a cancel arrived. Pause/resume update `paused` in
+    // arrival order, so a pause+resume batch ends unpaused. Cancel always
+    // wins. Reading without an event loop needs an explicit wait: on Windows a
+    // named pipe may report 0 bytesAvailable() until the read is attempted.
+    bool poll(bool &paused)
     {
         if (m_socket.state() != QLocalSocket::ConnectedState)
-            return Command::Cancel;
+            return true;
+        if (m_socket.bytesAvailable() == 0)
+            m_socket.waitForReadyRead(1);
         if (m_socket.bytesAvailable() > 0)
             m_buffer.append(m_socket.readAll());
         if (m_buffer.size() > AiProtocol::kMaxLineBytes) {
             m_buffer.clear();
-            return Command::Cancel;
+            return true;
         }
 
-        Command result = Command::None;
+        bool cancel = false;
         int newline = -1;
         while ((newline = m_buffer.indexOf('\n')) >= 0) {
             const QByteArray line = m_buffer.left(newline);
@@ -69,15 +73,13 @@ public:
                 continue;
             const QString cmd = message.value(QStringLiteral("cmd")).toString();
             if (cmd == QLatin1String("cancel"))
-                result = Command::Cancel;
-            else if (cmd == QLatin1String("pause")
-                     && result != Command::Cancel)
-                result = Command::Pause;
-            else if (cmd == QLatin1String("resume")
-                     && result == Command::None)
-                result = Command::Resume;
+                cancel = true;
+            else if (cmd == QLatin1String("pause"))
+                paused = true;
+            else if (cmd == QLatin1String("resume"))
+                paused = false;
         }
-        return result;
+        return cancel;
     }
 
 private:
@@ -118,15 +120,39 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
         return modelUnavailable(
             QStringLiteral("无法加载模型清单：%1").arg(error));
     }
-    if (!registry->verifyFiles(&error)) {
-        return modelUnavailable(
-            QStringLiteral("模型文件校验失败：%1").arg(error));
-    }
+    const auto offlineCapable = [](const AiModelRecord &model) {
+        return model.files.contains(QStringLiteral("image_encoder"))
+            && model.files.contains(QStringLiteral("prompt_encoder"))
+            && model.files.contains(QStringLiteral("mask_decoder"));
+    };
 
     const AiModelRecord *record = registry->model(spec.trackingModelId);
     if (!record || !record->isTracking()) {
         return modelUnavailable(QStringLiteral("跟踪模型不可用：%1。")
                                     .arg(spec.trackingModelId));
+    }
+    if (!offlineCapable(*record)) {
+        // The manifest's first/default tracker is the SAM 2 bundle, which has
+        // no prompt_encoder. Fall back to the offline-capable default (fp32
+        // EfficientTAM) with a warning instead of failing the job.
+        const AiModelRecord *fallback = registry->defaultTrackingModel();
+        if (!fallback || fallback == record || !offlineCapable(*fallback)) {
+            return modelUnavailable(
+                QStringLiteral("跟踪模型 %1 缺少离线关键帧组件。")
+                    .arg(record->id));
+        }
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("warning")},
+            {QStringLiteral("message"),
+             QStringLiteral("请求的跟踪模型 %1 缺少离线关键帧组件，已改用 %2。")
+                 .arg(record->id, fallback->id)}});
+        record = fallback;
+    }
+
+    // Hash only the record the engine will load, not every manifest model.
+    if (!registry->verifyFiles({record->id}, &error)) {
+        return modelUnavailable(
+            QStringLiteral("模型文件校验失败：%1").arg(error));
     }
 
     TrackingConfig config;
@@ -165,18 +191,16 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
     TrackingRunCallbacks callbacks;
     callbacks.event = [&send](const QJsonObject &message) { send(message); };
     callbacks.cancel = [&]() -> bool {
-        while (true) {
-            const CommandPoller::Command command = poller.poll();
-            if (command == CommandPoller::Command::Cancel)
+        if (poller.poll(paused))
+            return true;
+        while (paused) {
+            if (poller.poll(paused))
                 return true;
-            if (command == CommandPoller::Command::Pause)
-                paused = true;
-            else if (command == CommandPoller::Command::Resume)
-                paused = false;
             if (!paused)
-                return false;
-            QThread::msleep(30);
+                break;
+            QThread::msleep(20);
         }
+        return false;
     };
 
     const TrackingRunResult result = pipeline.run(spec, callbacks);
@@ -184,7 +208,9 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
         send(QJsonObject{
             {QStringLiteral("event"), QStringLiteral("cancelled")},
             {QStringLiteral("completedFrames"), result.completedFrames},
-            {QStringLiteral("confidenceHash"), result.confidenceHash}});
+            {QStringLiteral("confidenceHash"), result.confidenceHash},
+            {QStringLiteral("trackingState"),
+             removalTrackingStateToString(result.state)}});
         return 0;
     }
     if (!result.ok) {

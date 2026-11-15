@@ -30,9 +30,16 @@ public:
     FlowPropagator(const FlowPropagator &) = delete;
     FlowPropagator &operator=(const FlowPropagator &) = delete;
 
+    // Warps previousMask (frame previous) forward onto `current`.
     FlowPropagationResult propagate(const QImage &previous,
                                     const QImage &current,
                                     const BinaryMask &previousMask);
+
+    // Warps currentMask (frame current) backward onto `previous`, using the
+    // previous->current flow and sampling the current mask at x+flow.
+    FlowPropagationResult propagateBackward(const QImage &previous,
+                                            const QImage &current,
+                                            const BinaryMask &currentMask);
 
 private:
     struct Impl;

@@ -197,6 +197,17 @@ void AiJobManager::handleMessage(const QJsonObject &message)
         result.cacheKey = m_cacheKey;
         result.completedFrames =
             message.value(QStringLiteral("completedFrames")).toInt();
+        result.confidenceHash =
+            message.value(QStringLiteral("confidenceHash")).toString();
+        const QJsonValue trackingValue =
+            message.value(QStringLiteral("trackingState"));
+        if (trackingValue.isString()) {
+            bool ok = false;
+            result.trackingState =
+                removalTrackingStateFromString(trackingValue.toString(), &ok);
+            if (!ok)
+                result.trackingState = RemovalTrackingState::Failed;
+        }
         result.errorCode = message.value(QStringLiteral("code")).toString();
         result.errorMessage =
             message.value(QStringLiteral("message")).toString();

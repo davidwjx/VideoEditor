@@ -18,6 +18,7 @@
 #include <QTemporaryDir>
 
 #include "ModelRegistry.h"
+#include "OnnxExecutor.h"
 #include "Sam2Tracker.h"
 #include "TimeBase.h"
 #include "TrackingPipeline.h"
@@ -140,6 +141,16 @@ AiJobSpec makeSpec(int frames, int width, int height)
 }
 
 bool fileExists(const QString &path) { return QFileInfo::exists(path); }
+
+QString sha256File(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return QString::fromLatin1(
+        QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256)
+            .toHex());
+}
 
 QString writeMaskSidecar(const QString &sidecarRoot, const BinaryMask &mask)
 {
@@ -311,6 +322,14 @@ TEST(TrackingPipeline, RunsOnFixtureVideoWithModel)
     ASSERT_EQ(maskHash.size(), 64);
     spec.maskKeyframes.append(
         MaskKeyframe{QStringLiteral("mk-1"), 0, maskHash, 4, 1});
+    // A second keyframe at frame 15 exercises the backward DIS pass from the
+    // right anchor back to the midpoint.
+    const QString secondHash = writeMaskSidecar(
+        spec.sidecarRoot, makeMask(QRect(220, 130, 120, 90), kWidth, kHeight));
+    ASSERT_EQ(secondHash.size(), 64);
+    spec.maskKeyframes.append(MaskKeyframe{QStringLiteral("mk-2"),
+                                           framesToMicros(15, spec.fps),
+                                           secondHash, 4, 1});
 
     TrackingPipeline pipeline;
     pipeline.setTracker(&tracker);
@@ -373,6 +392,62 @@ TEST(TrackingPipeline, CancelPreservesCompletedMasks)
     EXPECT_FALSE(fileExists(notWritten));
 }
 
+TEST(TrackingPipeline, CancelDuringBackwardPreservesSamples)
+{
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    constexpr int kFrames = 20;
+    constexpr int kSize = 128;
+    QList<QImage> frames;
+    for (int i = 0; i < kFrames; ++i)
+        frames.append(makeFrame(kSize, kSize, i * 2, i));
+
+    AiJobSpec spec = makeSpec(kFrames, kSize, kSize);
+    spec.cacheDir = temp.filePath(QStringLiteral("cache"));
+    spec.sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+
+    int polls = 0;
+    TrackingRunCallbacks callbacks;
+    callbacks.cancel = [&polls]() {
+        ++polls;
+        return polls > 8;
+    };
+
+    TrackingPipeline pipeline;
+    const TrackingRunResult result =
+        pipeline.runFrames(spec, frames, {0, 10},
+                           {makeMask(objectRect(0, 0), kSize, kSize),
+                            makeMask(objectRect(20, 10), kSize, kSize)},
+                           callbacks);
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_EQ(result.state, RemovalTrackingState::Partial);
+    // Masks written before the cancel must match the confidence samples.
+    int maskFiles = 0;
+    for (int i = 0; i < kFrames; ++i) {
+        const QString path = QDir(spec.cacheDir)
+                                 .filePath(QStringLiteral(
+                                     "tracking/masks/frame_%1.rle")
+                                               .arg(i, 6, 10, QLatin1Char('0')));
+        if (fileExists(path))
+            ++maskFiles;
+    }
+    EXPECT_EQ(maskFiles, result.completedFrames);
+    ASSERT_EQ(result.confidenceHash.size(), 64);
+    QFile confidenceFile(
+        QDir(spec.sidecarRoot)
+            .filePath(QStringLiteral("tracking/%1.json")
+                          .arg(result.confidenceHash)));
+    ASSERT_TRUE(confidenceFile.open(QIODevice::ReadOnly));
+    const QJsonArray framesJson =
+        QJsonDocument::fromJson(confidenceFile.readAll())
+            .object()
+            .value(QStringLiteral("frames"))
+            .toArray();
+    EXPECT_EQ(framesJson.size(), result.completedFrames);
+}
+
 TEST(TrackingPipeline, RunsWithoutModelBetweenKeyframes)
 {
     QTemporaryDir temp;
@@ -387,20 +462,93 @@ TEST(TrackingPipeline, RunsWithoutModelBetweenKeyframes)
     spec.cacheDir = temp.filePath(QStringLiteral("cache"));
     spec.sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
 
+    QList<QJsonObject> events;
+    TrackingRunCallbacks callbacks;
+    callbacks.event = [&events](const QJsonObject &event) {
+        events.append(event);
+    };
+
     TrackingPipeline pipeline;
     QElapsedTimer clock;
     clock.start();
     const TrackingRunResult result =
         pipeline.runFrames(spec, frames, {0, 6},
                            {makeMask(objectRect(0, 0), kSize, kSize),
-                            makeMask(objectRect(12, 6), kSize, kSize)});
+                            makeMask(objectRect(12, 6), kSize, kSize)},
+                           callbacks);
     std::cout << "DIS-only 12-frame pipeline: " << clock.elapsed() << " ms"
               << std::endl;
 
     ASSERT_TRUE(result.ok) << result.error.toStdString();
     EXPECT_EQ(result.completedFrames, kFrames);
-    EXPECT_NE(result.state, RemovalTrackingState::Failed);
+    EXPECT_EQ(result.state, RemovalTrackingState::Complete);
+
+    int progressCount = 0;
+    int chunkDoneCount = 0;
+    for (const QJsonObject &event : events) {
+        const QString name = event.value(QStringLiteral("event")).toString();
+        if (name == QLatin1String("progress"))
+            ++progressCount;
+        if (name == QLatin1String("chunkDone")) {
+            ++chunkDoneCount;
+            EXPECT_EQ(event.value(QStringLiteral("completedFrames")).toInt(),
+                      kFrames);
+        }
+    }
+    EXPECT_EQ(progressCount, kFrames);
+    EXPECT_EQ(chunkDoneCount, 1);
+
     ASSERT_EQ(result.confidenceHash.size(), 64);
+    const QString confidencePath =
+        QDir(spec.sidecarRoot)
+            .filePath(QStringLiteral("tracking/%1.json")
+                          .arg(result.confidenceHash));
+    ASSERT_TRUE(fileExists(confidencePath));
+    // The hash must be over the exact file bytes.
+    EXPECT_EQ(sha256File(confidencePath), result.confidenceHash);
+
+    QFile confidenceFile(confidencePath);
+    ASSERT_TRUE(confidenceFile.open(QIODevice::ReadOnly));
+    const QJsonArray framesJson =
+        QJsonDocument::fromJson(confidenceFile.readAll())
+            .object()
+            .value(QStringLiteral("frames"))
+            .toArray();
+    ASSERT_EQ(framesJson.size(), kFrames);
+    for (int i = 0; i < framesJson.size(); ++i) {
+        EXPECT_EQ(framesJson.at(i)
+                      .toObject()
+                      .value(QStringLiteral("timeUs"))
+                      .toInt(),
+                  spec.sourceInUs + framesToMicros(i, spec.fps));
+    }
+}
+
+TEST(TrackingPipeline, EmptyKeyframeYieldsLowConfidence)
+{
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    constexpr int kFrames = 8;
+    constexpr int kSize = 128;
+    QList<QImage> frames;
+    for (int i = 0; i < kFrames; ++i)
+        frames.append(makeFrame(kSize, kSize, 0, 0));
+
+    AiJobSpec spec = makeSpec(kFrames, kSize, kSize);
+    spec.cacheDir = temp.filePath(QStringLiteral("cache"));
+    spec.sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+
+    BinaryMask empty;
+    empty.width = kSize;
+    empty.height = kSize;
+    empty.bits.assign(size_t(kSize) * kSize, 0);
+
+    TrackingPipeline pipeline;
+    const TrackingRunResult result =
+        pipeline.runFrames(spec, frames, {0}, {empty});
+    ASSERT_TRUE(result.ok) << result.error.toStdString();
+    EXPECT_EQ(result.completedFrames, kFrames);
+    EXPECT_EQ(result.state, RemovalTrackingState::LowConfidence);
 }
 
 TEST(TrackingPipeline, RejectsKeyframeOutsideRange)
@@ -416,6 +564,27 @@ TEST(TrackingPipeline, RejectsKeyframeOutsideRange)
     EXPECT_FALSE(result.ok);
     EXPECT_NE(result.error.indexOf(QStringLiteral("跟踪区间")), -1)
         << result.error.toStdString();
+}
+
+TEST(OnnxExecutor, RejectsWhenNoExecutionProviderAllowed)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    const QString modelPath =
+        modelsDir + QStringLiteral(
+                        "/efficienttam_ti_512_fp32/prompt_encoder.onnx");
+    if (modelsDir.isEmpty() || !QFileInfo::exists(modelPath))
+        GTEST_SKIP() << "EfficientTAM prompt_encoder.onnx is unavailable";
+
+    OnnxExecutor executor;
+    EpConfig config;
+    config.allowDml = false;
+    config.allowCpu = false;
+    QString error;
+    EXPECT_FALSE(executor.initialize(
+        {QStringLiteral("prompt_encoder")},
+        {{QStringLiteral("prompt_encoder"), modelPath}}, config, &error));
+    EXPECT_NE(error.indexOf(QStringLiteral("执行提供程序")), -1)
+        << error.toStdString();
 }
 
 #endif // VIDEOEDITOR_HAVE_ORT

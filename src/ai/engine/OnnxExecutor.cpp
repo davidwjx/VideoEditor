@@ -34,9 +34,17 @@ struct OnnxExecutor::Impl {
 
     std::unique_ptr<Ort::Env> env;
     std::map<QString, SessionEntry> sessions;
-    QString provider = QStringLiteral("cpu");
+    QString envError;
     bool cpuFallback = false;
     QString cpuFallbackReason;
+    bool hasSessions = false;
+    bool allSessionsDml = true;
+
+    QString provider() const
+    {
+        return hasSessions && allSessionsDml ? QStringLiteral("dml")
+                                             : QStringLiteral("cpu");
+    }
 
     Ort::SessionOptions makeOptions(const EpConfig &config, bool enableDml,
                                     QString *dmlError)
@@ -51,6 +59,11 @@ struct OnnxExecutor::Impl {
 #ifdef _WIN32
         if (enableDml) {
             try {
+                // ORT 1.20 has no session provider query. With CPU fallback
+                // disabled, a successful session means the graph really runs
+                // on DirectML rather than silently spilling to CPU.
+                options.AddConfigEntry("session.disable_cpu_ep_fallback",
+                                       "1");
                 Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_DML(
                     options, config.deviceIndex));
             } catch (const std::exception &exception) {
@@ -72,23 +85,32 @@ struct OnnxExecutor::Impl {
                                          QString *usedProvider,
                                          QString *error)
     {
-        QString dmlError;
-        Ort::SessionOptions options = makeOptions(config, enableDml, &dmlError);
-        if (enableDml && !dmlError.isEmpty()) {
-            if (error)
-                *error = dmlError;
+        if (!env) {
+            if (error) {
+                *error = envError.isEmpty()
+                    ? QStringLiteral("ONNX Runtime 环境未初始化。")
+                    : envError;
+            }
             return nullptr;
         }
-#ifdef _WIN32
-        const std::wstring widePath = path.toStdWString();
-        const ORTCHAR_T *modelPath = widePath.c_str();
-#else
-        const QByteArray utf8 = path.toUtf8();
-        const char *modelPath = utf8.constData();
-#endif
+        QString dmlError;
         try {
-            auto session = std::make_unique<Ort::Session>(*env, modelPath,
-                                                          options);
+            Ort::SessionOptions options =
+                makeOptions(config, enableDml, &dmlError);
+            if (enableDml && !dmlError.isEmpty()) {
+                if (error)
+                    *error = dmlError;
+                return nullptr;
+            }
+#ifdef _WIN32
+            const std::wstring widePath = path.toStdWString();
+            const ORTCHAR_T *modelPath = widePath.c_str();
+#else
+            const QByteArray utf8 = path.toUtf8();
+            const char *modelPath = utf8.constData();
+#endif
+            auto session =
+                std::make_unique<Ort::Session>(*env, modelPath, options);
             if (usedProvider)
                 *usedProvider = enableDml ? QStringLiteral("dml")
                                           : QStringLiteral("cpu");
@@ -97,6 +119,10 @@ struct OnnxExecutor::Impl {
             if (error)
                 *error = ortError(exception);
             return nullptr;
+        } catch (const std::exception &exception) {
+            if (error)
+                *error = QString::fromUtf8(exception.what());
+            return nullptr;
         }
     }
 };
@@ -104,8 +130,13 @@ struct OnnxExecutor::Impl {
 OnnxExecutor::OnnxExecutor()
     : m_impl(std::make_unique<Impl>())
 {
-    m_impl->env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING,
-                                             "VideoEditorM4");
+    try {
+        m_impl->env = std::make_unique<Ort::Env>(
+            ORT_LOGGING_LEVEL_WARNING, "VideoEditorM4");
+    } catch (const std::exception &exception) {
+        m_impl->envError = QStringLiteral("无法初始化 ONNX Runtime：%1")
+                               .arg(QString::fromUtf8(exception.what()));
+    }
 }
 
 OnnxExecutor::~OnnxExecutor() = default;
@@ -139,12 +170,27 @@ bool OnnxExecutor::createSession(const QString &partName, const QString &path,
         return false;
     }
 
+    if (!config.allowDml && !config.allowCpu) {
+        if (error) {
+            *error = QStringLiteral("跟踪模型未启用任何执行提供程序。");
+        }
+        return false;
+    }
+
     bool useDml = config.allowDml;
     QString provider;
     QString sessionError;
     std::unique_ptr<Ort::Session> session =
         m_impl->create(path, config, useDml, &provider, &sessionError);
     if (!session && useDml) {
+        if (!config.allowCpu) {
+            if (error) {
+                *error = QStringLiteral("DirectML 会话创建失败且未允许 CPU "
+                                        "回退（%1）：%2")
+                             .arg(partName, sessionError);
+            }
+            return false;
+        }
         // Retry the same fp32 graph on CPU; DML failures are recoverable.
         m_impl->cpuFallback = true;
         m_impl->cpuFallbackReason =
@@ -167,26 +213,46 @@ bool OnnxExecutor::createSession(const QString &partName, const QString &path,
     }
 
     Impl::SessionEntry entry;
-    entry.provider = provider.isEmpty() ? QStringLiteral("cpu") : provider;
+    // `useDml` is only true when the DML session was created with CPU EP
+    // fallback disabled, so it reflects the provider actually in use.
+    entry.provider = useDml ? QStringLiteral("dml") : QStringLiteral("cpu");
     entry.gpu = useDml;
     entry.session = std::move(session);
 
-    Ort::AllocatorWithDefaultOptions allocator;
-    const size_t inputCount = entry.session->GetInputCount();
-    entry.inputNames.reserve(inputCount);
-    for (size_t i = 0; i < inputCount; ++i) {
-        auto name = entry.session->GetInputNameAllocated(i, allocator);
-        entry.inputNames.emplace_back(name.get());
-    }
-    const size_t outputCount = entry.session->GetOutputCount();
-    entry.outputNames.reserve(outputCount);
-    for (size_t i = 0; i < outputCount; ++i) {
-        auto name = entry.session->GetOutputNameAllocated(i, allocator);
-        entry.outputNames.emplace_back(name.get());
+    try {
+        Ort::AllocatorWithDefaultOptions allocator;
+        const size_t inputCount = entry.session->GetInputCount();
+        entry.inputNames.reserve(inputCount);
+        for (size_t i = 0; i < inputCount; ++i) {
+            auto name = entry.session->GetInputNameAllocated(i, allocator);
+            entry.inputNames.emplace_back(name.get());
+        }
+        const size_t outputCount = entry.session->GetOutputCount();
+        entry.outputNames.reserve(outputCount);
+        for (size_t i = 0; i < outputCount; ++i) {
+            auto name = entry.session->GetOutputNameAllocated(i, allocator);
+            entry.outputNames.emplace_back(name.get());
+        }
+    } catch (const Ort::Exception &exception) {
+        if (error) {
+            *error = QStringLiteral("无法读取跟踪模型输入输出（%1）：%2")
+                         .arg(partName, ortError(exception));
+        }
+        return false;
+    } catch (const std::exception &exception) {
+        if (error) {
+            *error = QStringLiteral("无法读取跟踪模型输入输出（%1）：%2")
+                         .arg(partName, QString::fromUtf8(exception.what()));
+        }
+        return false;
     }
 
-    if (entry.provider == QLatin1String("dml"))
-        m_impl->provider = entry.provider;
+    if (!m_impl->hasSessions) {
+        m_impl->hasSessions = true;
+        m_impl->allSessionsDml = entry.gpu;
+    } else {
+        m_impl->allSessionsDml = m_impl->allSessionsDml && entry.gpu;
+    }
     m_impl->sessions[partName] = std::move(entry);
 
     if (error)
@@ -199,7 +265,7 @@ bool OnnxExecutor::hasSession(const QString &partName) const
     return m_impl->sessions.find(partName) != m_impl->sessions.end();
 }
 
-QString OnnxExecutor::provider() const { return m_impl->provider; }
+QString OnnxExecutor::provider() const { return m_impl->provider(); }
 
 bool OnnxExecutor::usingCpuFallback() const { return m_impl->cpuFallback; }
 

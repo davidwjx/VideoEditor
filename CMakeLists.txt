@@ -34,6 +34,31 @@ qt_standard_project_setup(REQUIRES 6.8)
 set(VIDEOEDITOR_ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime root")
 set(VIDEOEDITOR_OPENCV_ROOT "" CACHE PATH "OpenCV root")
 
+set(VIDEOEDITOR_AI_OPENCV_DLLS
+  opencv_core320 opencv_imgproc320 opencv_video320 opencv_optflow320
+  opencv_ximgproc320 opencv_flann320 opencv_videoio320 opencv_imgcodecs320
+  opencv_calib3d320 opencv_features2d320)
+
+if(VIDEOEDITOR_ONNXRUNTIME_ROOT
+   AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h"
+   AND NOT EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/bin/onnxruntime.dll")
+  # Windows resolves System32/onnxruntime.dll (1.17.1) before PATH, so a
+  # header-only root is useless: build without ORT instead.
+  message(STATUS "onnxruntime headers found but bin/onnxruntime.dll is "
+                 "missing; building without ORT.")
+endif()
+if(VIDEOEDITOR_OPENCV_ROOT
+   AND EXISTS "${VIDEOEDITOR_OPENCV_ROOT}/include/opencv2/optflow.hpp")
+  foreach(_ai_dll IN LISTS VIDEOEDITOR_AI_OPENCV_DLLS)
+    if(NOT EXISTS "${VIDEOEDITOR_OPENCV_ROOT}/bin/${_ai_dll}.dll")
+      message(FATAL_ERROR
+        "VIDEOEDITOR_OPENCV_ROOT is missing bin/${_ai_dll}.dll. DIS and the "
+        "AI tests need the OpenCV runtime DLL closure; install the full "
+        "opencv.win.native.redist package or unset VIDEOEDITOR_OPENCV_ROOT.")
+    endif()
+  endforeach()
+endif()
+
 # ONNX Runtime 1.20 and the OpenCV DLLs must sit next to every executable that
 # loads them: the Windows System32 onnxruntime.dll (1.17.1) otherwise wins.
 function(videoeditor_copy_ai_runtime target)
@@ -51,16 +76,11 @@ function(videoeditor_copy_ai_runtime target)
      AND EXISTS "${VIDEOEDITOR_OPENCV_ROOT}/bin")
     # optflow pulls in ximgproc/flann/videoio/imgcodecs/calib3d/features2d;
     # copy the whole closure next to each executable.
-    foreach(_ai_dll opencv_core320 opencv_imgproc320 opencv_video320
-                     opencv_optflow320 opencv_ximgproc320 opencv_flann320
-                     opencv_videoio320 opencv_imgcodecs320 opencv_calib3d320
-                     opencv_features2d320)
-      if(EXISTS "${VIDEOEDITOR_OPENCV_ROOT}/bin/${_ai_dll}.dll")
-        add_custom_command(TARGET ${target} POST_BUILD
-          COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                  "${VIDEOEDITOR_OPENCV_ROOT}/bin/${_ai_dll}.dll"
-                  "$<TARGET_FILE_DIR:${target}>")
-      endif()
+    foreach(_ai_dll IN LISTS VIDEOEDITOR_AI_OPENCV_DLLS)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${VIDEOEDITOR_OPENCV_ROOT}/bin/${_ai_dll}.dll"
+                "$<TARGET_FILE_DIR:${target}>")
     endforeach()
   endif()
 endfunction()

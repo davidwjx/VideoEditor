@@ -150,15 +150,18 @@ gtest_discover_tests(app_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_M
 # reading and the EfficientTAM-keyframe pipeline. Model-dependent cases skip
 # unless VIDEOEDITOR_M4_MODELS points at an installed manifest.
 add_executable(ai_tests
+  ai/AiEngineEndToEndTest.cpp
+  ai/AiProtocolTest.cpp
   ai/ConfidenceTest.cpp
   ai/FrameReaderTest.cpp
   ai/FlowPropagatorTest.cpp
+  ai/ModelRegistryTest.cpp
   ai/TrackingPipelineTest.cpp
   TestGuiMain.cpp)
 target_include_directories(ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ai_tests PRIVATE
   videoeditor_ai videoeditor_media videoeditor_core
-  GTest::gtest Qt6::Core Qt6::Gui)
+  GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(ai_tests PRIVATE
   VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 videoeditor_copy_ai_runtime(ai_tests)

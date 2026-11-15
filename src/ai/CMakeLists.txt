@@ -47,7 +47,8 @@ if(VIDEOEDITOR_ENABLE_AI)
   if(VIDEOEDITOR_AI_HAVE_OPENCV
      AND VIDEOEDITOR_ONNXRUNTIME_ROOT
      AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h"
-     AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/lib/onnxruntime.lib")
+     AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/lib/onnxruntime.lib"
+     AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/bin/onnxruntime.dll")
     set(VIDEOEDITOR_AI_HAVE_ORT ON)
     # Only the Task 5 engine sources are compiled here; Tasks 6's inpainting
     # and stabilization files do not exist yet.

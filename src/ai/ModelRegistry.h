@@ -52,7 +52,11 @@ public:
     static ModelRegistry forTest(const ModelManifest &manifest,
                                  const QString &rootDir = {});
 
+    // Hashes every model file; used by the feature gate.
     bool verifyFiles(QString *error = nullptr) const;
+    // Hashes only the requested model ids; used by the engine so a technical
+    // run only needs the files it will actually load.
+    bool verifyFiles(const QStringList &ids, QString *error = nullptr) const;
     bool featureEnabled(QString *reason = nullptr) const;
     const AiModelRecord *model(const QString &id) const;
     // Returns the record only when it is commercially approved, so engine

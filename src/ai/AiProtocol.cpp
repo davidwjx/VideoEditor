@@ -377,7 +377,9 @@ bool AiProtocol::validateJobSpec(const AiJobSpec &spec, QString *error)
         return fail(QStringLiteral("modelsManifestPath 为空。"));
     if (spec.trackingModelId.isEmpty())
         return fail(QStringLiteral("trackingModelId 为空。"));
-    if (spec.inpaintModelId.isEmpty())
+    // Tracking-only jobs never load an inpaint model; only repair jobs need
+    // the id to be present.
+    if (!spec.trackingOnly && spec.inpaintModelId.isEmpty())
         return fail(QStringLiteral("inpaintModelId 为空。"));
     // Beyond 2^53 a JSON double can no longer round-trip an int64 exactly;
     // reject here so the manager reports a parameter error instead of the

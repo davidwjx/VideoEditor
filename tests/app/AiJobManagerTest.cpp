@@ -1035,6 +1035,38 @@ TEST(AiJobManager, CancelYieldsCancelledResult)
     EXPECT_TRUE(result.cancelled);
 }
 
+TEST(AiJobManager, CancelledEventCarriesTrackingState)
+{
+    AiFeatureGate gate;
+    gate.setEnabledForTest(true);
+    AiJobManager manager(gate);
+    FakeTransport *raw = nullptr;
+    manager.setTransportFactoryForTest([&raw] {
+        auto transport =
+            std::make_unique<FakeTransport>(FakeTransport::Mode::Silent);
+        raw = transport.get();
+        return std::unique_ptr<AiTransport>(transport.release());
+    });
+    QSignalSpy finished(&manager, &AiJobManager::jobFinished);
+    QString error;
+    ASSERT_TRUE(manager.start(makeSpec(), &error)) << error.toStdString();
+    ASSERT_NE(raw, nullptr);
+    const QString confidenceHash(64, QLatin1Char('d'));
+    raw->emitMessage(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("cancelled")},
+        {QStringLiteral("completedFrames"), 4},
+        {QStringLiteral("confidenceHash"), confidenceHash},
+        {QStringLiteral("trackingState"), QStringLiteral("partial")}});
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 2000);
+    const AiJobResult result =
+        qvariant_cast<AiJobResult>(finished.at(0).at(0));
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_EQ(result.completedFrames, 4);
+    EXPECT_EQ(result.confidenceHash, confidenceHash);
+    EXPECT_EQ(result.trackingState, RemovalTrackingState::Partial);
+}
+
 TEST(AiJobManager, CrashExitYieldsCrashError)
 {
     AiFeatureGate gate;

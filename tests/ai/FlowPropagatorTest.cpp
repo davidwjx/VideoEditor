@@ -102,6 +102,25 @@ TEST(FlowPropagator, TracksMovingRectangle)
     EXPECT_GE(maskIou(result.mask, groundTruth), 0.8);
 }
 
+TEST(FlowPropagator, PropagatesBackwardOppositeToForward)
+{
+    constexpr int kSize = 128;
+    const QImage first = makeFrame(0, 0);
+    const QImage second = makeFrame(8, 6);
+    const BinaryMask secondMask =
+        makeMask(objectRect(kSize, kSize, 8, 6), kSize, kSize);
+    const BinaryMask groundTruth =
+        makeMask(objectRect(kSize, kSize, 0, 0), kSize, kSize);
+
+    FlowPropagator propagator;
+    const FlowPropagationResult result =
+        propagator.propagateBackward(first, second, secondMask);
+    ASSERT_TRUE(result.ok) << result.error.toStdString();
+    EXPECT_GE(maskIou(result.mask, groundTruth), 0.8);
+    // It must have moved back, not stayed at the current-frame position.
+    EXPECT_LT(maskIou(result.mask, secondMask), 0.9);
+}
+
 TEST(FlowPropagator, StillObjectKeepsMask)
 {
     constexpr int kSize = 128;

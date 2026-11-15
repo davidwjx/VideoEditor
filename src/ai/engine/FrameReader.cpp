@@ -60,6 +60,7 @@ struct FrameReader::Impl {
     AVFormatContext *format = nullptr;
     AVCodecContext *codec = nullptr;
     AVPacket *packet = nullptr;
+    AVPacket *pendingPacket = nullptr;
     AVFrame *frame = nullptr;
     SwsContext *scaler = nullptr;
     int scalerWidth = 0;
@@ -87,6 +88,8 @@ struct FrameReader::Impl {
         scaler = nullptr;
         if (frame)
             av_frame_free(&frame);
+        if (pendingPacket)
+            av_packet_free(&pendingPacket);
         if (packet)
             av_packet_free(&packet);
         if (codec)
@@ -113,6 +116,8 @@ struct FrameReader::Impl {
     {
         if (discardBeforeUs >= 0)
             discardBeforeUs = -1;
+        if (pendingPacket)
+            av_packet_free(&pendingPacket);
         const int64_t timestamp =
             av_rescale_q(ptsUs, AV_TIME_BASE_Q,
                          format->streams[videoStream]->time_base);
@@ -130,6 +135,7 @@ struct FrameReader::Impl {
 
     bool decodeRaw()
     {
+        int stalledRetries = 0;
         while (true) {
             const int ret = avcodec_receive_frame(codec, frame);
             if (ret == 0)
@@ -142,6 +148,29 @@ struct FrameReader::Impl {
                 setError(QStringLiteral("视频解码失败：%1").arg(ffmpegError(ret)));
                 return false;
             }
+
+            // A packet rejected with EAGAIN must be retried after draining the
+            // decoder, never dropped. Keep it across decodeRaw() calls.
+            if (pendingPacket) {
+                const int sendRet = avcodec_send_packet(codec, pendingPacket);
+                if (sendRet == 0) {
+                    av_packet_free(&pendingPacket);
+                    stalledRetries = 0;
+                    continue;
+                }
+                if (sendRet == AVERROR(EAGAIN)) {
+                    if (++stalledRetries > 1000) {
+                        setError(QStringLiteral("视频解码器停滞，无法发送"
+                                                "待处理视频包。"));
+                        return false;
+                    }
+                    continue;
+                }
+                setError(QStringLiteral("发送视频包失败：%1")
+                             .arg(ffmpegError(sendRet)));
+                return false;
+            }
+            stalledRetries = 0;
 
             const int readRet = av_read_frame(format, packet);
             if (readRet == AVERROR_EOF) {
@@ -160,8 +189,19 @@ struct FrameReader::Impl {
             }
             if (packet->stream_index == videoStream) {
                 const int sendRet = avcodec_send_packet(codec, packet);
-                av_packet_unref(packet);
-                if (sendRet < 0 && sendRet != AVERROR(EAGAIN)) {
+                if (sendRet == 0) {
+                    av_packet_unref(packet);
+                } else if (sendRet == AVERROR(EAGAIN)) {
+                    if (!pendingPacket)
+                        pendingPacket = av_packet_alloc();
+                    if (!pendingPacket) {
+                        av_packet_unref(packet);
+                        setError(QStringLiteral("无法分配待发送视频包。"));
+                        return false;
+                    }
+                    av_packet_move_ref(pendingPacket, packet);
+                } else {
+                    av_packet_unref(packet);
                     setError(QStringLiteral("发送视频包失败：%1")
                                  .arg(ffmpegError(sendRet)));
                     return false;
@@ -283,19 +323,15 @@ bool FrameReader::open(const QString &path, Rational fps, int64_t sourceInUs,
             *error = impl.lastError;
         return false;
     }
-    const int count = int(microsToFrames(sourceOutUs - sourceInUs, fps));
-    if (count <= 0) {
-        impl.setError(QStringLiteral("视频时间范围不足一帧。"));
+    if (sourceInUs < 0) {
+        impl.setError(QStringLiteral("视频起始时间无效。"));
         if (error)
             *error = impl.lastError;
         return false;
     }
 
     impl.fps = fps;
-    impl.sourceInUs = sourceInUs;
-    impl.sourceOutUs = sourceOutUs;
     impl.displaySize = displaySize;
-    impl.frameCount = count;
 
     const QByteArray utf8Path = path.toUtf8();
     int ret = avformat_open_input(&impl.format, utf8Path.constData(), nullptr,
@@ -322,6 +358,7 @@ bool FrameReader::open(const QString &path, Rational fps, int64_t sourceInUs,
                                            -1, nullptr, 0);
     if (impl.videoStream < 0) {
         impl.setError(QStringLiteral("文件不包含视频流。"));
+        close();
         if (error)
             *error = impl.lastError;
         return false;
@@ -329,9 +366,93 @@ bool FrameReader::open(const QString &path, Rational fps, int64_t sourceInUs,
     AVStream *stream = impl.format->streams[impl.videoStream];
     impl.rotation = rotationFromStream(stream);
 
+    const auto validRate = [](AVRational rate) {
+        return rate.num > 0 && rate.den > 0;
+    };
+    const AVRational averageRate = stream->avg_frame_rate;
+    const AVRational nominalRate = stream->r_frame_rate;
+    if (validRate(averageRate) && validRate(nominalRate)) {
+        const double average = double(averageRate.num) / averageRate.den;
+        const double nominal = double(nominalRate.num) / nominalRate.den;
+        if (std::abs(average - nominal)
+            / std::max(average, nominal) > 0.01) {
+            impl.setError(QStringLiteral(
+                "视频为可变帧率（VFR），AI 跟踪暂不支持；请先转换为恒定"
+                "帧率视频。"));
+            close();
+            if (error)
+                *error = impl.lastError;
+            return false;
+        }
+    }
+    AVRational streamRate = validRate(averageRate) ? averageRate
+                                                   : nominalRate;
+    if (!validRate(streamRate))
+        streamRate = av_guess_frame_rate(impl.format, stream, nullptr);
+    if (validRate(streamRate)) {
+        const double streamFps = double(streamRate.num) / streamRate.den;
+        const double requestedFps = fps.toDouble();
+        if (std::abs(streamFps - requestedFps)
+            / std::max(streamFps, requestedFps) > 0.01) {
+            impl.setError(
+                QStringLiteral("视频帧率 %1 与跟踪帧率 %2 不一致；AI 跟踪"
+                               "暂不支持变帧率或帧率转换。")
+                    .arg(streamFps, 0, 'g', 4)
+                    .arg(requestedFps, 0, 'g', 4));
+            close();
+            if (error)
+                *error = impl.lastError;
+            return false;
+        }
+    }
+
+    // Clamp the requested range to the stream duration and frame count so a
+    // rounding error cannot request a frame the file does not contain.
+    int64_t streamDurationUs = 0;
+    if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
+        streamDurationUs = av_rescale_q(stream->duration, stream->time_base,
+                                        AV_TIME_BASE_Q);
+    } else if (impl.format->duration != AV_NOPTS_VALUE
+               && impl.format->duration > 0) {
+        streamDurationUs = impl.format->duration;
+    }
+    int64_t effectiveIn = sourceInUs;
+    int64_t effectiveOut = sourceOutUs;
+    if (streamDurationUs > 0) {
+        if (effectiveIn >= streamDurationUs) {
+            impl.setError(QStringLiteral("起始时间超出视频时长。"));
+            close();
+            if (error)
+                *error = impl.lastError;
+            return false;
+        }
+        effectiveOut = std::min(effectiveOut, streamDurationUs);
+    }
+    if (effectiveOut <= effectiveIn) {
+        impl.setError(QStringLiteral("视频时间范围不足一帧。"));
+        close();
+        if (error)
+            *error = impl.lastError;
+        return false;
+    }
+    int count = int(microsToFrames(effectiveOut - effectiveIn, fps));
+    if (stream->nb_frames > 0 && count > int(stream->nb_frames))
+        count = int(stream->nb_frames);
+    if (count <= 0) {
+        impl.setError(QStringLiteral("视频时间范围不足一帧。"));
+        close();
+        if (error)
+            *error = impl.lastError;
+        return false;
+    }
+    impl.sourceInUs = effectiveIn;
+    impl.sourceOutUs = effectiveOut;
+    impl.frameCount = count;
+
     const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
         impl.setError(QStringLiteral("FFmpeg 不支持该视频编码。"));
+        close();
         if (error)
             *error = impl.lastError;
         return false;
@@ -339,6 +460,7 @@ bool FrameReader::open(const QString &path, Rational fps, int64_t sourceInUs,
     impl.codec = avcodec_alloc_context3(codec);
     if (!impl.codec) {
         impl.setError(QStringLiteral("无法分配视频解码上下文。"));
+        close();
         if (error)
             *error = impl.lastError;
         return false;
@@ -489,7 +611,7 @@ QList<QImage> FrameReader::readAll(QString *error)
     for (int i = 0; i < frameCount(); ++i) {
         const QImage image = readFrame(i, error);
         if (image.isNull()) {
-            frames.clear();
+            // Preserve the valid prefix; the error is already populated.
             return frames;
         }
         frames.append(image);
