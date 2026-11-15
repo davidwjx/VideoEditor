@@ -12,6 +12,8 @@
 #include <QThread>
 #include <QUrl>
 
+#include <objbase.h>
+
 #include "ExportCheckpoint.h"
 #include "ExportWorker.h"
 #include "ProjectDocument.h"
@@ -98,9 +100,9 @@ ExportController::ExportController(ProjectDocument &document,
         m_presetsVariant.append(entry);
     }
 
-    // A deterministic software-only catalog until refreshCapabilities() probes
-    // the real hardware. The dialog re-probes every time it opens.
-    m_catalog = EncoderCatalog::withoutHardwareForTest();
+    // Empty until refreshCapabilities() probes the real encoders off the UI
+    // thread. Never seed production with the test-only software catalog.
+    m_catalog = EncoderCatalog{};
     m_outputPath = defaultOutputPath();
     applyPreset(QStringLiteral("match"));
 
@@ -125,6 +127,10 @@ ExportController::~ExportController()
         m_thread = nullptr;
         m_worker = nullptr;
     }
+    // detectEncoders() can still be running; join before the object dies so
+    // its completion callback can never touch a dangling controller.
+    if (m_detectThread.joinable())
+        m_detectThread.join();
 }
 
 QString ExportController::defaultOutputPath() const
@@ -205,6 +211,7 @@ void ExportController::applyPreset(const QString &id)
     emit fpsDenChanged();
     emit qualityChanged();
     emit bitrateKbpsChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -230,10 +237,16 @@ QString ExportController::validate() const
     return {};
 }
 
-bool ExportController::canResume() const
+bool ExportController::hasResumableCheckpoint() const
 {
     if (m_running || m_outputPath.isEmpty())
         return false;
+    // A stat on an unreachable network share can block for many seconds; the
+    // resume hint is a convenience, never worth freezing the dialog.
+    if (m_outputPath.startsWith(QStringLiteral("//"))
+        || m_outputPath.startsWith(QStringLiteral("\\\\"))) {
+        return false;
+    }
     const QString checkpointPath =
         QDir(partsDirectoryFor(m_outputPath))
             .filePath(QStringLiteral("checkpoint.json"));
@@ -244,6 +257,25 @@ bool ExportController::canResume() const
         return false;
     return checkpoint->projectHash
            == exportProjectHash(m_document.project(), currentSettings());
+}
+
+void ExportController::refreshResumeState()
+{
+    const bool resume = hasResumableCheckpoint();
+    if (resume != m_canResume) {
+        m_canResume = resume;
+        emit canResumeChanged();
+    }
+}
+
+void ExportController::invalidateResumeState()
+{
+    // Every export setting participates in the checkpoint hash, so a setting
+    // change can never resume the old parts. Avoid hashing on every keystroke.
+    if (!m_canResume)
+        return;
+    m_canResume = false;
+    emit canResumeChanged();
 }
 
 void ExportController::refreshValidation()
@@ -275,12 +307,6 @@ void ExportController::refreshValidation()
         emit h265UnavailableReasonChanged();
     }
 
-    const bool resume = canResume();
-    if (resume != m_canResume) {
-        m_canResume = resume;
-        emit canResumeChanged();
-    }
-
     const QString encoderId = m_catalog.selectEncoder(
         m_codec, m_hardwarePreferred, nullptr, nullptr);
     const QString encoderName =
@@ -291,31 +317,75 @@ void ExportController::refreshValidation()
     }
 }
 
-QString ExportController::displayNameForEncoder(const QString &encoderId) const
+QString ExportController::displayNameForEncoder(const QString &encoderKey) const
 {
+    // Finished exports report EncoderDescriptor::key() ("h264_mf@sw"); accept
+    // that, a bare FFmpeg id, or an already-friendly name.
+    if (const EncoderDescriptor *encoder = m_catalog.findByKey(encoderKey))
+        return encoder->displayName;
     for (const EncoderDescriptor &encoder : m_catalog.encoders) {
-        if (encoder.id == encoderId && encoder.available)
+        if (encoder.id == encoderKey && encoder.available)
             return encoder.displayName;
     }
-    return encoderId;
+    return encoderKey;
 }
 
 void ExportController::refreshCapabilities()
 {
-    // Opened from the dialog: give the default file name a fresh timestamp
-    // unless the user chose a path or the old path has resumable parts.
-    if (!m_outputPathEdited && !m_running && !canResume()) {
-        const QString suggestion = defaultOutputPath();
-        if (suggestion != m_outputPath) {
-            m_outputPath = suggestion;
-            emit outputPathChanged();
+    refreshResumeState();
+
+    // Opened from the dialog: clear a finished run's bar and give the default
+    // file name a fresh timestamp unless the user chose a path or the old path
+    // still has resumable parts.
+    if (!m_running) {
+        if (m_progress != 0.0) {
+            m_progress = 0.0;
+            emit progressChanged();
+        }
+        if (!m_outputPathEdited && !m_canResume) {
+            const QString suggestion = defaultOutputPath();
+            if (suggestion != m_outputPath) {
+                m_outputPath = suggestion;
+                emit outputPathChanged();
+            }
         }
     }
-    if (!m_catalogInjected) {
-        m_catalog = detectEncoders(m_width, m_height,
-                                   Rational{m_fpsNum, m_fpsDen});
+
+    if (m_catalogInjected) {
+        refreshValidation();
+        return;
     }
-    refreshValidation();
+    if (m_detectRunning)
+        return;
+
+    // Encoder probing opens every candidate; keep it off the UI thread. The
+    // completion event is posted back to this object, so a destroyed
+    // controller never receives a stale catalog (the destructor joins).
+    if (m_detectThread.joinable())
+        m_detectThread.join();
+    m_detectRunning = true;
+    const int width = m_width;
+    const int height = m_height;
+    const int fpsNum = m_fpsNum;
+    const int fpsDen = m_fpsDen;
+    m_detectThread = std::thread([this, width, height, fpsNum, fpsDen] {
+        // Media Foundation / AMF probing needs COM on this worker thread;
+        // the UI thread's Qt-initialized apartment is not available here.
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        EncoderCatalog catalog = detectEncoders(
+            width, height, Rational{fpsNum, fpsDen});
+        if (SUCCEEDED(com))
+            CoUninitialize();
+        QMetaObject::invokeMethod(
+            this,
+            [this, catalog] {
+                m_catalog = catalog;
+                m_detectRunning = false;
+                refreshValidation();
+                refreshResumeState();
+            },
+            Qt::QueuedConnection);
+    });
 }
 
 void ExportController::startExport()
@@ -329,7 +399,9 @@ void ExportController::startExport()
         return;
     }
 
-    const bool resume = m_resumeRequested || canResume();
+    // Only the explicit "继续上次导出" action resumes; a plain start on the
+    // same output intentionally begins a new export.
+    const bool resume = m_resumeRequested;
     m_resumeRequested = false;
 
     setErrorText(QString());
@@ -471,6 +543,7 @@ void ExportController::finishWith(const ExportResult &result)
 
     cleanupThread();
     refreshValidation();
+    refreshResumeState();
 
     const QString message =
         result.ok ? m_statusText
@@ -526,9 +599,13 @@ void ExportController::setPresetId(const QString &id)
 {
     if (id == m_presetId)
         return;
-    m_presetId = id;
-    emit presetIdChanged();
-    refreshValidation();
+    // Writing presetId behaves like choosing that preset; unknown ids are
+    // ignored so the visual preset and the encoded settings never diverge.
+    const auto it = std::find_if(
+        m_presets.cbegin(), m_presets.cend(),
+        [&id](const ExportPreset &preset) { return preset.id == id; });
+    if (it != m_presets.cend())
+        applyPreset(id);
 }
 
 void ExportController::setCodec(const QString &codec)
@@ -538,6 +615,7 @@ void ExportController::setCodec(const QString &codec)
         return;
     m_codec = parsed;
     emit codecChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -547,6 +625,7 @@ void ExportController::setWidth(int width)
         return;
     m_width = width;
     emit widthChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -556,6 +635,7 @@ void ExportController::setHeight(int height)
         return;
     m_height = height;
     emit heightChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -565,6 +645,7 @@ void ExportController::setFpsNum(int fpsNum)
         return;
     m_fpsNum = fpsNum;
     emit fpsNumChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -574,6 +655,7 @@ void ExportController::setFpsDen(int fpsDen)
         return;
     m_fpsDen = fpsDen;
     emit fpsDenChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -591,6 +673,7 @@ void ExportController::setQuality(int quality)
         emit bitrateKbpsChanged();
     }
     emit qualityChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -601,6 +684,7 @@ void ExportController::setBitrateKbps(int kbps)
     m_bitrateKbps = kbps;
     m_qualityMode = false;
     emit bitrateKbpsChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -610,6 +694,7 @@ void ExportController::setHardwarePreferred(bool preferred)
         return;
     m_hardwarePreferred = preferred;
     emit hardwarePreferredChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -619,6 +704,7 @@ void ExportController::setBurnSubtitles(bool enabled)
         return;
     m_burnSubtitles = enabled;
     emit burnSubtitlesChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -628,6 +714,7 @@ void ExportController::setWriteSrt(bool enabled)
         return;
     m_writeSrt = enabled;
     emit writeSrtChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -637,14 +724,23 @@ void ExportController::setOutputPath(const QString &path)
     QString local = path.trimmed();
     if (local.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive)) {
         const QUrl url(local);
-        if (url.isLocalFile())
+        if (url.isLocalFile()) {
             local = url.toLocalFile();
+        } else if (!url.host().isEmpty()) {
+            // UNC share (file://server/share/file); keep the authority.
+            local = QStringLiteral("//%1%2").arg(url.host(), url.path());
+        } else {
+            local = url.path();
+        }
     }
     const QString normalized = normalizedOutputPath(local);
     if (normalized == m_outputPath)
         return;
     m_outputPath = normalized;
     emit outputPathChanged();
+    // Resume detection touches the file system; defer it to the next dialog
+    // open / finished run instead of doing I/O on every path edit.
+    invalidateResumeState();
     refreshValidation();
 }
 
@@ -655,6 +751,7 @@ void ExportController::setSrtPath(const QString &path)
         return;
     m_srtPath = normalized;
     emit srtPathChanged();
+    invalidateResumeState();
     refreshValidation();
 }
 

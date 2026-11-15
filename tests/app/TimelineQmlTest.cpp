@@ -20,6 +20,7 @@
 #include "AppController.h"
 #include "AudioSink.h"
 #include "PreviewController.h"
+#include "ExportController.h"
 #include "TimelineController.h"
 #include "TimelineModel.h"
 #include "VideoPreviewItem.h"
@@ -181,6 +182,8 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
                                              controller.timeline());
     engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
                                              controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("Export"),
+                                             controller.exportController());
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              QStringLiteral("test"));
 
@@ -373,6 +376,8 @@ TEST(TimelineQml, TrackHeadersSelectTargetAndToggleAudioMuteSolo)
                                              controller.timeline());
     engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
                                              controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("Export"),
+                                             controller.exportController());
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              QStringLiteral("test"));
 
@@ -512,6 +517,8 @@ TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
                                              controller.timeline());
     engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
                                              controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("Export"),
+                                             controller.exportController());
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              QStringLiteral("test"));
 

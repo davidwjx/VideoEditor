@@ -10,7 +10,7 @@
 
 namespace VideoEditor {
 
-class Project;
+struct Project;
 struct ExportSettings;
 
 // Resume state for an interrupted export. A checkpoint is written atomically

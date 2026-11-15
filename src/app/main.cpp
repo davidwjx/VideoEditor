@@ -10,6 +10,7 @@
 #include "AppController.h"
 #include "AppInfo.h"
 #include "AudioEngine.h"
+#include "ExportController.h"
 #include "PreviewController.h"
 #include "TimelineController.h"
 #include "VideoPreviewItem.h"

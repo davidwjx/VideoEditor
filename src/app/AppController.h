@@ -8,7 +8,6 @@
 #include <QVariantList>
 
 #include "AudioEngine.h"
-#include "ExportController.h"
 #include "MediaListModel.h"
 #include "ProjectDocument.h"
 #include "ProjectStore.h"
@@ -17,6 +16,7 @@
 
 namespace VideoEditor {
 
+class ExportController;
 class PreviewController;
 class ProxyService;
 
@@ -139,3 +139,7 @@ private:
 };
 
 } // namespace VideoEditor
+
+// AppController only exposes the pointer type to QML/metatype consumers; the
+// implementation lives in AppController.cpp and includes ExportController.h.
+Q_DECLARE_OPAQUE_POINTER(VideoEditor::ExportController *)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <thread>
 
 #include <QObject>
 #include <QString>
@@ -15,7 +16,7 @@ class QThread;
 namespace VideoEditor {
 
 class ExportWorker;
-class Project;
+struct Project;
 class ProjectDocument;
 
 // UI-facing owner of one export run. It freezes the project when an export
@@ -86,7 +87,9 @@ public:
     QString h265UnavailableReason() const { return m_h265UnavailableReason; }
     bool running() const { return m_running; }
     bool canCancel() const { return m_canCancel; }
-    bool canResume() const;
+    // Cached so property reads and unrelated setters never touch the
+    // checkpoint file or hash the project.
+    bool canResume() const { return m_canResume; }
     double progress() const { return m_progress; }
     QString stageText() const { return m_stageText; }
     QString statusText() const { return m_statusText; }
@@ -153,7 +156,10 @@ signals:
 
 private:
     ExportSettings currentSettings() const;
+    bool hasResumableCheckpoint() const;
     void refreshValidation();
+    void refreshResumeState();
+    void invalidateResumeState();
     void applyProgress(const ExportProgress &progress);
     void finishWith(const ExportResult &result);
     void handleWorkerFinished(const VideoEditor::ExportResult &result);
@@ -211,6 +217,11 @@ private:
     QThread *m_thread = nullptr;
     ExportWorker *m_worker = nullptr;
     SyncRunner m_syncRunner;
+
+    // detectEncoders() opens every candidate encoder and must not block the
+    // UI thread. Tests inject a catalog, which keeps this path synchronous.
+    std::thread m_detectThread;
+    bool m_detectRunning = false;
 };
 
 } // namespace VideoEditor

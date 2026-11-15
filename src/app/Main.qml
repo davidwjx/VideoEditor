@@ -12,6 +12,13 @@ ApplicationWindow {
     title: "VideoEditor " + appVersion
     color: "#111111"
 
+    // Closing the window during an export would drop the user into a silent
+    // partial export; keep it open and let the dialog's cancel path finish.
+    onClosing: function(close) {
+        if (Export.running)
+            close.accepted = false
+    }
+
     function zoomBy(factor) {
         Timeline.pixelsPerSecond = Math.max(20, Math.min(400,
                                             Timeline.pixelsPerSecond * factor))

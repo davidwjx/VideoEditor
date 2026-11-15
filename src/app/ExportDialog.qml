@@ -14,7 +14,8 @@ Dialog {
     width: 660
     anchors.centerIn: parent
     standardButtons: Dialog.NoButton
-    closePolicy: Popup.CloseOnEscape
+    // Esc must not dismiss the dialog while an export is running.
+    closePolicy: Export.running ? Popup.NoAutoClose : Popup.CloseOnEscape
 
     property bool advancedOpen: false
 
@@ -39,9 +40,25 @@ Dialog {
                 model: Export.presets.slice(0, 4)
                 textRole: "name"
                 valueRole: "id"
+                currentIndex: 0
+                // Imperative sync instead of a currentIndex binding: user
+                // activation and controller updates then never fight.
+                function syncFromController() {
+                    const presets = Export.presets
+                    for (let i = 0; i < presets.length && i < 4; ++i) {
+                        if (presets[i].id === Export.presetId) {
+                            if (currentIndex !== i)
+                                currentIndex = i
+                            return
+                        }
+                    }
+                }
+                Component.onCompleted: syncFromController()
                 onActivated: Export.applyPreset(currentValue)
-                Component.onCompleted: currentIndex = Math.max(0,
-                                                               indexOfValue(Export.presetId))
+                Connections {
+                    target: Export
+                    function onPresetIdChanged() { presetCombo.syncFromController() }
+                }
             }
         }
 
@@ -54,16 +71,24 @@ Dialog {
                 Layout.preferredWidth: 220
                 model: [
                     { text: "H.264（MP4）", value: "h264" },
-                    { text: Export.h265Available
-                            ? "H.265/HEVC（仅硬件）"
-                            : "H.265/HEVC（硬件不可用）", value: "h265" },
+                    { text: "H.265/HEVC（仅硬件）", value: "h265" },
                     { text: "MPEG-4 Part 2（兼容）", value: "mpeg4" }
                 ]
                 textRole: "text"
                 valueRole: "value"
-                currentIndex: Export.codec === "h264" ? 0
-                            : Export.codec === "h265" ? 1 : 2
+                currentIndex: 0
+                function syncFromController() {
+                    const index = Export.codec === "h264" ? 0
+                                : Export.codec === "h265" ? 1 : 2
+                    if (currentIndex !== index)
+                        currentIndex = index
+                }
+                Component.onCompleted: syncFromController()
                 onActivated: Export.codec = currentValue
+                Connections {
+                    target: Export
+                    function onCodecChanged() { codecCombo.syncFromController() }
+                }
             }
             Label {
                 objectName: "h265Reason"
@@ -84,7 +109,12 @@ Dialog {
             Label { text: "分辨率" }
             Label { text: Export.width + " × " + Export.height }
             Label { text: "帧率" }
-            Label { text: Export.fpsNum + " fps" }
+            Label {
+                objectName: "fpsValue"
+                text: Export.fpsDen === 1
+                      ? Export.fpsNum + " fps"
+                      : Export.fpsNum + "/" + Export.fpsDen + " fps"
+            }
             Label { text: "码率" }
             Label { text: Export.bitrateKbps + " kbps" }
             Label { text: "编码器" }
@@ -129,17 +159,43 @@ Dialog {
                     objectName: "qualityCombo"
                     Layout.preferredWidth: 160
                     model: ["流畅", "标准", "高质量"]
-                    currentIndex: Export.quality
+                    currentIndex: 1
+                    function syncFromController() {
+                        const index = Math.max(0, Math.min(2, Export.quality))
+                        if (currentIndex !== index)
+                            currentIndex = index
+                    }
+                    Component.onCompleted: syncFromController()
                     onActivated: Export.quality = currentIndex
+                    Connections {
+                        target: Export
+                        function onQualityChanged() {
+                            qualityCombo.syncFromController()
+                        }
+                    }
                 }
                 Label { text: "码率 (kbps)" }
                 TextField {
                     id: bitrateField
                     objectName: "bitrateField"
                     Layout.preferredWidth: 140
-                    text: Export.bitrateKbps
+                    text: ""
                     validator: IntValidator { bottom: 100; top: 200000 }
-                    onEditingFinished: Export.bitrateKbps = parseInt(text) || 0
+                    function syncFromController(force) {
+                        if (force || !activeFocus)
+                            text = String(Export.bitrateKbps)
+                    }
+                    Component.onCompleted: syncFromController(true)
+                    onEditingFinished: {
+                        Export.bitrateKbps = parseInt(text) || 0
+                        syncFromController(true)
+                    }
+                    Connections {
+                        target: Export
+                        function onBitrateKbpsChanged() {
+                            bitrateField.syncFromController(false)
+                        }
+                    }
                 }
             }
 
@@ -177,8 +233,22 @@ Dialog {
                 id: outputField
                 objectName: "outputPathField"
                 Layout.fillWidth: true
-                text: Export.outputPath
-                onEditingFinished: Export.setOutputPath(text)
+                text: ""
+                function syncFromController(force) {
+                    if (force || !activeFocus)
+                        text = Export.outputPath
+                }
+                Component.onCompleted: syncFromController(true)
+                onEditingFinished: {
+                    Export.setOutputPath(text)
+                    syncFromController(true)
+                }
+                Connections {
+                    target: Export
+                    function onOutputPathChanged() {
+                        outputField.syncFromController(false)
+                    }
+                }
             }
             Button {
                 text: "浏览…"
@@ -188,7 +258,9 @@ Dialog {
 
         RowLayout {
             Layout.fillWidth: true
-            visible: Export.running || Export.progress > 0
+            // Only the live run owns the progress bar; a finished export's
+            // 100 % must not linger when the dialog is reopened.
+            visible: Export.running
             Label { text: Export.stageText }
             ProgressBar {
                 Layout.fillWidth: true

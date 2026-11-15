@@ -13,6 +13,7 @@
 
 #include "AudioEngine.h"
 #include "CodecSupport.h"
+#include "ExportController.h"
 #include "MediaListModel.h"
 #include "MediaProbe.h"
 #include "PreviewController.h"
