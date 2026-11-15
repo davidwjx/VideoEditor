@@ -32,6 +32,13 @@ bool isValidKey(const QString &key)
     return hex64.match(key).hasMatch();
 }
 
+bool isValidStatus(const QString &status)
+{
+    return status == QStringLiteral("complete")
+        || status == QStringLiteral("partial")
+        || status == QStringLiteral("failed");
+}
+
 QString fileSha256(const QString &path)
 {
     QFile file(path);
@@ -176,7 +183,7 @@ std::optional<RemovalCacheManifest> manifestFromJson(const QJsonObject &object)
     if (!object.value(QStringLiteral("cacheKey")).isString()
         || object.value(QStringLiteral("cacheKey")).toString().isEmpty()
         || !object.value(QStringLiteral("status")).isString()
-        || object.value(QStringLiteral("status")).toString().isEmpty()
+        || !isValidStatus(object.value(QStringLiteral("status")).toString())
         || !object.value(QStringLiteral("chunks")).isArray())
         return std::nullopt;
 
@@ -265,6 +272,9 @@ bool RemovalCache::writeChunk(const QString &cacheKey, int chunkIndex,
     if (!ensureDir(cacheKey, error))
         return false;
 
+    // A replacement chunk must never be served from the parsed-index cache.
+    invalidateChunkIndexCache(cacheKey, chunkIndex);
+
     const QString dir = cacheDir(cacheKey);
     const QString chunksDir = QDir(dir).filePath(QStringLiteral("chunks"));
     const QString tmp = QDir(chunksDir).filePath(
@@ -285,7 +295,11 @@ bool RemovalCache::writeChunk(const QString &cacheKey, int chunkIndex,
     index.firstFrame = firstFrame;
 
     for (int i = 0; i < patches.size(); ++i) {
-        const QImage &image = patches.at(i);
+        // Patches carry feathered alpha; normalize before PNG so an
+        // alpha-less caller format cannot silently become opaque.
+        QImage image = patches.at(i);
+        if (!image.isNull() && image.format() != QImage::Format_ARGB32)
+            image = image.convertToFormat(QImage::Format_ARGB32);
         if (image.isNull())
             return fail(QStringLiteral("修复缓存分块写入失败：第 %1 帧为空图像。").arg(i));
 
@@ -322,9 +336,11 @@ bool RemovalCache::writeChunk(const QString &cacheKey, int chunkIndex,
     if (QDir(target).exists() && !QDir(target).removeRecursively())
         return fail(QStringLiteral("修复缓存分块写入失败：无法替换旧分块：%1").arg(target));
     if (!QDir().rename(tmp, target)) {
+        invalidateChunkIndexCache(cacheKey, chunkIndex);
         setError(error, QStringLiteral("修复缓存分块写入失败：无法提交分块目录：%1").arg(target));
         return false; // Keep the temporary directory for diagnosis.
     }
+    invalidateChunkIndexCache(cacheKey, chunkIndex);
 
     if (written)
         *written = index;
@@ -339,8 +355,9 @@ bool RemovalCache::writeManifest(const RemovalCacheManifest &manifest,
         setError(error, QStringLiteral("修复缓存清单写入失败：缓存键无效。"));
         return false;
     }
-    if (manifest.status.isEmpty()) {
-        setError(error, QStringLiteral("修复缓存清单写入失败：状态为空。"));
+    if (!isValidStatus(manifest.status)) {
+        setError(error, QStringLiteral("修复缓存清单写入失败：状态无效：%1")
+                            .arg(manifest.status));
         return false;
     }
     if (!QDir().mkpath(dir)) {
@@ -357,6 +374,8 @@ bool RemovalCache::writeManifest(const RemovalCacheManifest &manifest,
         setError(error, QStringLiteral("修复缓存清单写入失败：%1").arg(file.fileName()));
         return false;
     }
+    // Manifest is the commit point; force index revalidation on next read.
+    invalidateChunkIndexCache(manifest.cacheKey);
     return true;
 }
 
@@ -386,7 +405,7 @@ std::optional<RemovalCacheManifest> RemovalCache::readManifest(
     return manifest;
 }
 
-std::optional<RemovalChunkIndex> RemovalCache::readChunkIndex(
+std::optional<RemovalChunkIndex> RemovalCache::cachedChunkIndex(
     const QString &cacheKey, int chunkIndex, QString *error) const
 {
     const QString dir = cacheDir(cacheKey);
@@ -394,6 +413,17 @@ std::optional<RemovalChunkIndex> RemovalCache::readChunkIndex(
         setError(error, QStringLiteral("修复缓存键无效：需要 64 位十六进制哈希。"));
         return std::nullopt;
     }
+
+    {
+        QMutexLocker locker(&m_indexMutex);
+        const auto keyIt = m_indexCache.constFind(cacheKey);
+        if (keyIt != m_indexCache.constEnd()) {
+            const auto it = keyIt.value().constFind(chunkIndex);
+            if (it != keyIt.value().constEnd())
+                return it.value();
+        }
+    }
+
     const QString path =
         QDir(chunkDir(dir, chunkIndex)).filePath(QStringLiteral("index.json"));
     QFile file(path);
@@ -408,9 +438,42 @@ std::optional<RemovalChunkIndex> RemovalCache::readChunkIndex(
         return std::nullopt;
     }
     const auto index = indexFromJson(document.object());
-    if (!index)
+    if (!index) {
         setError(error, QStringLiteral("修复缓存分块索引缺少必要字段：%1").arg(path));
+        return std::nullopt;
+    }
+
+    {
+        QMutexLocker locker(&m_indexMutex);
+        m_indexCache[cacheKey].insert(chunkIndex, *index);
+        ++m_chunkIndexReads;
+    }
     return index;
+}
+
+std::optional<RemovalChunkIndex> RemovalCache::readChunkIndex(
+    const QString &cacheKey, int chunkIndex, QString *error) const
+{
+    return cachedChunkIndex(cacheKey, chunkIndex, error);
+}
+
+int RemovalCache::chunkIndexReadCount() const
+{
+    QMutexLocker locker(&m_indexMutex);
+    return m_chunkIndexReads;
+}
+
+void RemovalCache::invalidateChunkIndexCache(const QString &cacheKey,
+                                             int chunkIndex) const
+{
+    QMutexLocker locker(&m_indexMutex);
+    if (chunkIndex < 0) {
+        m_indexCache.remove(cacheKey);
+        return;
+    }
+    const auto it = m_indexCache.find(cacheKey);
+    if (it != m_indexCache.end())
+        it->remove(chunkIndex);
 }
 
 QImage RemovalCache::readFrameImage(const QString &cacheKey,
@@ -577,6 +640,7 @@ bool RemovalCache::invalidateFrameRange(const QString &cacheKey, int firstFrame,
     if (!removed)
         return true;
 
+    invalidateChunkIndexCache(cacheKey);
     RemovalCacheManifest updated = *manifest;
     updated.chunks = kept;
     updated.status = QStringLiteral("partial");
@@ -616,6 +680,7 @@ bool RemovalCache::collectGarbage(const QSet<QString> &pinnedKeys,
             setError(error, QStringLiteral("无法删除修复缓存：%1").arg(entry.path));
             return false;
         }
+        invalidateChunkIndexCache(QFileInfo(entry.path).fileName());
         total -= entry.size;
     }
     return true;

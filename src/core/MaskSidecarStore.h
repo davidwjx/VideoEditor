@@ -35,6 +35,10 @@ public:
     std::optional<QJsonObject> readTracking(const QString &confidenceHash,
                                             QString *error = nullptr) const;
 
+    // Copies masks/tracking into the new project's sidecar root. The old root
+    // is intentionally retained so a failed project save cannot lose project
+    // data; callers may delete it after the save succeeds, or rely on
+    // removeUnreferenced() for stray files in the active root.
     bool relocateTo(const QString &newProjectFilePath, QString *error = nullptr);
     bool removeUnreferenced(const QSet<QString> &maskHashes,
                             const QSet<QString> &trackingHashes,

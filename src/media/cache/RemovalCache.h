@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <optional>
+#include <QHash>
 #include <QImage>
 #include <QList>
+#include <QMutex>
 #include <QRect>
 #include <QSet>
 #include <QString>
@@ -87,8 +89,20 @@ public:
                         QString *error = nullptr);
     qint64 sizeOnDisk(QString *error = nullptr) const;
 
+    // Diagnostics: number of chunk index files actually parsed. Repeated
+    // readFrameImage/readChunkIndex calls for the same chunk must not grow it.
+    int chunkIndexReadCount() const;
+
 private:
+    std::optional<RemovalChunkIndex> cachedChunkIndex(
+        const QString &cacheKey, int chunkIndex, QString *error) const;
+    void invalidateChunkIndexCache(const QString &cacheKey,
+                                   int chunkIndex = -1) const;
+
     QString m_root;
+    mutable QMutex m_indexMutex;
+    mutable QHash<QString, QHash<int, RemovalChunkIndex>> m_indexCache;
+    mutable int m_chunkIndexReads = 0;
 };
 
 } // namespace VideoEditor

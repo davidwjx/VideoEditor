@@ -91,6 +91,8 @@ QString MaskSidecarStore::rootForProject(const QString &projectFilePath,
 {
     if (!projectFilePath.isEmpty())
         return projectFilePath + QStringLiteral(".assets");
+    if (fallbackRoot.isEmpty())
+        return QString();
     return QDir(fallbackRoot).filePath(QStringLiteral("removal-sidecars/unsaved"));
 }
 
@@ -108,27 +110,28 @@ QString MaskSidecarStore::sidecarRoot() const
 
 QString MaskSidecarStore::maskPath(const QString &maskHash) const
 {
-    if (!isValidHash(maskHash))
+    const QString root = sidecarRoot();
+    if (root.isEmpty() || !isValidHash(maskHash))
         return QString();
-    return QDir(sidecarRoot())
-        .filePath(QStringLiteral("masks/%1.rle").arg(maskHash));
+    return QDir(root).filePath(QStringLiteral("masks/%1.rle").arg(maskHash));
 }
 
 QString MaskSidecarStore::trackingPath(const QString &confidenceHash) const
 {
-    if (!isValidHash(confidenceHash))
+    const QString root = sidecarRoot();
+    if (root.isEmpty() || !isValidHash(confidenceHash))
         return QString();
-    return QDir(sidecarRoot())
-        .filePath(QStringLiteral("tracking/%1.json").arg(confidenceHash));
+    return QDir(root).filePath(QStringLiteral("tracking/%1.json").arg(confidenceHash));
 }
 
 bool MaskSidecarStore::ensureLayout(QString *error)
 {
-    if (m_projectFilePath.isEmpty() && m_fallbackRoot.isEmpty()) {
+    const QString rootPath = sidecarRoot();
+    if (rootPath.isEmpty()) {
         setError(error, QStringLiteral("无法确定工程旁车目录：工程未保存且没有回退目录。"));
         return false;
     }
-    const QDir root(sidecarRoot());
+    const QDir root(rootPath);
     if (!QDir().mkpath(root.filePath(QStringLiteral("masks")))
         || !QDir().mkpath(root.filePath(QStringLiteral("tracking")))) {
         setError(error, QStringLiteral("无法创建工程旁车目录：%1").arg(root.path()));
@@ -222,6 +225,10 @@ bool MaskSidecarStore::relocateTo(const QString &newProjectFilePath,
 
     const QString oldRoot = sidecarRoot();
     const QString newRoot = rootForProject(newProjectFilePath, m_fallbackRoot);
+    if (newRoot.isEmpty()) {
+        setError(error, QStringLiteral("无法迁移工程旁车：目标工程路径无效。"));
+        return false;
+    }
     if (oldRoot == newRoot) {
         m_projectFilePath = newProjectFilePath;
         return true;

@@ -36,6 +36,18 @@ TEST(MaskSidecarStore, WritesReadsAndRelocatesMasks)
     EXPECT_TRUE(error.contains(QStringLiteral("遮罩")));
 }
 
+TEST(MaskSidecarStore, MissingRootAndHashesAreGuarded)
+{
+    MaskSidecarStore store; // no project path and no fallback
+    QString error;
+    EXPECT_TRUE(store.sidecarRoot().isEmpty());
+    EXPECT_TRUE(store.maskPath(QString(64, QLatin1Char('a'))).isEmpty());
+    EXPECT_TRUE(store.trackingPath(QString(64, QLatin1Char('a'))).isEmpty());
+    EXPECT_FALSE(store.ensureLayout(&error));
+    EXPECT_FALSE(error.isEmpty());
+    EXPECT_TRUE(store.maskPath(QStringLiteral("../escape")).isEmpty());
+}
+
 TEST(MaskSidecarStore, UnsavedProjectUsesFallbackRootAndMovesOnSaveAs)
 {
     QTemporaryDir dir;

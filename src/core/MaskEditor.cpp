@@ -1,7 +1,6 @@
 #include "MaskEditor.h"
 
 #include <QtGlobal>
-#include <algorithm>
 
 namespace VideoEditor {
 

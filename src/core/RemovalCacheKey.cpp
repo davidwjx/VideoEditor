@@ -4,6 +4,7 @@
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 
 namespace VideoEditor {
 

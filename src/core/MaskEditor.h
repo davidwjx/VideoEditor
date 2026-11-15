@@ -1,20 +1,6 @@
 #pragma once
 
-#include <QImage>
-#include <QPoint>
-#include <QRect>
-
-#include "MaskCodec.h" // BinaryMask
-
-namespace VideoEditor {
-
-class MaskEditor {
-public:
-    static void paintStroke(BinaryMask &mask, QPoint from, QPoint to,
-                            int radiusPx, bool erase);
-    static void paintBox(BinaryMask &mask, QRect rect, bool erase);
-    static QRect contentBounds(const BinaryMask &mask);
-    static QImage toOverlay(const BinaryMask &mask, QRgb inside = 0x80FF3B30);
-};
-
-} // namespace VideoEditor
+// MaskEditor is declared alongside BinaryMask/MaskCodec in MaskCodec.h so the
+// public masking header is self-contained; this file keeps the documented
+// MaskEditor.h include path working without a circular include.
+#include "MaskCodec.h"

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <QJsonObject>
 #include <QList>
 #include <QString>
 

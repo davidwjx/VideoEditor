@@ -1,6 +1,5 @@
 #include "MaskCodec.h"
 
-#include <algorithm>
 #include <cstring>
 #include <QCryptographicHash>
 

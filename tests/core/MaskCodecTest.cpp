@@ -50,6 +50,43 @@ TEST(MaskCodec, RejectsTruncatedPayload)
     EXPECT_TRUE(error.contains(QStringLiteral("遮罩")));
 }
 
+TEST(MaskCodec, RejectsBadMagicOversizeAndRunTotalMismatch)
+{
+    BinaryMask mask;
+    mask.width = mask.height = 8;
+    mask.bits.assign(64, 0);
+    QByteArray badMagic = MaskCodec::encode(mask);
+    badMagic[0] = 'X';
+    QString error;
+    EXPECT_FALSE(MaskCodec::decode(badMagic, &error).has_value());
+    EXPECT_TRUE(error.contains(QStringLiteral("遮罩")));
+
+    const auto put = [](QByteArray &data, quint32 value) {
+        data.append(char(value & 0xff));
+        data.append(char((value >> 8) & 0xff));
+        data.append(char((value >> 16) & 0xff));
+        data.append(char((value >> 24) & 0xff));
+    };
+
+    QByteArray oversize("VEMASK01", 8);
+    put(oversize, 8193);
+    put(oversize, 1);
+    put(oversize, 0);
+    error.clear();
+    EXPECT_FALSE(MaskCodec::decode(oversize, &error).has_value());
+    EXPECT_TRUE(error.contains(QStringLiteral("遮罩")));
+
+    QByteArray badTotal("VEMASK01", 8);
+    put(badTotal, 8);
+    put(badTotal, 8);
+    put(badTotal, 2);
+    put(badTotal, 10);
+    put(badTotal, 10); // 20 pixels, header says 64
+    error.clear();
+    EXPECT_FALSE(MaskCodec::decode(badTotal, &error).has_value());
+    EXPECT_TRUE(error.contains(QStringLiteral("遮罩")));
+}
+
 TEST(MaskEditor, StrokeAndBoxAreClampedAndDeterministic)
 {
     BinaryMask mask;

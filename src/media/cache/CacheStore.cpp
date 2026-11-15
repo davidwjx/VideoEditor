@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
+#include <QRegularExpression>
 
 namespace VideoEditor {
 
@@ -42,6 +43,9 @@ QString CacheStore::removalRoot() const
 
 QString CacheStore::removalPath(const QString &cacheKey) const
 {
+    static const QRegularExpression hex64(QStringLiteral("^[0-9a-f]{64}$"));
+    if (!hex64.match(cacheKey).hasMatch())
+        return QString();
     return QDir(removalRoot()).filePath(cacheKey);
 }
 
