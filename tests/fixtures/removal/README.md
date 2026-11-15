@@ -28,6 +28,8 @@ The larger 1080p30 10 s acceptance assets live **outside the repository** at
 - `static_logo_1080p_10s.mp4`
 - `static_logo_mask_1080p_10s.mp4`
 - `clean_background_1080p_10s.mp4`
+- `static_logo_smooth_1080p_10s.mp4`, `static_logo_smooth_mask_1080p_10s.mp4`, `clean_gradient_1080p_10s.mp4` (low-frequency smooth GT)
+- `static_logo_soft_1080p_10s.mp4`, `static_logo_soft_mask_1080p_10s.mp4`, `clean_soft_1080p_10s.mp4` (soft-gradient fairness corpus)
 
 `VideoEditor.exe --selftest-removal` prefers those files when present and
 falls back to the committed 640x360 fixtures otherwise.

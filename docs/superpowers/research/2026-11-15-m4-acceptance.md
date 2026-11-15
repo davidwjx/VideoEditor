@@ -148,7 +148,7 @@ REMOVAL_SELFTEST_FAIL threshold set=legacy-1080p
 | Legacy 1080p10s | **8.04 dB** | **205.1 s** | 31,174,721 / 18,007,570 = **1.73x** | **PASS** (≤2x) | **FAIL** |
 
 All three jobs completed 300/300 frames with a complete, hash-verified cache.
-Job time is inside the 300 s budget but above the 2.6–3.1 min target.
+Job time is inside the 300 s budget; the soft/smooth runs (164 s) are also inside the 2.6–3.1 min target, while the legacy run (205 s) is above it.
 
 ## 5. Why hole PSNR fails (reproducible evidence)
 
@@ -238,7 +238,7 @@ FlowPropagator 1 new).
 
 | # | Threshold | Target | Measured on this machine | Verdict |
 | --- | --- | --- | --- | --- |
-| 1 | 1080p30 10 s job time | ≤300 s (target 156–186 s) | 164.1 s soft / 164.0 s smooth / 205.1 s legacy (excludes probe/mask/key) | **PASS** (above target) |
+| 1 | 1080p30 10 s job time | ≤300 s (target 156–186 s) | 164.1 s soft / 164.0 s smooth / 205.1 s legacy (excludes probe/mask/key) | **PASS** (soft/smooth inside target; legacy above target) |
 | 2 | EfficientTAM fp32 keyframe segmentation | ≤100 ms | 66–72 ms | **PASS** |
 | 3 | DIS propagation at 1080p | ≥20 fps | p50 37.54 ms = 26.64 fps | **PASS** |
 | 4 | MI-GAN DML | ≥2 fps (~500 ms/tile) | warm p50 442.1 ms = 2.26 fps; cold 508 ms = 1.97 fps | **PASS** (warm) |
