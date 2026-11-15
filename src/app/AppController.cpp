@@ -17,6 +17,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include "AiFeatureGate.h"
+#include "AiJobManager.h"
 #include "AudioEngine.h"
 #include "CodecSupport.h"
 #include "ExportController.h"
@@ -28,6 +30,7 @@
 #include "PreviewController.h"
 #include "ProxyPlanner.h"
 #include "ProxyService.h"
+#include "RemovalCache.h"
 #include "TimelineController.h"
 #include "TimelineEvaluator.h"
 #include "WaveformService.h"
@@ -138,8 +141,26 @@ AppController::AppController(QObject *parent, QString recoveryPath,
             : sidecarFallback;
     m_maskSidecars = std::make_unique<MaskSidecarStore>();
     m_maskSidecars->setProjectPath(m_document->filePath(), m_sidecarFallback);
+
+    // The AI feature is fail-closed: loading the manifest is not enough, it
+    // must carry commercial approval, legal sign-off and verified files.
+    m_aiGate = std::make_unique<AiFeatureGate>();
+    QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS_DIR");
+    if (modelsDir.isEmpty()) {
+        modelsDir = QDir(QCoreApplication::applicationDirPath())
+                        .filePath(QStringLiteral("models"));
+    }
+    QString modelsError;
+    m_aiGate->reload(modelsDir, &modelsError);
+    m_aiJobs = std::make_unique<AiJobManager>(*m_aiGate);
+    m_removalCache = std::make_unique<RemovalCache>(
+        QDir(appData).filePath(QStringLiteral("cache/removal")));
+
     m_removal = std::make_unique<RemovalController>(*m_document,
                                                      *m_maskSidecars);
+    m_removal->setJobManager(m_aiJobs.get());
+    m_removal->setCache(m_removalCache.get());
+    m_removal->setFeatureGate(m_aiGate.get());
     // Timeline position is authoritative for mask authoring; the preview clock
     // mirrors it in timeline mode. The fallback keeps the controller useful
     // when only the timeline controller exists (asset-mode preview).

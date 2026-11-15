@@ -12,7 +12,7 @@ if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Qml Test)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Qml Network Test)
 
 find_package(GTest CONFIG QUIET)
 if(NOT GTest_FOUND)

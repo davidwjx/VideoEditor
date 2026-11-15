@@ -17,10 +17,13 @@
 
 namespace VideoEditor {
 
+class AiFeatureGate;
+class AiJobManager;
 class ExportController;
 class MaskSidecarStore;
 class PreviewController;
 class ProxyService;
+class RemovalCache;
 
 class AppController : public QObject {
     Q_OBJECT
@@ -31,6 +34,7 @@ class AppController : public QObject {
     Q_PROPERTY(VideoEditor::ExportController *exportController READ exportController
                    CONSTANT)
     Q_PROPERTY(VideoEditor::RemovalController *removal READ removal CONSTANT)
+    Q_PROPERTY(VideoEditor::AiJobManager *aiJobs READ aiJobs CONSTANT)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoStateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoStateChanged)
@@ -56,6 +60,7 @@ public:
     WaveformService *waveforms() const { return m_waveforms; }
     ExportController *exportController() const { return m_export.get(); }
     RemovalController *removal() const { return m_removal.get(); }
+    AiJobManager *aiJobs() const { return m_aiJobs.get(); }
     QString lastError() const { return m_lastError; }
     bool canUndo() const;
     bool canRedo() const;
@@ -135,6 +140,11 @@ private:
     ProxyService *m_proxyService = nullptr;
     TimelineController *m_timeline = nullptr;
     WaveformService *m_waveforms = nullptr;
+    // The gate must outlive the job manager and the removal controller that
+    // reference it; declaration order gives reverse destruction order.
+    std::unique_ptr<AiFeatureGate> m_aiGate;
+    std::unique_ptr<AiJobManager> m_aiJobs;
+    std::unique_ptr<RemovalCache> m_removalCache;
     std::unique_ptr<ExportController> m_export;
     std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<ProjectStore> m_store;
@@ -167,3 +177,4 @@ private:
 // AppController only exposes the pointer type to QML/metatype consumers; the
 // implementation lives in AppController.cpp and includes ExportController.h.
 Q_DECLARE_OPAQUE_POINTER(VideoEditor::ExportController *)
+Q_DECLARE_OPAQUE_POINTER(VideoEditor::AiJobManager *)

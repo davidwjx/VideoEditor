@@ -118,6 +118,7 @@ gtest_discover_tests(export_tests PROPERTIES
   LABELS "gpu")
 
 add_executable(app_tests
+  app/AiJobManagerTest.cpp
   app/AppControllerTest.cpp
   app/TimelineUiTest.cpp
   app/TimelineIntegrationTest.cpp

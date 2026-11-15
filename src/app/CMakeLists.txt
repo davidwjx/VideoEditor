@@ -3,7 +3,9 @@ add_library(videoeditor_app STATIC
   AppController.cpp
 )
 target_include_directories(videoeditor_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(videoeditor_app PUBLIC videoeditor_core videoeditor_media videoeditor_ui Qt6::Core)
+target_link_libraries(videoeditor_app PUBLIC
+  videoeditor_core videoeditor_media videoeditor_ui videoeditor_ai
+  Qt6::Core Qt6::Network)
 # The command-line timeline self-tests build their project from the checked-in
 # fixtures; tests/CMakeLists.txt invokes the same binary from the build tree.
 target_compile_definitions(videoeditor_app PRIVATE
@@ -38,4 +40,19 @@ if(WIN32 AND FFMPEG_ROOT)
   add_custom_command(TARGET VideoEditor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${FFMPEG_RUNTIME_FILES} "$<TARGET_FILE_DIR:VideoEditor>")
+endif()
+
+# The UI launches the inference engine as a sibling process. ONNX Runtime and
+# DirectML DLLs are deliberately not bundled until a signed model release
+# exists; copy them only if a future build places them in the tree.
+if(TARGET VisionAiEngine)
+  add_custom_command(TARGET VideoEditor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:VisionAiEngine>" "$<TARGET_FILE_DIR:VideoEditor>")
+endif()
+if(EXISTS "${CMAKE_SOURCE_DIR}/assets/models")
+  add_custom_command(TARGET VideoEditor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/assets/models"
+            "$<TARGET_FILE_DIR:VideoEditor>/models")
 endif()

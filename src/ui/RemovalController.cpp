@@ -10,8 +10,11 @@
 #include <QVariantMap>
 #include <QtGlobal>
 
+#include "AiFeatureGate.h"
+#include "AiJobManager.h"
 #include "MaskEditor.h"
 #include "MaskImageProvider.h"
+#include "RemovalCache.h"
 
 namespace VideoEditor {
 
@@ -65,6 +68,43 @@ void RemovalController::setMaskImageProvider(MaskImageProvider *provider)
     m_provider = provider;
     if (m_provider && m_working.mask.isValid())
         m_provider->setMask(MaskEditor::toOverlay(m_working.mask));
+}
+
+void RemovalController::setJobManager(AiJobManager *manager)
+{
+    m_jobManager = manager;
+}
+
+void RemovalController::setCache(RemovalCache *cache)
+{
+    m_cache = cache;
+}
+
+void RemovalController::setFeatureGate(AiFeatureGate *gate)
+{
+    m_featureGate = gate;
+}
+
+bool RemovalController::track()
+{
+    if (!m_jobManager) {
+        setError(QStringLiteral("AI 任务管理器未初始化。"));
+        return false;
+    }
+    // Task 8 builds the tracking AiJobSpec and listens for jobFinished.
+    setError(QStringLiteral("AI 消除任务尚未启用。"));
+    return false;
+}
+
+bool RemovalController::generate()
+{
+    if (!m_jobManager) {
+        setError(QStringLiteral("AI 任务管理器未初始化。"));
+        return false;
+    }
+    // Task 8 builds the inpaint AiJobSpec and listens for jobFinished.
+    setError(QStringLiteral("AI 消除任务尚未启用。"));
+    return false;
 }
 
 void RemovalController::setBrushSize(int px)

@@ -18,7 +18,10 @@
 
 namespace VideoEditor {
 
+class AiFeatureGate;
+class AiJobManager;
 class MaskImageProvider;
+class RemovalCache;
 
 // Owns the transient mask-editor state for one clip: which keyframe is being
 // authored, the in-progress binary mask and the command that commits it. The
@@ -72,6 +75,14 @@ public:
     void setMaskImageProvider(MaskImageProvider *provider);
     MaskImageProvider *maskImageProvider() const { return m_provider; }
 
+    // Injected by AppController; not owned. Until the job manager is wired the
+    // generate/track entry points report a Chinese error but mask editing keeps
+    // working. Task 8 replaces the placeholders with the real flow.
+    void setJobManager(AiJobManager *manager);
+    void setCache(RemovalCache *cache);
+    void setFeatureGate(AiFeatureGate *gate);
+    AiJobManager *jobManager() const { return m_jobManager; }
+
     Q_INVOKABLE void beginMask(const QString &clipId);
     Q_INVOKABLE void endMask();
     Q_INVOKABLE void beginStroke(int radiusSourcePx, bool erase);
@@ -84,6 +95,8 @@ public:
     Q_INVOKABLE void setLayerEnabled(bool enabled);
     Q_INVOKABLE void deleteLayer();
     Q_INVOKABLE void clearError();
+    Q_INVOKABLE bool track();
+    Q_INVOKABLE bool generate();
 
     // Test/timeline-delegate entry points. sourceTimeUs is relative to the
     // clip's source media, not the timeline.
@@ -140,6 +153,9 @@ private:
 
     ProjectDocument &m_document;
     MaskSidecarStore &m_sidecars;
+    AiJobManager *m_jobManager = nullptr;
+    RemovalCache *m_cache = nullptr;
+    AiFeatureGate *m_featureGate = nullptr;
     MaskImageProvider *m_provider = nullptr;
     std::function<qint64()> m_playheadProvider;
     WorkingState m_working;

@@ -29,6 +29,7 @@ target_include_directories(videoeditor_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # headers pulled in by FrameBridge; keep the min/max macros out of the way.
 target_compile_definitions(videoeditor_ui PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_link_libraries(videoeditor_ui
-  PUBLIC videoeditor_core videoeditor_media Qt6::Core Qt6::Gui Qt6::Quick
+  PUBLIC videoeditor_core videoeditor_media videoeditor_ai
+         Qt6::Core Qt6::Gui Qt6::Quick
   PRIVATE d3d11 dxgi ole32
 )
