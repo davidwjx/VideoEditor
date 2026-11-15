@@ -138,12 +138,34 @@ if(TARGET VisionAiEngine)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:VisionAiEngine>" "$<TARGET_FILE_DIR:app_tests>")
 endif()
+videoeditor_copy_ai_runtime(app_tests)
 add_dependencies(app_tests fake_ai_engine)
 if(TARGET videoeditor_models_copy)
   add_dependencies(app_tests videoeditor_models_copy)
 endif()
 gtest_discover_tests(app_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
+
+# Task 5 offline tracking engine: confidence gating, DIS flow, FFmpeg frame
+# reading and the EfficientTAM-keyframe pipeline. Model-dependent cases skip
+# unless VIDEOEDITOR_M4_MODELS points at an installed manifest.
+add_executable(ai_tests
+  ai/ConfidenceTest.cpp
+  ai/FrameReaderTest.cpp
+  ai/FlowPropagatorTest.cpp
+  ai/TrackingPipelineTest.cpp
+  TestGuiMain.cpp)
+target_include_directories(ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(ai_tests PRIVATE
+  videoeditor_ai videoeditor_media videoeditor_core
+  GTest::gtest Qt6::Core Qt6::Gui)
+target_compile_definitions(ai_tests PRIVATE
+  VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
+videoeditor_copy_ai_runtime(ai_tests)
+gtest_discover_tests(ai_tests PROPERTIES
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
+  LABELS "ai")
 
 # Loads Main.qml from the source tree and drives a real click/drag through the
 # Qt Quick event delivery path, so Flickable/MouseArea interaction regressions

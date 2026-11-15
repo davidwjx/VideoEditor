@@ -1,17 +1,221 @@
 // src/ai/AiEngineMain.cpp
 //
-// Task 4 stub: it exists so the parent process can exercise the real
-// subprocess protocol. It reads only the AiJobSpec, connects to the local
-// socket and reports that models are not installed yet. It never opens the
-// project file and never touches the network.
+// Local inference subprocess. It reads only the AiJobSpec, talks to the parent
+// over a local socket and never opens the project file or the network.
+//
+// With ONNX Runtime and OpenCV available (VIDEOEDITOR_HAVE_ORT=1) it runs the
+// Task 5 tracking pipeline (EfficientTAM keyframes + DIS propagation). The
+// repair pipeline belongs to Task 6: a non-tracking-only job reports
+// inpaint_unavailable after tracking. Without the runtimes this file keeps the
+// Task 4 stub behaviour so the protocol tests still have a real executable.
 
 #include <QCommandLineParser>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QLocalSocket>
+#include <QThread>
+
+#include <functional>
 
 #include "AiProtocol.h"
+
+#if VIDEOEDITOR_HAVE_ORT
+#include "ModelRegistry.h"
+#include "engine/Sam2Tracker.h"
+#include "engine/TrackingPipeline.h"
+#endif
+
+namespace {
+
+using namespace VideoEditor;
+
+// "SendMessage" is a Windows macro, so the sink alias deliberately avoids it.
+using MessageSink = std::function<void(const QJsonObject &)>;
+
+#if VIDEOEDITOR_HAVE_ORT
+
+// Reads newline-delimited commands from the parent without installing an event
+// loop, so the pipeline can poll once per frame.
+class CommandPoller {
+public:
+    enum class Command { None, Cancel, Pause, Resume };
+
+    explicit CommandPoller(QLocalSocket &socket)
+        : m_socket(socket)
+    {
+    }
+
+    Command poll()
+    {
+        if (m_socket.state() != QLocalSocket::ConnectedState)
+            return Command::Cancel;
+        if (m_socket.bytesAvailable() > 0)
+            m_buffer.append(m_socket.readAll());
+        if (m_buffer.size() > AiProtocol::kMaxLineBytes) {
+            m_buffer.clear();
+            return Command::Cancel;
+        }
+
+        Command result = Command::None;
+        int newline = -1;
+        while ((newline = m_buffer.indexOf('\n')) >= 0) {
+            const QByteArray line = m_buffer.left(newline);
+            m_buffer.remove(0, newline + 1);
+            QJsonObject message;
+            if (!AiProtocol::parseLine(line, &message, nullptr))
+                continue;
+            const QString cmd = message.value(QStringLiteral("cmd")).toString();
+            if (cmd == QLatin1String("cancel"))
+                result = Command::Cancel;
+            else if (cmd == QLatin1String("pause")
+                     && result != Command::Cancel)
+                result = Command::Pause;
+            else if (cmd == QLatin1String("resume")
+                     && result == Command::None)
+                result = Command::Resume;
+        }
+        return result;
+    }
+
+private:
+    QLocalSocket &m_socket;
+    QByteArray m_buffer;
+};
+
+int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
+                  const MessageSink &send)
+{
+    const bool technical =
+        qEnvironmentVariable("VIDEOEDITOR_M4_TECHNICAL") == QLatin1String("1");
+    if (!technical) {
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("error")},
+            {QStringLiteral("code"), QStringLiteral("model_unavailable")},
+            {QStringLiteral("message"), QStringLiteral("AI 模型尚未安装。")}});
+        send(QJsonObject{{QStringLiteral("event"), QStringLiteral("done")},
+                         {QStringLiteral("cacheKey"), spec.cacheKey},
+                         {QStringLiteral("completedFrames"), 0}});
+        return 3;
+    }
+
+    const auto modelUnavailable = [&](const QString &message) {
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("error")},
+            {QStringLiteral("code"), QStringLiteral("model_unavailable")},
+            {QStringLiteral("message"), message}});
+        send(QJsonObject{{QStringLiteral("event"), QStringLiteral("done")},
+                         {QStringLiteral("cacheKey"), spec.cacheKey},
+                         {QStringLiteral("completedFrames"), 0}});
+        return 3;
+    };
+
+    QString error;
+    const auto registry = ModelRegistry::load(spec.modelsManifestPath, &error);
+    if (!registry) {
+        return modelUnavailable(
+            QStringLiteral("无法加载模型清单：%1").arg(error));
+    }
+    if (!registry->verifyFiles(&error)) {
+        return modelUnavailable(
+            QStringLiteral("模型文件校验失败：%1").arg(error));
+    }
+
+    const AiModelRecord *record = registry->model(spec.trackingModelId);
+    if (!record || !record->isTracking()) {
+        return modelUnavailable(QStringLiteral("跟踪模型不可用：%1。")
+                                    .arg(spec.trackingModelId));
+    }
+
+    TrackingConfig config;
+    config.io = record->io;
+    config.allowDml = false;
+    config.allowCpu = true;
+    for (auto it = record->files.constBegin(); it != record->files.constEnd();
+         ++it) {
+        if (!it.value().path.endsWith(QLatin1String(".onnx"),
+                                      Qt::CaseInsensitive)) {
+            continue;
+        }
+        config.partPaths.insert(
+            it.key(), QDir(registry->rootDir()).filePath(it.value().path));
+    }
+    for (const QString &part :
+         {QStringLiteral("image_encoder"), QStringLiteral("prompt_encoder"),
+          QStringLiteral("mask_decoder")}) {
+        if (!config.partPaths.contains(part)) {
+            return modelUnavailable(
+                QStringLiteral("跟踪模型缺少组件：%1。").arg(part));
+        }
+    }
+
+    Sam2Tracker tracker;
+    if (!tracker.initialize(config, &error)) {
+        return modelUnavailable(
+            QStringLiteral("无法加载跟踪模型：%1").arg(error));
+    }
+
+    TrackingPipeline pipeline;
+    pipeline.setTracker(&tracker);
+
+    CommandPoller poller(socket);
+    bool paused = false;
+    TrackingRunCallbacks callbacks;
+    callbacks.event = [&send](const QJsonObject &message) { send(message); };
+    callbacks.cancel = [&]() -> bool {
+        while (true) {
+            const CommandPoller::Command command = poller.poll();
+            if (command == CommandPoller::Command::Cancel)
+                return true;
+            if (command == CommandPoller::Command::Pause)
+                paused = true;
+            else if (command == CommandPoller::Command::Resume)
+                paused = false;
+            if (!paused)
+                return false;
+            QThread::msleep(30);
+        }
+    };
+
+    const TrackingRunResult result = pipeline.run(spec, callbacks);
+    if (result.cancelled) {
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("cancelled")},
+            {QStringLiteral("completedFrames"), result.completedFrames},
+            {QStringLiteral("confidenceHash"), result.confidenceHash}});
+        return 0;
+    }
+    if (!result.ok) {
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("error")},
+            {QStringLiteral("code"), QStringLiteral("tracking_failed")},
+            {QStringLiteral("message"), result.error}});
+        return 4;
+    }
+    if (!spec.trackingOnly) {
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("error")},
+            {QStringLiteral("code"), QStringLiteral("inpaint_unavailable")},
+            {QStringLiteral("message"),
+             QStringLiteral("修复流水线尚未实现。")}});
+        return 5;
+    }
+
+    send(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("done")},
+        {QStringLiteral("cacheKey"), spec.cacheKey},
+        {QStringLiteral("confidenceHash"), result.confidenceHash},
+        {QStringLiteral("trackingState"),
+         removalTrackingStateToString(result.state)},
+        {QStringLiteral("completedFrames"), result.completedFrames}});
+    return 0;
+}
+
+#endif // VIDEOEDITOR_HAVE_ORT
+
+} // namespace
 
 int main(int argc, char *argv[])
 {
@@ -46,17 +250,25 @@ int main(int argc, char *argv[])
         socket.flush();
     };
 
-    // Task 4 only validates the protocol; Tasks 5/6 add the ONNX pipelines.
+    int exitCode = 3;
+#if VIDEOEDITOR_HAVE_ORT
+    exitCode = runRealEngine(*spec, socket, send);
+#else
+    // Task 4 stub: the real ONNX runtime is not available in this build.
     send(QJsonObject{{QStringLiteral("event"), QStringLiteral("error")},
-                     {QStringLiteral("code"), QStringLiteral("model_unavailable")},
+                     {QStringLiteral("code"),
+                      QStringLiteral("model_unavailable")},
                      {QStringLiteral("message"),
                       QStringLiteral("AI 模型尚未安装。")}});
     send(QJsonObject{{QStringLiteral("event"), QStringLiteral("done")},
                      {QStringLiteral("cacheKey"), spec->cacheKey},
                      {QStringLiteral("completedFrames"), 0}});
+    exitCode = 3;
+#endif
+
     // flush() only queues the bytes; the process must not exit (closing the
     // pipe) before the parent has actually received them.
     socket.waitForBytesWritten(5000);
     socket.disconnectFromServer();
-    return 3;
+    return exitCode;
 }

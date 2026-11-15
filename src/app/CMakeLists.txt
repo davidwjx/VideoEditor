@@ -50,6 +50,7 @@ if(TARGET VisionAiEngine)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:VisionAiEngine>" "$<TARGET_FILE_DIR:VideoEditor>")
 endif()
+videoeditor_copy_ai_runtime(VideoEditor)
 if(EXISTS "${CMAKE_SOURCE_DIR}/assets/models")
   # Refresh every build, not only when VideoEditor relinks, so the test
   # executables in the same directory always see the current manifest.
