@@ -158,6 +158,7 @@ void TimelineMixer::setProject(const Project &project)
 
 void TimelineMixer::setPosition(int64_t positionUs)
 {
+    m_startSamples = -1;
     m_startPositionUs = qMax<int64_t>(0, positionUs);
     m_framesRendered = 0;
     for (auto &entry : m_readers) {
@@ -166,8 +167,32 @@ void TimelineMixer::setPosition(int64_t positionUs)
     }
 }
 
+void TimelineMixer::setPositionSamples(int64_t sampleIndex)
+{
+    m_startSamples = std::max<int64_t>(0, sampleIndex);
+    m_startPositionUs =
+        (m_startSamples * 1'000'000LL + m_sampleRate / 2) / m_sampleRate;
+    m_framesRendered = 0;
+    for (auto &entry : m_readers) {
+        if (entry.second.reader)
+            entry.second.reader->reset();
+    }
+}
+
+int64_t TimelineMixer::positionSamples() const
+{
+    if (m_startSamples >= 0)
+        return m_startSamples + m_framesRendered;
+    return (m_startPositionUs * m_sampleRate + 500'000LL) / 1'000'000LL
+           + m_framesRendered;
+}
+
 int64_t TimelineMixer::positionForFrameCount(int64_t frames) const
 {
+    if (m_startSamples >= 0) {
+        return ((m_startSamples + frames) * 1'000'000LL + m_sampleRate / 2)
+               / m_sampleRate;
+    }
     return m_startPositionUs
         + (frames * 1'000'000 + m_sampleRate / 2) / m_sampleRate;
 }

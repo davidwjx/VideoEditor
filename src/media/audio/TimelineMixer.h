@@ -41,6 +41,11 @@ public:
     void setPosition(int64_t positionUs);
     int64_t positionUs() const;
 
+    // Starts at an exact integer sample. Export uses this so encoder input
+    // boundaries line up sample-for-sample with the timeline.
+    void setPositionSamples(int64_t sampleIndex);
+    int64_t positionSamples() const;
+
     void render(float *interleaved, int frames, MixStats *stats = nullptr);
 
     // Number of decoder readers kept open. Test/inspection hook used to prove
@@ -74,6 +79,9 @@ private:
     Project m_project;
     int m_sampleRate = 48000;
     int m_channels = 2;
+    // -1 = legacy microsecond origin (preview); >= 0 = exact sample origin
+    // (export). Keeping both modes preserves M2 preview timing exactly.
+    int64_t m_startSamples = -1;
     int64_t m_startPositionUs = 0;
     int64_t m_framesRendered = 0;
     quint64 m_renderSerial = 0;
