@@ -7,6 +7,7 @@
 
 #include <QColor>
 
+#include "ImageAlpha.h"
 #include "LamaInpainter.h"
 #include "MaskEditor.h"
 #include "MiGanInpainter.h"
@@ -405,6 +406,9 @@ std::optional<QList<PatchResult>> InpaintPipeline::repairChunk(
         }
 
         colorMatch(cropImage, &rgba, maskCrop);
+        // Keep straight alpha (the compositor uses SRC_ALPHA) but drop RGB
+        // under alpha == 0: it is never visible and only bloats the cache.
+        clearRgbWhereTransparent(rgba);
         patches.append(PatchResult{rgba, crop});
     }
 

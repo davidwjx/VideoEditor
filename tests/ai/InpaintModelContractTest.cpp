@@ -2,6 +2,7 @@
 
 #if defined(VIDEOEDITOR_HAVE_ORT) && VIDEOEDITOR_HAVE_ORT
 
+#include <algorithm>
 #include <iostream>
 
 #include <QColor>
@@ -9,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
+#include <QList>
 
 #include "LamaInpainter.h"
 #include "MiGanInpainter.h"
@@ -77,14 +79,14 @@ BinaryMask centeredHole(int width, int height)
     return mask;
 }
 
-qreal meanHoleDifference(const QImage &before, const QImage &after,
-                         const BinaryMask &mask)
+qreal meanMaskDifference(const QImage &before, const QImage &after,
+                         const BinaryMask &mask, bool inside)
 {
     qreal total = 0.0;
     int count = 0;
     for (int y = 0; y < mask.height; ++y) {
         for (int x = 0; x < mask.width; ++x) {
-            if (!mask.at(x, y))
+            if (mask.at(x, y) != inside)
                 continue;
             const QColor a = before.pixelColor(x, y);
             const QColor b = after.pixelColor(x, y);
@@ -94,6 +96,31 @@ qreal meanHoleDifference(const QImage &before, const QImage &after,
         }
     }
     return count == 0 ? 0.0 : total / count;
+}
+
+qreal meanHoleDifference(const QImage &before, const QImage &after,
+                         const BinaryMask &mask)
+{
+    return meanMaskDifference(before, after, mask, /*inside=*/true);
+}
+
+qreal meanOutsideDifference(const QImage &before, const QImage &after,
+                            const BinaryMask &mask)
+{
+    return meanMaskDifference(before, after, mask, /*inside=*/false);
+}
+
+QImage swapRedBlue(const QImage &image)
+{
+    QImage swapped = image.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < swapped.height(); ++y) {
+        auto *line = reinterpret_cast<QRgb *>(swapped.scanLine(y));
+        for (int x = 0; x < swapped.width(); ++x) {
+            line[x] = qRgba(qBlue(line[x]), qGreen(line[x]), qRed(line[x]),
+                            qAlpha(line[x]));
+        }
+    }
+    return swapped;
 }
 
 } // namespace
@@ -126,13 +153,58 @@ TEST(InpaintModelContract, MiGanRepairsSyntheticCrop)
     QElapsedTimer clock;
     clock.start();
     const auto result = inpainter.repair(crop, mask, &error);
-    std::cout << "MI-GAN 128x128 repair (" << inpainter.provider().toStdString()
-              << "): " << clock.elapsed() << " ms" << std::endl;
+    const qint64 coldMs = clock.elapsed();
     ASSERT_TRUE(result.has_value()) << error.toStdString();
     EXPECT_EQ(result->rgba.size(), QSize(kSize, kSize));
     EXPECT_EQ(result->rgba.format(), QImage::Format_ARGB32);
     EXPECT_EQ(qAlpha(result->rgba.pixel(kSize / 2, kSize / 2)), 255);
     EXPECT_GT(meanHoleDifference(crop, result->rgba, mask), 10.0);
+    std::cout << "MI-GAN outside-hole mean diff="
+              << meanOutsideDifference(crop, result->rgba, mask)
+              << " swappedRB="
+              << meanOutsideDifference(crop, swapRedBlue(result->rgba), mask)
+              << std::endl;
+
+    // Diagnostic: does the masked hole content bias the fill? The expected
+    // smooth background at the centre of texturedCrop is (120,140,120).
+    const QRgb expectedCenter = qRgb(120, 140, 120);
+    const QRgb contentCenter = result->rgba.pixel(kSize / 2, kSize / 2);
+    QImage zeroed = crop;
+    for (int y = 0; y < kSize; ++y)
+        for (int x = 0; x < kSize; ++x)
+            if (mask.at(x, y))
+                zeroed.setPixel(x, y, qRgb(0, 0, 0));
+    const auto zeroedResult = inpainter.repair(zeroed, mask, &error);
+    const QRgb zeroedCenter =
+        zeroedResult ? zeroedResult->rgba.pixel(kSize / 2, kSize / 2)
+                     : qRgb(0, 0, 0);
+    std::cout << "MI-GAN hole centre: content="
+              << qRed(contentCenter) << "," << qGreen(contentCenter) << ","
+              << qBlue(contentCenter) << " zeroed=" << qRed(zeroedCenter)
+              << "," << qGreen(zeroedCenter) << "," << qBlue(zeroedCenter)
+              << " expected=" << qRed(expectedCenter) << ","
+              << qGreen(expectedCenter) << "," << qBlue(expectedCenter)
+              << std::endl;
+
+    // Steady-state throughput: 3 warmups + 5 measured runs, gated on p50.
+    for (int i = 0; i < 3; ++i) {
+        const auto warm = inpainter.repair(crop, mask, &error);
+        ASSERT_TRUE(warm.has_value()) << error.toStdString();
+    }
+    QList<double> warmMs;
+    for (int i = 0; i < 5; ++i) {
+        QElapsedTimer runClock;
+        runClock.start();
+        const auto run = inpainter.repair(crop, mask, &error);
+        warmMs.append(double(runClock.nsecsElapsed()) / 1'000'000.0);
+        ASSERT_TRUE(run.has_value()) << error.toStdString();
+    }
+    std::sort(warmMs.begin(), warmMs.end());
+    const double warmP50 = warmMs.at(warmMs.size() / 2);
+    const double warmFps = warmP50 > 0.0 ? 1000.0 / warmP50 : 0.0;
+    std::cout << "MI-GAN 128x128 repair (" << inpainter.provider().toStdString()
+              << "): cold=" << coldMs << " ms, warm_p50=" << warmP50
+              << " ms (" << warmFps << " fps) over 5 runs" << std::endl;
 }
 
 TEST(InpaintModelContract, MiGanPadsNonMultipleOfEightCrop)
@@ -241,6 +313,41 @@ TEST(InpaintModelContract, LamaRepairsSyntheticCrop)
     EXPECT_EQ(result->rgba.size(), QSize(kSize, kSize));
     EXPECT_EQ(result->rgba.format(), QImage::Format_ARGB32);
     EXPECT_EQ(qAlpha(result->rgba.pixel(kSize / 2, kSize / 2)), 255);
+    EXPECT_GT(meanHoleDifference(crop, result->rgba, mask), 10.0);
+}
+
+// CPU fallback gate: with DML disabled MI-GAN must still repair one frame on
+// the CPU provider (no silent DML retry).
+TEST(InpaintModelContract, MiGanRepairsOneFrameOnCpuWhenDmlDisabled)
+{
+    const QString manifestPath = modelsManifestPath();
+    if (manifestPath.isEmpty())
+        GTEST_SKIP() << "VIDEOEDITOR_M4_MODELS is not set";
+
+    QString error;
+    const auto registry = ModelRegistry::load(manifestPath, &error);
+    ASSERT_TRUE(registry.has_value()) << error.toStdString();
+    const AiModelRecord *record =
+        findRecord(*registry, QStringLiteral("migan-512"));
+    ASSERT_NE(record, nullptr)
+        << "migan-512 is missing from the installed manifest";
+    const QString path = firstOnnxPath(*registry, *record);
+    ASSERT_FALSE(path.isEmpty()) << "migan-512 has no ONNX file";
+
+    MiGanInpainter inpainter(path, 0, /*allowDml=*/false, /*allowCpu=*/true);
+    ASSERT_TRUE(inpainter.isReady()) << inpainter.lastError().toStdString();
+    EXPECT_EQ(inpainter.provider(), QStringLiteral("cpu"));
+
+    constexpr int kSize = 128;
+    const BinaryMask mask = centeredHole(kSize, kSize);
+    const QImage crop = texturedCrop(kSize, kSize, mask);
+    QElapsedTimer clock;
+    clock.start();
+    const auto result = inpainter.repair(crop, mask, &error);
+    std::cout << "MI-GAN 128x128 CPU-only repair: " << clock.elapsed()
+              << " ms" << std::endl;
+    ASSERT_TRUE(result.has_value()) << error.toStdString();
+    EXPECT_EQ(result->rgba.size(), QSize(kSize, kSize));
     EXPECT_GT(meanHoleDifference(crop, result->rgba, mask), 10.0);
 }
 

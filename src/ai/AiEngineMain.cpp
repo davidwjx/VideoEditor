@@ -28,6 +28,7 @@
 #include <limits>
 
 #include "AiProtocol.h"
+#include "ImageAlpha.h"
 
 #if VIDEOEDITOR_HAVE_ORT
 #include "ModelRegistry.h"
@@ -655,6 +656,11 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
                 InpaintPipeline::colorMatch(sourceCrop, &patchImages[i],
                                             maskCrop);
             }
+            // The stabilizer and the second colour match can write RGB back
+            // under alpha == 0. Clear it last, immediately before the cache
+            // write, so transparent pixels stay (0,0,0,0) and PNG compresses.
+            for (QImage &image : patchImages)
+                clearRgbWhereTransparent(image);
         }
 
         // A chunk with no holes is still written (with an empty frame list) so

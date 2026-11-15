@@ -4,6 +4,8 @@ add_library(videoeditor_core STATIC
   TimeBase.h
   TimeBase.cpp
   MediaInfo.h
+  ImageAlpha.h
+  ImageMetrics.h
   CodecSupport.h
   CodecSupport.cpp
   Timeline.h

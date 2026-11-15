@@ -15,6 +15,9 @@ back to `ffmpeg` on `PATH`).
 | `slow_target_mask.mp4` | matching white-on-black target mask |
 | `occlusion.mp4` | moving target passing behind a black bar |
 | `clean_background.mp4` | same background with no target (PSNR reference) |
+| `static_logo_smooth.mp4` | smooth-gradient background + static red logo |
+| `static_logo_smooth_mask.mp4` | matching white-on-black logo mask |
+| `clean_gradient.mp4` | smooth gradient with no logo (fair PSNR reference) |
 
 Every sample is 640x360, 30 fps, 5 s, mpeg4 q=3, so the whole corpus stays
 small enough to commit and fast enough for CI.

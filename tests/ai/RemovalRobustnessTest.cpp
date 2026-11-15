@@ -102,7 +102,10 @@ QJsonObject modelRecord(const QString &id, const QString &family,
 
 } // namespace
 
-TEST(RemovalRobustness, CrashMarksFailedAndKeepsProject)
+// Error-mapping only: the fake transport never touches the cache. Chunk
+// retention on crash/disk-full is covered by the RemovalCache partial-manifest
+// and RemovalController redo tests, not by this test.
+TEST(RemovalRobustness, CrashReportsFailure)
 {
     AiFeatureGate gate;
     gate.setEnabledForTest(true);
@@ -127,7 +130,7 @@ TEST(RemovalRobustness, CrashMarksFailedAndKeepsProject)
         QStringLiteral("已完成的分段已保留")));
 }
 
-TEST(RemovalRobustness, DiskFullStopsWritingAndKeepsCompletedChunks)
+TEST(RemovalRobustness, DiskFullReportsError)
 {
     AiFeatureGate gate;
     gate.setEnabledForTest(true);
@@ -190,6 +193,8 @@ TEST(RemovalRobustness, ModelHashMismatchDisablesFeature)
         << reason.toStdString();
 }
 
+// Mask-sidecar round trip only. Full project save-as/relocation under a
+// Chinese path is covered by MaskSidecarStore and ProjectStore tests.
 TEST(RemovalRobustness, ChineseProjectPathRoundTripsMasks)
 {
     QTemporaryDir dir;

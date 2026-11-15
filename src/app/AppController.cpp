@@ -28,6 +28,7 @@
 #include "ExportEncoderCatalog.h"
 #include "ExportPipeline.h"
 #include "FrameReader.h"
+#include "ImageMetrics.h"
 #include "MaskCodec.h"
 #include "MaskSidecarStore.h"
 #include "MediaListModel.h"
@@ -1061,30 +1062,89 @@ void AppController::selftestRemoval()
     }
     const ModelRegistry *registry = m_aiGate->registry();
 
-    // Prefer the full-size acceptance assets when they are installed; the
-    // repository only carries the 640x360 corpus.
+    // Prefer the full-size smooth acceptance set (a natural-grade gradient GT
+    // is a fair quality probe); fall back to the legacy high-frequency 1080p
+    // set, then to the committed 640x360 corpus. VIDEOEDITOR_M4_ACCEPTANCE_SET
+    // forces "smooth" or "legacy" so both PSNR rows stay reproducible.
     const QString acceptance = QStringLiteral("C:/m4-spike/acceptance");
-    QString videoPath =
+    const QString repoDir =
+        QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR))
+            .filePath(QStringLiteral("removal"));
+    QString videoPath;
+    QString maskPath;
+    QString cleanPath;
+    QString setName;
+    bool is1080p = false;
+    bool found = false;
+    const QString forced =
+        qEnvironmentVariable("VIDEOEDITOR_M4_ACCEPTANCE_SET").trimmed().toLower();
+    const auto trySet = [&](const QString &name, const QString &video,
+                            const QString &mask, const QString &clean,
+                            bool fullSize) {
+        if (found || !QFileInfo::exists(video) || !QFileInfo::exists(mask)
+            || !QFileInfo::exists(clean)) {
+            return;
+        }
+        videoPath = video;
+        maskPath = mask;
+        cleanPath = clean;
+        setName = name;
+        is1080p = fullSize;
+        found = true;
+    };
+    const QString smoothVideo =
+        QDir(acceptance).filePath(QStringLiteral("static_logo_smooth_1080p_10s.mp4"));
+    const QString smoothMask = QDir(acceptance).filePath(
+        QStringLiteral("static_logo_smooth_mask_1080p_10s.mp4"));
+    const QString smoothClean = QDir(acceptance).filePath(
+        QStringLiteral("clean_gradient_1080p_10s.mp4"));
+    const QString legacyVideo =
         QDir(acceptance).filePath(QStringLiteral("static_logo_1080p_10s.mp4"));
-    QString maskPath = QDir(acceptance).filePath(
+    const QString legacyMask = QDir(acceptance).filePath(
         QStringLiteral("static_logo_mask_1080p_10s.mp4"));
-    QString cleanPath = QDir(acceptance).filePath(
+    const QString legacyClean = QDir(acceptance).filePath(
         QStringLiteral("clean_background_1080p_10s.mp4"));
-    bool is1080p = QFileInfo::exists(videoPath) && QFileInfo::exists(maskPath)
-                   && QFileInfo::exists(cleanPath);
-    if (!is1080p) {
-        const QString dir = QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR))
-                                .filePath(QStringLiteral("removal"));
-        videoPath = QDir(dir).filePath(QStringLiteral("static_logo.mp4"));
-        maskPath = QDir(dir).filePath(QStringLiteral("static_logo_mask.mp4"));
-        cleanPath = QDir(dir).filePath(QStringLiteral("clean_background.mp4"));
+    if (forced == QLatin1String("repo")) {
+        // Diagnostic/quick path: use the committed corpus directly.
+    } else if (forced == QLatin1String("legacy")) {
+        trySet(QStringLiteral("legacy-1080p"), legacyVideo, legacyMask,
+               legacyClean, true);
+    } else if (forced == QLatin1String("smooth")) {
+        trySet(QStringLiteral("smooth-1080p"), smoothVideo, smoothMask,
+               smoothClean, true);
+    } else {
+        trySet(QStringLiteral("smooth-1080p"), smoothVideo, smoothMask,
+               smoothClean, true);
+        trySet(QStringLiteral("legacy-1080p"), legacyVideo, legacyMask,
+               legacyClean, true);
     }
-    if (!QFileInfo::exists(videoPath) || !QFileInfo::exists(maskPath)
-        || !QFileInfo::exists(cleanPath)) {
-        fail(QStringLiteral("fixtures_missing video=%1 mask=%2 clean=%3")
-                 .arg(videoPath, maskPath, cleanPath));
+    if (!found) {
+        if (forced != QLatin1String("legacy")) {
+            trySet(QStringLiteral("smooth-640"),
+                   QDir(repoDir).filePath(QStringLiteral("static_logo_smooth.mp4")),
+                   QDir(repoDir).filePath(
+                       QStringLiteral("static_logo_smooth_mask.mp4")),
+                   QDir(repoDir).filePath(QStringLiteral("clean_gradient.mp4")),
+                   false);
+        }
+        if (forced != QLatin1String("smooth")) {
+            trySet(QStringLiteral("static-640"),
+                   QDir(repoDir).filePath(QStringLiteral("static_logo.mp4")),
+                   QDir(repoDir).filePath(
+                       QStringLiteral("static_logo_mask.mp4")),
+                   QDir(repoDir).filePath(
+                       QStringLiteral("clean_background.mp4")),
+                   false);
+        }
+    }
+    if (!found) {
+        fail(QStringLiteral("fixtures_missing dir=%1 set=%2")
+                 .arg(repoDir, forced.isEmpty() ? QStringLiteral("auto")
+                                                : forced));
         return;
     }
+    qInfo("REMOVAL_SELFTEST_FIXTURE set=%s file=%s", qPrintable(setName),
+          qPrintable(videoPath));
 
     QString error;
     const auto info = MediaProbe::probe(videoPath, &error);
@@ -1207,6 +1267,12 @@ void AppController::selftestRemoval()
         fail(QStringLiteral("cache_dir_failed"));
         return;
     }
+    const bool keepCache =
+        qEnvironmentVariable("VIDEOEDITOR_M4_SELFTEST_KEEP") == QLatin1String("1");
+    if (keepCache) {
+        cacheDir.setAutoRemove(false);
+        qInfo("REMOVAL_SELFTEST_CACHE %s", qPrintable(cacheDir.path()));
+    }
     RemovalCache cache(cacheDir.path());
 
     AiJobSpec spec;
@@ -1295,7 +1361,24 @@ void AppController::selftestRemoval()
     double mseSum = 0.0;
     qint64 sampleCount = 0;
     int framesWithPatch = 0;
+    const bool debug =
+        qEnvironmentVariable("VIDEOEDITOR_M4_SELFTEST_DEBUG") == QLatin1String("1");
+    double debugPatchR = 0.0;
+    double debugPatchG = 0.0;
+    double debugPatchB = 0.0;
+    double debugCleanR = 0.0;
+    double debugCleanG = 0.0;
+    double debugCleanB = 0.0;
+    qint64 debugPixels = 0;
     const int totalFrames = source->frameCount();
+    // A complete manifest is not enough: the job must have processed every
+    // frame, otherwise the cache could be "complete" with skipped frames.
+    if (result.completedFrames != totalFrames) {
+        fail(QStringLiteral("incomplete_job completedFrames=%1 totalFrames=%2")
+                 .arg(result.completedFrames)
+                 .arg(totalFrames));
+        return;
+    }
     for (int i = 0; i < totalFrames; ++i) {
         // The half-frame offset makes floor() resolve to exactly frame i.
         const int64_t sourceUs =
@@ -1315,11 +1398,21 @@ void AppController::selftestRemoval()
                      .arg(error));
             return;
         }
+        if (clean.size() != display) {
+            fail(QStringLiteral("clean_size_mismatch frame=%1 size=%2x%3 "
+                                "display=%4x%5")
+                     .arg(i)
+                     .arg(clean.width())
+                     .arg(clean.height())
+                     .arg(display.width())
+                     .arg(display.height()));
+            return;
+        }
         if (frame->patch.size() != frame->crop.size()) {
             fail(QStringLiteral("patch_crop_mismatch frame=%1").arg(i));
             return;
         }
-        ++framesWithPatch;
+        const qint64 samplesBefore = sampleCount;
         const QRect crop = frame->crop;
         for (int y = 0; y < crop.height(); ++y) {
             for (int x = 0; x < crop.width(); ++x) {
@@ -1328,6 +1421,15 @@ void AppController::selftestRemoval()
                     continue;
                 const QRgb cleanPixel =
                     clean.pixel(crop.x() + x, crop.y() + y);
+                if (debug && i == 0) {
+                    debugPatchR += qRed(patchPixel);
+                    debugPatchG += qGreen(patchPixel);
+                    debugPatchB += qBlue(patchPixel);
+                    debugCleanR += qRed(cleanPixel);
+                    debugCleanG += qGreen(cleanPixel);
+                    debugCleanB += qBlue(cleanPixel);
+                    ++debugPixels;
+                }
                 const double dr = double(qRed(patchPixel)) - qRed(cleanPixel);
                 const double dg = double(qGreen(patchPixel)) - qGreen(cleanPixel);
                 const double db = double(qBlue(patchPixel)) - qBlue(cleanPixel);
@@ -1335,13 +1437,34 @@ void AppController::selftestRemoval()
                 sampleCount += 3;
             }
         }
+        if (sampleCount > samplesBefore)
+            ++framesWithPatch;
     }
     if (sampleCount == 0) {
         fail(QStringLiteral("no_repair_pixels frames=%1").arg(totalFrames));
         return;
     }
-    const double mse = mseSum / double(sampleCount);
-    const double psnr = mse <= 1e-9 ? 100.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
+    // Every frame of this static-mask clip must carry at least one repaired
+    // alpha>0 pixel; a complete manifest with skipped frames must not pass.
+    if (framesWithPatch != totalFrames) {
+        fail(QStringLiteral("incomplete_repair framesWithPatch=%1 "
+                            "totalFrames=%2")
+                 .arg(framesWithPatch)
+                 .arg(totalFrames));
+        return;
+    }
+    if (debug && debugPixels > 0) {
+        qInfo("REMOVAL_SELFTEST_DEBUG frame=0 alphaPixels=%lld "
+              "patchMeanRGB=%.1f,%.1f,%.1f cleanMeanRGB=%.1f,%.1f,%.1f",
+              static_cast<long long>(debugPixels),
+              debugPatchR / double(debugPixels),
+              debugPatchG / double(debugPixels),
+              debugPatchB / double(debugPixels),
+              debugCleanR / double(debugPixels),
+              debugCleanG / double(debugPixels),
+              debugCleanB / double(debugPixels));
+    }
+    const double psnr = psnrFromMse(mseSum / double(sampleCount));
 
     QString sizeError;
     const qint64 cacheBytes = cache.sizeOnDisk(&sizeError);
@@ -1355,21 +1478,24 @@ void AppController::selftestRemoval()
 
     if (!psnrOk || !cacheOk || !timingOk) {
         const QString reason = QString::asprintf(
-            "threshold file=%s psnr=%.2f psnrThreshold=28.00 seconds=%.1f "
-            "timingThreshold=%s cacheBytes=%lld cacheBudget=%lld "
-            "sourceBytes=%lld frames=%d provider=%s",
-            qPrintable(videoPath), psnr, seconds,
+            "threshold set=%s file=%s psnr=%.2f psnrThreshold=28.00 "
+            "seconds=%.1f timingThreshold=%s cacheBytes=%lld "
+            "cacheBudget=%lld sourceBytes=%lld completedFrames=%d frames=%d "
+            "provider=%s",
+            qPrintable(setName), qPrintable(videoPath), psnr, seconds,
             is1080p ? "300" : "-", static_cast<long long>(cacheBytes),
             static_cast<long long>(budget),
-            static_cast<long long>(sourceBytes), framesWithPatch,
-            qPrintable(result.provider));
+            static_cast<long long>(sourceBytes), result.completedFrames,
+            framesWithPatch, qPrintable(result.provider));
         fail(reason);
         return;
     }
 
-    qInfo("REMOVAL_SELFTEST_OK file=%s frames=%d psnr=%.2f seconds=%.1f "
-          "cacheBytes=%lld sourceBytes=%lld provider=%s",
-          qPrintable(videoPath), framesWithPatch, psnr, seconds,
+    qInfo("REMOVAL_SELFTEST_OK set=%s file=%s frames=%d completedFrames=%d "
+          "psnr=%.2f seconds=%.1f cacheBytes=%lld sourceBytes=%lld "
+          "provider=%s",
+          qPrintable(setName), qPrintable(videoPath), framesWithPatch,
+          result.completedFrames, psnr, seconds,
           static_cast<long long>(cacheBytes),
           static_cast<long long>(sourceBytes), qPrintable(result.provider));
     QCoreApplication::exit(0);

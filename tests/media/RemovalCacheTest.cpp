@@ -1,13 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <iostream>
 #include <limits>
 
+#include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
 #include <QTemporaryDir>
 #include "CacheStore.h"
+#include "ImageAlpha.h"
 #include "RemovalCache.h"
 
 using namespace VideoEditor;
@@ -353,4 +357,94 @@ TEST(RemovalCache, GarbageCollectionHonorsPositiveMaxBytes)
 
     ASSERT_TRUE(cache.collectGarbage({}, 1, &error));
     EXPECT_FALSE(QFileInfo::exists(cache.cacheDir(key)));
+}
+
+// Representative feathered patch: a textured hole in the middle, a partially
+// transparent feather ring, and a large fully transparent margin. Straight
+// alpha must survive the PNG round trip, and clearing RGB under alpha == 0
+// must keep the serialized chunk far below the old full-RGB crop.
+TEST(RemovalCache, TransparentRgbIsClearedAndCompresses)
+{
+    QTemporaryDir dir;
+    RemovalCache cache(dir.path());
+    const QString key(64, QLatin1Char('e'));
+    constexpr int kSize = 192;
+    constexpr int kHole = 96;
+    const int holeStart = (kSize - kHole) / 2;
+    const int holeEnd = holeStart + kHole;
+
+    // Per-pixel noise is the worst case for PNG, like real textured content.
+    const auto noise = [](int x, int y) {
+        uint32_t value = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u;
+        value = (value ^ (value >> 13)) * 1274126177u;
+        return int(value ^ (value >> 16));
+    };
+    QImage full(kSize, kSize, QImage::Format_ARGB32);
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize; ++x) {
+            full.setPixel(x, y,
+                          qRgba(noise(x, y) & 0xff, noise(x + 17, y + 31) & 0xff,
+                                noise(x + 91, y + 7) & 0xff, 255));
+        }
+    }
+    QImage patch = full;
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize; ++x) {
+            int alpha = 0;
+            if (x >= holeStart && x < holeEnd && y >= holeStart
+                && y < holeEnd) {
+                const int edge = std::min(
+                    {x - holeStart, y - holeStart, holeEnd - 1 - x,
+                     holeEnd - 1 - y});
+                alpha = edge < 4 ? 128 : 255; // 4 px feather ring
+            }
+            const QRgb color = patch.pixel(x, y);
+            patch.setPixel(x, y,
+                           qRgba(qRed(color), qGreen(color), qBlue(color),
+                                 alpha));
+        }
+    }
+    const QRgb visibleBefore = patch.pixel(holeStart + kHole / 2,
+                                           holeStart + kHole / 2);
+    clearRgbWhereTransparent(patch);
+    EXPECT_EQ(patch.pixel(0, 0), QRgb(0)); // margin is now truly blank
+    EXPECT_EQ(patch.pixel(holeStart + kHole / 2, holeStart + kHole / 2),
+              visibleBefore); // visible pixels keep straight-alpha RGB
+
+    QString error;
+    RemovalChunkIndex index;
+    ASSERT_TRUE(cache.writeChunkFrames(key, 0, {0}, {patch},
+                                       {QRect(0, 0, kSize, kSize)}, &index,
+                                       &error))
+        << error.toStdString();
+    ASSERT_EQ(index.frames.size(), 1);
+
+    const QImage read = cache.readFrameImage(key, index.frames.first(), &error);
+    ASSERT_FALSE(read.isNull()) << error.toStdString();
+    EXPECT_EQ(read.size(), QSize(kSize, kSize));
+    EXPECT_EQ(qAlpha(read.pixel(0, 0)), 0);
+    EXPECT_EQ(read.pixel(0, 0), QRgb(0));
+    EXPECT_EQ(qAlpha(read.pixel(holeStart + kHole / 2,
+                                holeStart + kHole / 2)),
+              255);
+    EXPECT_EQ(read.pixel(holeStart + kHole / 2, holeStart + kHole / 2),
+              visibleBefore);
+    // Feather alpha survives exactly.
+    EXPECT_EQ(qAlpha(read.pixel(holeStart, holeStart + kHole / 2)),
+              qAlpha(patch.pixel(holeStart, holeStart + kHole / 2)));
+
+    QByteArray oldBytes;
+    QBuffer oldBuffer(&oldBytes);
+    ASSERT_TRUE(oldBuffer.open(QIODevice::WriteOnly));
+    ASSERT_TRUE(full.save(&oldBuffer, "PNG"));
+    const QString storedPath = QDir(cache.cacheDir(key))
+                                   .filePath(QStringLiteral("chunks/0/") +
+                                             index.frames.first().file);
+    const qint64 storedBytes = QFileInfo(storedPath).size();
+    EXPECT_GT(storedBytes, 0);
+    EXPECT_LT(storedBytes * 10, qint64(oldBytes.size()) * 6)
+        << "stored=" << storedBytes << " old=" << oldBytes.size();
+    std::cout << "Repair cache patch: stored=" << storedBytes
+              << " bytes, old full-RGB=" << oldBytes.size() << " bytes"
+              << std::endl;
 }

@@ -3,10 +3,14 @@
 #if defined(VIDEOEDITOR_HAVE_OPENCV) && VIDEOEDITOR_HAVE_OPENCV
 
 #include <algorithm>
+#include <iostream>
 
+#include <QElapsedTimer>
 #include <QImage>
+#include <QList>
 
 #include "FlowPropagator.h"
+#include "RemovalEvalMetrics.h"
 
 using namespace VideoEditor;
 
@@ -59,25 +63,6 @@ BinaryMask makeMask(const QRect &rect, int width, int height)
             mask.set(x, y, true);
     }
     return mask;
-}
-
-double maskIou(const BinaryMask &a, const BinaryMask &b)
-{
-    if (!a.isValid() || !b.isValid() || a.width != b.width
-        || a.height != b.height) {
-        return 0.0;
-    }
-    int64_t intersection = 0;
-    int64_t unions = 0;
-    for (size_t i = 0; i < a.bits.size(); ++i) {
-        const bool inA = a.bits[i] != 0;
-        const bool inB = b.bits[i] != 0;
-        if (inA && inB)
-            ++intersection;
-        if (inA || inB)
-            ++unions;
-    }
-    return unions > 0 ? double(intersection) / double(unions) : 0.0;
 }
 
 } // namespace
@@ -148,6 +133,80 @@ TEST(FlowPropagator, RejectsMismatchedInputs)
         propagator.propagate(first, second, mask);
     EXPECT_FALSE(result.ok);
     EXPECT_FALSE(result.error.isEmpty());
+}
+
+// The acceptance gate is DIS propagation at 1080p. Measure many warm pairs
+// and gate on p50 (not one sample) so a single slow scheduling hiccup cannot
+// make the result flaky.
+TEST(FlowPropagator, Sustains1080pDisThroughput)
+{
+    constexpr int kWidth = 1920;
+    constexpr int kHeight = 1080;
+    constexpr int kPairs = 12;
+    const QRect object(800, 500, 200, 150);
+
+    // One static textured background; p95 stays meaningful without rebuilding
+    // 1080p noise for every frame.
+    QImage background(kWidth, kHeight, QImage::Format_RGB32);
+    for (int y = 0; y < kHeight; ++y) {
+        auto *line = reinterpret_cast<QRgb *>(background.scanLine(y));
+        for (int x = 0; x < kWidth; ++x) {
+            const int value = 40 + int(hashPixel(x, y) % 70u);
+            line[x] = qRgb(value, value, value);
+        }
+    }
+    const auto frameAt = [&background, &object](int shift) {
+        QImage image = background;
+        for (int oy = 0; oy < object.height(); ++oy) {
+            const int y = object.y() + oy;
+            auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+            for (int ox = 0; ox < object.width(); ++ox) {
+                const int x = object.x() + shift + ox;
+                if (x < 0 || x >= kWidth)
+                    continue;
+                const int value =
+                    std::min(255, 40 + int(hashPixel(ox, oy) % 70u) + 130);
+                line[x] = qRgb(value, value, value);
+            }
+        }
+        return image;
+    };
+
+    FlowPropagator propagator;
+    for (int i = 0; i < 2; ++i) { // warm-up
+        const int shift = i * 4;
+        const QImage previous = frameAt(shift);
+        const QImage current = frameAt(shift + 4);
+        const BinaryMask mask =
+            makeMask(object.translated(shift, 0), kWidth, kHeight);
+        const FlowPropagationResult warm =
+            propagator.propagate(previous, current, mask);
+        ASSERT_TRUE(warm.ok) << warm.error.toStdString();
+    }
+
+    QList<double> timesMs;
+    for (int i = 0; i < kPairs; ++i) {
+        const int shift = i * 4;
+        const QImage previous = frameAt(shift);
+        const QImage current = frameAt(shift + 4);
+        const BinaryMask mask =
+            makeMask(object.translated(shift, 0), kWidth, kHeight);
+        QElapsedTimer clock;
+        clock.start();
+        const FlowPropagationResult result =
+            propagator.propagate(previous, current, mask);
+        timesMs.append(double(clock.nsecsElapsed()) / 1'000'000.0);
+        ASSERT_TRUE(result.ok) << result.error.toStdString();
+        EXPECT_GT(result.areaPx, 0);
+    }
+    std::sort(timesMs.begin(), timesMs.end());
+    const double p50 = timesMs.at(kPairs / 2);
+    const double p95 = timesMs.at(int(double(kPairs) * 0.95) - 1);
+    const double fps = p50 > 0.0 ? 1000.0 / p50 : 0.0;
+    std::cout << "DIS 1080p propagate: p50=" << p50 << " ms (" << fps
+              << " fps), p95=" << p95 << " ms over " << kPairs
+              << " warm pairs" << std::endl;
+    EXPECT_GE(fps, 20.0);
 }
 
 #endif // VIDEOEDITOR_HAVE_OPENCV

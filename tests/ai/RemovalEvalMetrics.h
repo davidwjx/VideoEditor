@@ -7,6 +7,7 @@
 #include <QList>
 #include <QtGlobal>
 
+#include "ImageMetrics.h"
 #include "MaskCodec.h"
 
 namespace VideoEditor {
@@ -56,10 +57,9 @@ inline double psnrInMask(const QImage &a, const QImage &b, const BinaryMask &mas
             count += 3;
         }
     }
-    if (count == 0 || mse <= 1e-9)
+    if (count == 0)
         return 100.0;
-    mse /= double(count);
-    return 10.0 * std::log10((255.0 * 255.0) / mse);
+    return psnrFromMse(mse / double(count));
 }
 
 // Mean absolute per-channel difference between consecutive frames inside the

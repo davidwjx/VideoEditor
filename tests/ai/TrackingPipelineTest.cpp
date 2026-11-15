@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <functional>
 #include <iostream>
+#include <optional>
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -17,8 +18,10 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 
+#include "FrameReader.h"
 #include "ModelRegistry.h"
 #include "OnnxExecutor.h"
+#include "RemovalEvalMetrics.h"
 #include "Sam2Tracker.h"
 #include "TimeBase.h"
 #include "TrackingPipeline.h"
@@ -68,25 +71,6 @@ BinaryMask makeMask(const QRect &rect, int width, int height)
             mask.set(x, y, true);
     }
     return mask;
-}
-
-double maskIou(const BinaryMask &a, const BinaryMask &b)
-{
-    if (!a.isValid() || !b.isValid() || a.width != b.width
-        || a.height != b.height) {
-        return 0.0;
-    }
-    int64_t intersection = 0;
-    int64_t unions = 0;
-    for (size_t i = 0; i < a.bits.size(); ++i) {
-        const bool inA = a.bits[i] != 0;
-        const bool inB = b.bits[i] != 0;
-        if (inA && inB)
-            ++intersection;
-        if (inA || inB)
-            ++unions;
-    }
-    return unions > 0 ? double(intersection) / double(unions) : 0.0;
 }
 
 const AiModelRecord *findEfficientTam(const ModelRegistry &registry)
@@ -605,6 +589,162 @@ TEST(TrackingPipeline, RejectsKeyframeOutsideRange)
     EXPECT_FALSE(result.ok);
     EXPECT_NE(result.error.indexOf(QStringLiteral("跟踪区间")), -1)
         << result.error.toStdString();
+}
+
+// Acceptance gate: EfficientTAM keyframe IoU >= 0.85 against the authored mask
+// on the committed static-logo fixture (not the synthetic rectangle).
+TEST(TrackingPipeline, EfficientTamMatchesAuthoredMaskOnFixture)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    const QString manifestPath =
+        modelsDir + QStringLiteral("/models.manifest.json");
+    if (modelsDir.isEmpty() || !QFileInfo::exists(manifestPath))
+        GTEST_SKIP() << "VIDEOEDITOR_M4_MODELS is not set or the manifest is "
+                        "missing";
+    const QString fixtures =
+        QStringLiteral(VIDEOEDITOR_FIXTURE_DIR) + QStringLiteral("/removal");
+    const QString video = fixtures + QStringLiteral("/static_logo.mp4");
+    const QString maskVideo =
+        fixtures + QStringLiteral("/static_logo_mask.mp4");
+    if (!QFileInfo::exists(video) || !QFileInfo::exists(maskVideo))
+        GTEST_SKIP() << "removal fixtures missing; run generate_fixtures.ps1";
+
+    QString error;
+    const auto registry = ModelRegistry::load(manifestPath, &error);
+    ASSERT_TRUE(registry.has_value()) << error.toStdString();
+    const AiModelRecord *record = findEfficientTam(*registry);
+    if (!record)
+        GTEST_SKIP() << "no EfficientTAM fp32 tracking model in the manifest";
+
+    const QSize display(640, 360);
+    FrameReader reader;
+    ASSERT_TRUE(reader.open(video, Rational{30, 1}, 0, 5'000'000, display,
+                            &error))
+        << error.toStdString();
+    const QImage frame = reader.readFrame(0, &error);
+    ASSERT_FALSE(frame.isNull()) << error.toStdString();
+
+    FrameReader maskReader;
+    ASSERT_TRUE(maskReader.open(maskVideo, Rational{30, 1}, 0, 5'000'000,
+                                display, &error))
+        << error.toStdString();
+    const QImage maskImage = maskReader.readFrame(0, &error);
+    ASSERT_FALSE(maskImage.isNull()) << error.toStdString();
+    BinaryMask groundTruth;
+    groundTruth.width = display.width();
+    groundTruth.height = display.height();
+    groundTruth.bits.assign(size_t(display.width()) * size_t(display.height()), 0);
+    for (int y = 0; y < display.height(); ++y)
+        for (int x = 0; x < display.width(); ++x)
+            if (qGray(maskImage.pixel(x, y)) > 127)
+                groundTruth.set(x, y, true);
+    ASSERT_GT(groundTruth.bits.size(), size_t(0));
+
+    Sam2Tracker tracker;
+    ASSERT_TRUE(tracker.initialize(configFor(*registry, *record), &error))
+        << error.toStdString();
+    const TrackingPrompt prompt = Sam2Tracker::promptFromMask(groundTruth);
+    QElapsedTimer clock;
+    clock.start();
+    const auto segmented = tracker.segment(frame, prompt, &error);
+    ASSERT_TRUE(segmented.has_value()) << error.toStdString();
+    const double iou = maskIou(segmented->mask, groundTruth);
+    std::cout << "EfficientTAM fixture keyframe IoU=" << iou
+              << " segmentation=" << clock.elapsed() << " ms" << std::endl;
+    EXPECT_GE(iou, 0.85);
+}
+
+// Acceptance gate: DIS propagation with K=5 authored resets. Uses the
+// slow-target corpus (not the static logo) and the ground-truth mask video.
+TEST(TrackingPipeline, DisResetsAtK5KeyframesMaintainMeanIou)
+{
+    const QString fixtures =
+        QStringLiteral(VIDEOEDITOR_FIXTURE_DIR) + QStringLiteral("/removal");
+    const QString video = fixtures + QStringLiteral("/slow_target.mp4");
+    const QString maskVideo =
+        fixtures + QStringLiteral("/slow_target_mask.mp4");
+    if (!QFileInfo::exists(video) || !QFileInfo::exists(maskVideo))
+        GTEST_SKIP() << "removal fixtures missing; run generate_fixtures.ps1";
+
+    QString error;
+    const QSize display(640, 360);
+    const Rational fps{30, 1};
+    FrameReader reader;
+    ASSERT_TRUE(reader.open(video, fps, 0, 5'000'000, display, &error))
+        << error.toStdString();
+    const QList<QImage> frames = reader.readAll(&error);
+    ASSERT_FALSE(frames.isEmpty()) << error.toStdString();
+    FrameReader maskReader;
+    ASSERT_TRUE(maskReader.open(maskVideo, fps, 0, 5'000'000, display, &error))
+        << error.toStdString();
+    const QList<QImage> maskFrames = maskReader.readAll(&error);
+    ASSERT_FALSE(maskFrames.isEmpty()) << error.toStdString();
+
+    const int total = std::min(frames.size(), maskFrames.size());
+    QList<BinaryMask> groundTruth;
+    groundTruth.reserve(total);
+    for (int i = 0; i < total; ++i) {
+        BinaryMask mask;
+        mask.width = display.width();
+        mask.height = display.height();
+        mask.bits.assign(size_t(display.width()) * size_t(display.height()), 0);
+        for (int y = 0; y < display.height(); ++y)
+            for (int x = 0; x < display.width(); ++x)
+                if (qGray(maskFrames.at(i).pixel(x, y)) > 127)
+                    mask.set(x, y, true);
+        groundTruth.append(mask);
+    }
+
+    QList<int> keyframeIndices;
+    QList<BinaryMask> keyframeMasks;
+    for (int i = 0; i < total; i += 5) {
+        keyframeIndices.append(i);
+        keyframeMasks.append(groundTruth.at(i));
+    }
+
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    AiJobSpec spec = makeSpec(total, display.width(), display.height());
+    spec.cacheDir = dir.filePath(QStringLiteral("cache"));
+    spec.sidecarRoot = dir.filePath(QStringLiteral("sidecar"));
+    TrackingPipeline pipeline; // no tracker: DIS-only between keyframes
+    const TrackingRunResult result =
+        pipeline.runFrames(spec, frames, keyframeIndices, keyframeMasks);
+    ASSERT_TRUE(result.ok) << result.error.toStdString();
+    EXPECT_EQ(result.completedFrames, total);
+
+    const auto readWrittenMask = [&spec](int index,
+                                         QString *readError)
+        -> std::optional<BinaryMask> {
+        const QString path = QDir(spec.cacheDir)
+                                 .filePath(QStringLiteral("tracking/masks/"
+                                                          "frame_%1.rle")
+                                               .arg(index, 6, 10,
+                                                    QLatin1Char('0')));
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (readError)
+                *readError = QStringLiteral("missing %1").arg(path);
+            return std::nullopt;
+        }
+        return MaskCodec::decode(file.readAll(), readError);
+    };
+
+    double sum = 0.0;
+    double minimum = 1.0;
+    for (int i = 0; i < total; ++i) {
+        QString readError;
+        const auto mask = readWrittenMask(i, &readError);
+        ASSERT_TRUE(mask.has_value()) << readError.toStdString();
+        const double iou = maskIou(*mask, groundTruth.at(i));
+        sum += iou;
+        minimum = std::min(minimum, iou);
+    }
+    const double mean = sum / double(total);
+    std::cout << "DIS K=5 propagation: mean IoU=" << mean
+              << " min=" << minimum << " over " << total << " frames"
+              << std::endl;
+    EXPECT_GE(mean, 0.90);
 }
 
 TEST(OnnxExecutor, RejectsWhenNoExecutionProviderAllowed)
