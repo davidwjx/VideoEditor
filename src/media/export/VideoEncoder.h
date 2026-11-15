@@ -76,6 +76,8 @@ private:
     int m_width = 0;
     int m_height = 0;
     bool m_hardware = false;
+    // Last submitted frame index; only used if an encoder omits pts.
+    int64_t m_lastFrameIndex = -1;
 };
 
 } // namespace VideoEditor

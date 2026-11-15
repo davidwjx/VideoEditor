@@ -5,7 +5,9 @@
 #include <cstring>
 
 extern "C" {
+#include <libavutil/avutil.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
 
@@ -145,6 +147,8 @@ bool VideoEncoder::encodeRgba(const uint8_t *rgba, int64_t frameIndex,
                               std::vector<EncodedPacket> *packets,
                               QString *error)
 {
+    if (error)
+        error->clear();
     if (!m_ctx || !m_frame || !rgba || !packets)
         return false;
     if (av_frame_make_writable(m_frame) < 0) {
@@ -154,8 +158,13 @@ bool VideoEncoder::encodeRgba(const uint8_t *rgba, int64_t frameIndex,
     }
     const uint8_t *srcData[4] = {rgba, nullptr, nullptr, nullptr};
     const int srcStride[4] = {m_width * 4, 0, 0, 0};
-    sws_scale(m_sws, srcData, srcStride, 0, m_height, m_frame->data,
-              m_frame->linesize);
+    const int scaled = sws_scale(m_sws, srcData, srcStride, 0, m_height,
+                                 m_frame->data, m_frame->linesize);
+    if (scaled <= 0) {
+        if (error)
+            *error = QStringLiteral("RGBA 到 YUV 的颜色转换失败。");
+        return false;
+    }
     return sendFrame(forceKeyframe, frameIndex, packets, error);
 }
 
@@ -163,6 +172,8 @@ bool VideoEncoder::encodeBlack(int64_t frameIndex, bool forceKeyframe,
                                std::vector<EncodedPacket> *packets,
                                QString *error)
 {
+    if (error)
+        error->clear();
     if (!m_ctx || !m_frame || !packets)
         return false;
     if (av_frame_make_writable(m_frame) < 0) {
@@ -178,6 +189,7 @@ bool VideoEncoder::sendFrame(bool forceKeyframe, int64_t frameIndex,
                              std::vector<EncodedPacket> *packets,
                              QString *error)
 {
+    m_lastFrameIndex = frameIndex;
     m_frame->pts = frameIndex;
     // One frame in encoder time base; some encoders copy it to the packet.
     m_frame->duration = 1;
@@ -218,8 +230,9 @@ bool VideoEncoder::receivePackets(std::vector<EncodedPacket> *packets,
         }
         EncodedPacket packet;
         packet.data.assign(m_packet->data, m_packet->data + m_packet->size);
-        packet.pts = m_packet->pts;
-        packet.dts = m_packet->dts == AV_NOPTS_VALUE ? m_packet->pts
+        packet.pts = m_packet->pts == AV_NOPTS_VALUE ? m_lastFrameIndex
+                                                     : m_packet->pts;
+        packet.dts = m_packet->dts == AV_NOPTS_VALUE ? packet.pts
                                                      : m_packet->dts;
         packet.duration = m_packet->duration > 0 ? m_packet->duration : 1;
         packet.key = (m_packet->flags & AV_PKT_FLAG_KEY) != 0;
@@ -230,6 +243,8 @@ bool VideoEncoder::receivePackets(std::vector<EncodedPacket> *packets,
 
 bool VideoEncoder::flush(std::vector<EncodedPacket> *packets, QString *error)
 {
+    if (error)
+        error->clear();
     if (!m_ctx)
         return true;
     if (!packets) {
@@ -263,6 +278,7 @@ void VideoEncoder::close()
     m_width = 0;
     m_height = 0;
     m_hardware = false;
+    m_lastFrameIndex = -1;
 }
 
 } // namespace VideoEditor
