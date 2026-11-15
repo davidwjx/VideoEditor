@@ -3724,3 +3724,46 @@ git commit -m "test(m4): add removal evaluation corpus, robustness gates and acc
 10. **一个片段一个目标的限制**：规格 `Clip.removalLayerId` 单值；多目标需要分割/复制片段，产品文案必须说明。
 11. **未保存工程/另存为的旁车迁移**：Task 2/3 已设计 `relocateTo`，但需在 AppController 保存流程中实际调用并测试；若遗漏，遮罩会丢。
 12. **主观质量阈值/签字人**：Task 0/9 需要明确 3 名评审与签字人，否则“运动目标通过”无法验收。
+
+---
+
+## Offline Technical Scope Addendum (2026-11-15, user-approved)
+
+Task 0 measured NO_GO for interactive per-frame removal on the current AMD Radeon(TM) Graphics iGPU. The user approved an **offline technical version** on this machine. This addendum supersedes the corresponding real-time assumptions in Tasks 5–9; schema/mask/cache/UI/export infrastructure in Tasks 1–4/7 still applies.
+
+### Gate result
+
+- Legal: `TECHNICAL_EVALUATION_ONLY`; `models.manifest.json` stays `commercialApproved=false`, `releaseBlocked=true`, no legal sign-off. The feature is internal-only and must default disabled via a build/runtime flag; no commercial release.
+- Technical: offline-acceptable, not interactive. Best viable pipeline measured in `2026-11-15-m4-optimization-research.md`:
+  - Keyframes: **EfficientTAM-Ti 512 fp32 on CPU** (45 ms/keyframe, ~22 keyframes/s, 0.879 mask IoU vs SAM 2 1024²).
+  - Propagation: **OpenCV DIS optical flow** (1080p ~26 fps; K=5 mean IoU 0.947).
+  - Repair: **MI-GAN 512 on DirectML** (~2.23 fps) fast path; **LaMa 512 int8 on CPU** (~1.88 fps) quality path.
+  - SAM 2.1 Tiny: keyframe-quality fallback only (CPU 855 ms/keyframe); per-frame SAM 2 is unusable (0.24 fps DML / 0.68 fps CPU).
+- End-to-end estimate: 1080p30, 10 s, one object, K=5: ~2.6 min (MI-GAN) / ~3.1 min (LaMa int8). Offline-acceptable; not interactive.
+
+### Revised implementation rules
+
+1. **Tracking is keyframe + propagation, not SAM 2 per-frame.** The tracking worker:
+   - runs EfficientTAM fp32 CPU on keyframes (default K=5; user-adjustable 5–30),
+   - propagates masks with DIS optical flow between keyframes,
+   - stores per-frame confidence/IoU proxy and flags low-confidence intervals for keyframe correction.
+   - SAM 2.1 Tiny CPU may be offered as a quality keyframe option if explicitly enabled; it is never run per frame.
+2. **Repair is an offline background job.** The UI must show an explicit estimate and “后台处理，可取消/继续”，not a live per-frame preview. Repair runs per masked ROI (512² crops), not full 1080p frames.
+3. **Repair model contract:** MI-GAN mask convention is **255 = known/background, 0 = hole** (inverse of the Task 0 random-probe mask). LaMa requires the `allowzero=0` patched ONNX variant; record its hash. fp16 EfficientTAM is forbidden (parity failure); use fp32.
+4. **Revised thresholds:**
+   - 1080p30 10 s single object: ≤5 min on the current AMD iGPU (target 2.6–3.1 min).
+   - Keyframe tracking latency ≤100 ms; DIS propagation ≥20 fps at 1080p.
+   - MI-GAN DML ≥2 fps; LaMa int8 CPU ≥1.5 fps.
+   - VRAM ≤4 GB; CPU fallback must complete one frame.
+   - Mask keyframe IoU ≥0.85 vs reference on the fixed M4 sample; propagated mean IoU ≥0.90 at K=5.
+   - Export uses only a complete, hash-verified repair cache; inference never runs during export.
+5. **Feature gate:** `AiFeatureGate` must default off in all builds; enabling requires an internal flag and a `models.manifest.json` match. `commercialApproved=false` keeps the UI in “内部技术预览” mode with a visible disclaimer.
+6. **Manifest:** add SHA-256 entries for `efficienttam_ti_512_fp32` and the `allowzero=0` LaMa int8 variant; keep `commercialApproved=false`. Do not commit model binaries.
+7. **Tests/acceptance:** update Task 5/6/9 tests to the offline pipeline; add a measured 1080p10s end-to-end offline test (may be marked slow) and assert the ≤5 min budget on this machine, plus cache completeness/export preflight.
+
+### Task overrides
+
+- Task 5: implement EfficientTAM fp32 keyframe tracking + DIS propagation + confidence; do not implement per-frame SAM 2 tracking. Keep the SAM 2 interface for optional keyframe quality.
+- Task 6: repair queue uses MI-GAN DML and LaMa int8 CPU on 512² ROI; use the 255=known/0=hole convention; no real-time repair requirement.
+- Task 8: UX copy must say “后台离线处理/预计时间”，not “实时消除”.
+- Task 9: acceptance is offline budget/mask quality/cache/export parity, not interactive fps.
