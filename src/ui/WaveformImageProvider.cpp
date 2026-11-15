@@ -48,18 +48,23 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
         sourceInUs = qMax<int64_t>(0, parts.at(2).toLongLong());
         sourceOutUs = parts.at(3).toLongLong();
     }
+    // Caches written before duration metadata existed can report durationUs
+    // <= 0; derive an effective duration from the 10 ms bucket count instead.
+    const int64_t effectiveDurationUs =
+        peaks.durationUs > 0
+            ? peaks.durationUs
+            : int64_t(peaks.bucketCount()) * 1'000'000
+                  / WaveformPeaks::kBucketsPerSecond;
     if (sourceOutUs <= sourceInUs || peaks.durationUs <= 0) {
         sourceInUs = 0;
-        sourceOutUs = peaks.durationUs > 0
-                          ? peaks.durationUs
-                          : int64_t(peaks.bucketCount())
-                                * 1'000'000 / WaveformPeaks::kBucketsPerSecond;
+        sourceOutUs = effectiveDurationUs;
     }
-    sourceOutUs = qMin<int64_t>(sourceOutUs, peaks.durationUs);
+    sourceInUs = qBound<int64_t>(0, sourceInUs, effectiveDurationUs);
+    sourceOutUs = qBound<int64_t>(sourceInUs, sourceOutUs, effectiveDurationUs);
     const int firstBucket = int(sourceInUs * peaks.bucketCount()
-                                / qMax<int64_t>(1, peaks.durationUs));
+                                / qMax<int64_t>(1, effectiveDurationUs));
     const int lastBucket = int(sourceOutUs * peaks.bucketCount()
-                               / qMax<int64_t>(1, peaks.durationUs));
+                               / qMax<int64_t>(1, effectiveDurationUs));
 
     const QString cacheKey = parts.first() + QLatin1Char('/')
                              + QString::number(width) + QLatin1Char('x')

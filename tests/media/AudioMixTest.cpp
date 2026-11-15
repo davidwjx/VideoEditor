@@ -121,7 +121,7 @@ TEST(AudioMix, SoloOverridesOtherTracks)
     EXPECT_EQ(stats.activeLayers, 1);
 }
 
-TEST(AudioMix, SoloMutesOtherTracksDuringSoloTrackGap)
+TEST(AudioMix, AnySoloSilencesNonSoloTrackInGap)
 {
     if (!QFileInfo::exists(tonePath()))
         GTEST_SKIP() << "missing tone.wav";

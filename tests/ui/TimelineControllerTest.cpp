@@ -5,6 +5,7 @@
 #include "ProjectDocument.h"
 #include "TimelineController.h"
 #include "TimelineModel.h"
+#include "TrackListModel.h"
 
 using namespace VideoEditor;
 
@@ -295,6 +296,78 @@ TEST(TimelineController, TargetTrackAndOrdinalAudioPairing)
     EXPECT_TRUE(controller.targetTrackId().isEmpty());
     EXPECT_EQ(document.project().tracks.size(), 4);
     Q_UNUSED(project);
+}
+
+TEST(TimelineController, TrackUpDownFollowsDisplayOrderWithinType)
+{
+    ProjectDocument document;
+    TimelineController controller(document);
+    // Default project is V1/A1/S1; V2 appends at the end of project order but
+    // displays above V1 (reverse composition order).
+    const QString video2 = controller.addTrack(0);
+    ASSERT_FALSE(video2.isEmpty());
+    TrackListModel rows;
+    const auto displayRow = [&rows](const QString &trackId) {
+        for (int i = 0; i < rows.rowCount(); ++i) {
+            if (rows.data(rows.index(i, 0), TrackListModel::TrackIdRole)
+                    .toString()
+                == trackId) {
+                return i;
+            }
+        }
+        return -1;
+    };
+    rows.setProject(document.project());
+    EXPECT_EQ(displayRow(video2), 0);
+    EXPECT_EQ(displayRow(QStringLiteral("track-v1")), 1);
+
+    int undoIndex = document.undoStack()->index();
+    // Up must move the lane visually up: V1 becomes the top video lane, which
+    // means it moves later in project/composition order.
+    controller.moveTrackUp(QStringLiteral("track-v1"));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+    int v1Project = -1;
+    int v2Project = -1;
+    for (int i = 0; i < document.project().tracks.size(); ++i) {
+        if (document.project().tracks.at(i).id == QStringLiteral("track-v1"))
+            v1Project = i;
+        if (document.project().tracks.at(i).id == video2)
+            v2Project = i;
+    }
+    EXPECT_LT(v2Project, v1Project) << "V2 stays below V1 in composition order";
+    rows.setProject(document.project());
+    EXPECT_EQ(displayRow(QStringLiteral("track-v1")), 0);
+    EXPECT_EQ(displayRow(video2), 1);
+
+    // At the top of the group, up is a no-op and must not add an undo step.
+    undoIndex = document.undoStack()->index();
+    controller.moveTrackUp(QStringLiteral("track-v1"));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex);
+
+    // Down restores the original visual order.
+    controller.moveTrackDown(QStringLiteral("track-v1"));
+    rows.setProject(document.project());
+    EXPECT_EQ(displayRow(video2), 0);
+    EXPECT_EQ(displayRow(QStringLiteral("track-v1")), 1);
+
+    // Audio/subtitle use project order for display. A1 is already first in the
+    // audio group, so "up" cannot cross into video and must be a no-op; A2 is
+    // last, so "down" is likewise inert.
+    const QString audio2 = controller.addTrack(1);
+    ASSERT_FALSE(audio2.isEmpty());
+    undoIndex = document.undoStack()->index();
+    controller.moveTrackUp(QStringLiteral("track-a1"));
+    controller.moveTrackDown(audio2);
+    EXPECT_EQ(document.undoStack()->index(), undoIndex);
+
+    // The bottom video lane cannot move further down.
+    controller.moveTrackDown(video2); // V2 -> bottom
+    rows.setProject(document.project());
+    EXPECT_EQ(displayRow(QStringLiteral("track-v1")), 0);
+    EXPECT_EQ(displayRow(video2), 1);
+    undoIndex = document.undoStack()->index();
+    controller.moveTrackDown(video2);
+    EXPECT_EQ(document.undoStack()->index(), undoIndex);
 }
 
 TEST(TimelineController, ClipboardIsClearedWhenProjectIsReplaced)

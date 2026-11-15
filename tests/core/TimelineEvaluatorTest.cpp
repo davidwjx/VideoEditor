@@ -191,13 +191,26 @@ TEST(TimelineEvaluator, ResolvesBuiltinPresetWhenProjectOnlyHasDefault)
 TEST(TimelineEvaluator, AnySoloIsProjectWideAcrossGaps)
 {
     Project project = projectWithTracks();
-    project.tracks[2].solo = true; // solo track's clip spans 0..2s
-    EXPECT_TRUE(TimelineEvaluator(project).anySolo());
+    // A non-solo track spanning the solo track's gap. The evaluator must still
+    // return its layer (filtering is the mixer's job), while anySolo stays
+    // true beyond the solo clip's 0..2s span.
+    Track other;
+    other.id = QStringLiteral("a2");
+    other.name = QStringLiteral("A2");
+    other.type = TrackType::Audio;
+    other.clips.append(clip(QStringLiteral("a2-c1"), QStringLiteral("a4"), 0,
+                            0, 5'000'000));
+    project.tracks.append(other);
+    project.tracks[2].solo = true;
 
-    // Past the solo clip's end the block has no solo layer, but solo state
-    // must still mute the other tracks.
-    EXPECT_TRUE(TimelineEvaluator(project).audioRange(2'500'000, 2'600'000)
-                    .isEmpty());
+    const TimelineEvaluator evaluator(project);
+    EXPECT_TRUE(evaluator.anySolo());
+    const QList<AudioLayer> gap = evaluator.audioRange(2'500'000, 2'600'000);
+    ASSERT_EQ(gap.size(), 1) << "the non-solo layer must reach the mixer";
+    EXPECT_EQ(gap.first().trackId, QStringLiteral("a2"));
+    EXPECT_FALSE(gap.first().trackSolo);
+    // The mixer's direct gap-silence assertion lives in
+    // AudioMix.AnySoloSilencesNonSoloTrackInGap.
 
     project.tracks[2].enabled = false;
     EXPECT_FALSE(TimelineEvaluator(project).anySolo());

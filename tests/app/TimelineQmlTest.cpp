@@ -112,6 +112,17 @@ void clickItem(QQuickWindow *window, QQuickItem *item)
     QTest::qWait(100);
 }
 
+// Exercises the delegate's onDoubleClicked path through Qt Test's full
+// double-click sequence (press/release/dblclick/release).
+void doubleClickItem(QQuickWindow *window, QQuickItem *item)
+{
+    const QPointF point = item->mapToScene(
+        QPointF(item->width() / 2.0, item->height() / 2.0));
+    QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier,
+                       point.toPoint());
+    QTest::qWait(150);
+}
+
 const Clip *firstClip(const Project &project)
 {
     for (const Track &track : project.tracks) {
@@ -444,6 +455,27 @@ TEST(TimelineQml, TrackHeadersSelectTargetAndToggleAudioMuteSolo)
         findItem(window, QStringLiteral("clip-") + bgmClipId);
     ASSERT_NE(bgmItem, nullptr);
     EXPECT_NE(videoItem->y(), bgmItem->y());
+
+    // Double-clicking a media item through QML must add to the target lane
+    // without leaving timeline mode, pausing, or resetting the playhead.
+    controller.refreshTimelinePreview();
+    controller.seekTimeline(1'500'000);
+    ASSERT_TRUE(controller.preview()->timelineMode());
+    const int v1ClipsBefore =
+        int(controller.document()->trackById(QStringLiteral("track-v1"))
+                ->clips.size());
+    QQuickItem *mediaItem =
+        findItem(window, QStringLiteral("media-item-") + videoId);
+    ASSERT_NE(mediaItem, nullptr);
+    doubleClickItem(window, mediaItem);
+
+    EXPECT_TRUE(controller.preview()->timelineMode());
+    EXPECT_FALSE(controller.preview()->playing());
+    EXPECT_EQ(controller.timeline()->positionUs(), 1'500'000);
+    EXPECT_EQ(controller.preview()->positionMs(), 1500);
+    EXPECT_EQ(controller.document()->trackById(QStringLiteral("track-v1"))
+                  ->clips.size(),
+              v1ClipsBefore + 1);
 }
 
 TEST(TimelineQml, AuthorsKeyframesAndCuePosition)

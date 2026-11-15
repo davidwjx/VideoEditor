@@ -1130,14 +1130,43 @@ void TimelineController::removeTrack(const QString &trackId)
     m_editor.removeTrack(trackId);
 }
 
+namespace {
+
+// Project indices of one media type in project order. Display order is project
+// order for audio/subtitle and reversed for video (the last composited layer
+// is the top lane), so up/down must be mapped per type instead of moving to an
+// adjacent project entry, which may belong to another group.
+QList<int> sameTypeProjectIndices(const QList<Track> &tracks, TrackType type)
+{
+    QList<int> indices;
+    for (int i = 0; i < tracks.size(); ++i) {
+        if (tracks.at(i).type == type)
+            indices.append(i);
+    }
+    return indices;
+}
+
+} // namespace
+
 void TimelineController::moveTrackUp(const QString &trackId)
 {
     const QList<Track> &tracks = m_document.project().tracks;
     for (int i = 0; i < tracks.size(); ++i) {
         if (tracks.at(i).id != trackId)
             continue;
-        if (i > 0)
-            m_editor.moveTrack(i, i - 1);
+        const TrackType type = tracks.at(i).type;
+        const QList<int> sameType = sameTypeProjectIndices(tracks, type);
+        const int position = sameType.indexOf(i);
+        if (position < 0)
+            return;
+        // Video lanes are displayed in reverse composition order, so moving
+        // one row up means moving later in project order; other types move
+        // earlier. At the group edge this is a no-op (no undo command).
+        const int targetPosition =
+            type == TrackType::Video ? position + 1 : position - 1;
+        if (targetPosition < 0 || targetPosition >= sameType.size())
+            return;
+        m_editor.moveTrack(i, sameType.at(targetPosition));
         return;
     }
 }
@@ -1148,8 +1177,16 @@ void TimelineController::moveTrackDown(const QString &trackId)
     for (int i = 0; i < tracks.size(); ++i) {
         if (tracks.at(i).id != trackId)
             continue;
-        if (i + 1 < tracks.size())
-            m_editor.moveTrack(i, i + 1);
+        const TrackType type = tracks.at(i).type;
+        const QList<int> sameType = sameTypeProjectIndices(tracks, type);
+        const int position = sameType.indexOf(i);
+        if (position < 0)
+            return;
+        const int targetPosition =
+            type == TrackType::Video ? position - 1 : position + 1;
+        if (targetPosition < 0 || targetPosition >= sameType.size())
+            return;
+        m_editor.moveTrack(i, sameType.at(targetPosition));
         return;
     }
 }

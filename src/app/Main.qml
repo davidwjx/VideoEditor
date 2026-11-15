@@ -190,6 +190,7 @@ ApplicationWindow {
                 anchors.fill: parent
                 model: App.mediaModel
                 delegate: ItemDelegate {
+                    objectName: "media-item-" + model.id
                     width: ListView.view.width
                     text: model.name + "\n" + model.codec + " · " + model.resolution
                           + " · " + model.duration
