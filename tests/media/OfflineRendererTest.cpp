@@ -59,8 +59,15 @@ TEST(OfflineRenderer, RedClipCompositesToRedCentreAndBlackLetterbox)
     const Project project = redProject(red);
     OfflineFrameRenderer renderer;
     QString error;
-    if (!renderer.open(project, 320, 180, &error))
-        GTEST_SKIP() << error.toStdString();
+    // A failure to create the offscreen target is a regression, not an
+    // environment limitation: only a missing D3D11 device may skip.
+    if (!D3D11Context::create(true, &error)
+        && !D3D11Context::create(false, &error)) {
+        GTEST_SKIP() << "D3D11 unavailable: " << error.toStdString();
+    }
+    ASSERT_TRUE(renderer.open(project, 320, 180, &error))
+        << "renderer.open failed: " << error.toStdString();
+    EXPECT_TRUE(renderer.isValid());
 
     std::vector<uint8_t> rgba;
     ASSERT_TRUE(renderer.renderFrame(0, &rgba, &error)) << error.toStdString();
@@ -97,8 +104,13 @@ TEST(OfflineRenderer, SubtitleIsDrawnAboveVideo)
     }
     OfflineFrameRenderer renderer;
     QString error;
-    if (!renderer.open(project, 320, 180, &error))
-        GTEST_SKIP() << error.toStdString();
+    if (!D3D11Context::create(true, &error)
+        && !D3D11Context::create(false, &error)) {
+        GTEST_SKIP() << "D3D11 unavailable: " << error.toStdString();
+    }
+    ASSERT_TRUE(renderer.open(project, 320, 180, &error))
+        << "renderer.open failed: " << error.toStdString();
+    EXPECT_TRUE(renderer.isValid());
 
     std::vector<uint8_t> withSubtitle;
     ASSERT_TRUE(renderer.renderFrame(0, &withSubtitle, &error)) << error.toStdString();

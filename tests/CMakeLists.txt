@@ -87,6 +87,25 @@ gtest_discover_tests(render_tests PROPERTIES
   ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
   DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 
+# M3 export acceptance: format matrix, preview/export parity, subtitle
+# burn-in, limiter and the 1080p hardware performance gate. Like render_tests
+# this needs a GUI application (subtitle text uses the font database) and a
+# real D3D11 device; individual cases skip when the requested hardware encoder
+# is unavailable.
+add_executable(export_tests
+  media/ExportMatrixTest.cpp
+  media/ExportParityTest.cpp
+  TestGuiMain.cpp)
+target_link_libraries(export_tests PRIVATE
+  videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)
+target_compile_definitions(export_tests PRIVATE
+  NOMINMAX WIN32_LEAN_AND_MEAN
+  VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
+gtest_discover_tests(export_tests PROPERTIES
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
+  LABELS "gpu")
+
 add_executable(app_tests
   app/AppControllerTest.cpp
   app/TimelineUiTest.cpp
