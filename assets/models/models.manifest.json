@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 1,
+  "pipelineVersion": "m4.0",
+  "modelsRootEnv": "VIDEOEDITOR_M4_MODELS_DIR",
+  "commercialApproved": false,
+  "legalSignOff": {
+    "approvedBy": "",
+    "date": "",
+    "scope": ""
+  },
+  "releaseBlocked": true,
+  "releaseBlockReason": "No legal sign-off for training-data terms (SA-1B, Places2, YouTube-VOS) and no passing technical gate on the tested hardware. See docs/superpowers/research/2026-11-15-m4-license-decision.md and 2026-11-15-m4-dml-spike.md.",
+  "technicalGate": "NO_GO",
+  "licenseDecision": "docs/superpowers/research/2026-11-15-m4-license-decision.md",
+  "technicalReport": "docs/superpowers/research/2026-11-15-m4-dml-spike.md",
+  "models": [
+    {
+      "id": "sam2.1-hiera-tiny",
+      "family": "tracking",
+      "version": "1.0.0",
+      "codeLicense": "Apache-2.0",
+      "weightsLicense": "Apache-2.0",
+      "trainingData": [
+        "SA-1B",
+        "YouTube-VOS",
+        "DAVIS",
+        "MOSE",
+        "internal"
+      ],
+      "commercialApproved": false,
+      "technicalStatus": "session_create_pass; parity_pass; speed_fail",
+      "sourceUrl": "https://huggingface.co/square-zero-labs/sam2.1-tiny-video-onnx",
+      "sourceRevision": "3b2984dd865f6e9d2cc6aed0be6a5a5c2eb352ce",
+      "files": {
+        "vision_encoder": {
+          "path": "sam2_1_tiny_video_onnx/onnx/vision_encoder.onnx",
+          "sha256": "aa7a8542942f042e235a993a1ab0ccf5f049918500577802a7f10ec1b39bb873"
+        },
+        "mask_decoder": {
+          "path": "sam2_1_tiny_video_onnx/onnx/mask_decoder.onnx",
+          "sha256": "0461896de3db00936fe1643506f129d71cb6d5d2ae15754811756b7ea1b070c6"
+        },
+        "memory_attention": {
+          "path": "sam2_1_tiny_video_onnx/onnx/memory_attention.onnx",
+          "sha256": "791e648ce8f5ef91ad00ba06e83066ff261ae5a645f0b042b4f46a89fd054baf"
+        },
+        "memory_encoder": {
+          "path": "sam2_1_tiny_video_onnx/onnx/memory_encoder.onnx",
+          "sha256": "580d246c109de88838f600ba7c1c0d03d1fe267f7641b06f8c88c5f0dc5834cd"
+        },
+        "pointer_tpos": {
+          "path": "sam2_1_tiny_video_onnx/onnx/pointer_tpos.onnx",
+          "sha256": "7e71df1d75dba09bc18dd4ae745c2a2cceebdd14d84eadea2fe65d0205f101fc"
+        },
+        "constants": {
+          "path": "sam2_1_tiny_video_onnx/constants.json",
+          "sha256": "172edc70e892aab0aef6caedf97b8e4091fbf6c5d26dac5fd9ea69d093d927d3"
+        }
+      },
+      "io": {
+        "imageInput": "pixel_values",
+        "imageEmbedding": "feats2_no_mem",
+        "imageEmbeddingAux": [
+          "feats0",
+          "feats1",
+          "feats2",
+          "vision_pos_embed"
+        ],
+        "maskLogits": "high_res_mask",
+        "lowResMask": "low_res_mask",
+        "iouScore": "iou",
+        "objectScore": "object_score_logits",
+        "promptEncoder": "",
+        "promptInputs": [
+          "input_points",
+          "input_labels"
+        ]
+      },
+      "notes": "Community ONNX export of facebook/sam2.1-hiera-tiny. This bundle has no separate prompt_encoder session; point prompts are mask_decoder inputs. Task 5 must pin memory-bank shapes ([28736,1,64] + [4,1,64]) and re-measure the full tracking loop."
+    },
+    {
+      "id": "efficienttam-ti-512",
+      "family": "tracking",
+      "version": "0.8.0",
+      "codeLicense": "Apache-2.0",
+      "weightsLicense": "Apache-2.0",
+      "trainingData": [
+        "SA-V",
+        "SA-1B"
+      ],
+      "commercialApproved": false,
+      "technicalStatus": "session_create_pass; parity_fail; speed_fail",
+      "sourceUrl": "https://huggingface.co/egordm/efficienttam-ti-512",
+      "sourceRevision": "ef8a773fc653fc46a2e87dd182cac0f8ef980cc1",
+      "files": {
+        "image_encoder": {
+          "path": "efficienttam_ti_512_fp16/image_encoder.onnx",
+          "sha256": "6d75656b6c2501819269ec76ecc18bf555695e91b67def84fb052f97dcbbb812"
+        },
+        "prompt_encoder": {
+          "path": "efficienttam_ti_512_fp16/prompt_encoder.onnx",
+          "sha256": "525db5ac7deb9ce7ed98889a6b28b91e54b622d8fb132af26ca60b2886ed1f4a"
+        },
+        "mask_decoder": {
+          "path": "efficienttam_ti_512_fp16/mask_decoder.onnx",
+          "sha256": "8668f7f1b206a0ab9184a9e5a448ebcda47214303d083c5df3fee904aa96fc53"
+        },
+        "memory_attention": {
+          "path": "efficienttam_ti_512_fp16/memory_attention.onnx",
+          "sha256": "b22b2144f3f48b21e66cc49bc6bb286bab2623695b39058031ccb5d97f56db9b"
+        },
+        "memory_encoder": {
+          "path": "efficienttam_ti_512_fp16/memory_encoder.onnx",
+          "sha256": "9452c7c8b603806e0d793253ef576e5ccb9d0658e1548bf184ceaa2bce759355"
+        },
+        "bundle": {
+          "path": "efficienttam_ti_512_fp16/bundle.toml",
+          "sha256": "58d945ad0c9323ea38303e717780c69d50e70c0c09a5449f9acbac0bae31b35b"
+        },
+        "maskmem_tpos_enc": {
+          "path": "efficienttam_ti_512_fp16/maskmem_tpos_enc.npy",
+          "sha256": "25bb49ba6d72e35a044c90a95933cd9527bc6940f9e1432148bcd3a8fa99a364"
+        },
+        "no_obj_ptr": {
+          "path": "efficienttam_ti_512_fp16/no_obj_ptr.npy",
+          "sha256": "7b6bd1712d2c285492bdad4235f3a6439bae18a0039ff38c41e8cfbcfb3eb18e"
+        }
+      },
+      "io": {
+        "imageInput": "image",
+        "imageEmbedding": "vision_features",
+        "imagePosEmbedding": "vision_pos_enc",
+        "maskLogits": "masks",
+        "iouScore": "iou_pred",
+        "objectScore": "object_score_logits",
+        "promptEncoder": "prompt_encoder",
+        "memoryAttentionMemory": "spatial_memory",
+        "memoryAttentionPointers": "obj_ptr"
+      },
+      "notes": "fp16 bundle. memory_attention requires explicit memory-bank shapes; with the default dynamic dimensions the graph fails at a Reshape. DML parity is 2.6e-3 to 2.35e-2, above the 1e-3 gate."
+    },
+    {
+      "id": "migan-512",
+      "family": "inpainting",
+      "version": "2.0.0",
+      "codeLicense": "MIT",
+      "weightsLicense": "MIT",
+      "trainingData": [
+        "Places2",
+        "FFHQ"
+      ],
+      "commercialApproved": false,
+      "technicalStatus": "runtime_pass; speed_fail",
+      "sourceUrl": "https://huggingface.co/andraniksargsyan/migan",
+      "sourceRevision": "406830d0fa60666da0071c342ad2fbc8f30c5c64",
+      "licenseFile": {
+        "path": "migan_512/LICENSE",
+        "sha256": "13348eaaebc0b07b0faf3a92db04e0858737713a917d064b599c87cac05b571f"
+      },
+      "files": {
+        "pipeline": {
+          "path": "migan_512/migan_pipeline_v2.onnx",
+          "sha256": "6f1f3530a1a2324b19752018ce756088b07973cda8d7d890034ace5c8a48c40b"
+        }
+      },
+      "io": {
+        "imageInput": "image",
+        "maskInput": "mask",
+        "output": "result",
+        "inputDtype": "uint8",
+        "outputDtype": "uint8"
+      },
+      "notes": "Third-party ONNX mirror of Picsart's MIT pipeline; legal must confirm the derivative is authorised. DML output differs by at most 1 uint8 LSB. Latency is ~440 ms regardless of 512/256/128 input size (fixed internal canvas)."
+    },
+    {
+      "id": "lama-512",
+      "family": "inpainting",
+      "version": "1.0.0",
+      "codeLicense": "Apache-2.0",
+      "weightsLicense": "Apache-2.0",
+      "trainingData": [
+        "Places2"
+      ],
+      "commercialApproved": false,
+      "technicalStatus": "dml_session_fail; cpu_speed_fail",
+      "sourceUrl": "https://huggingface.co/g-ronimo/lama",
+      "sourceRevision": "386a67cedf9b8bb4fe76798c10c8d77abc0a5cc8",
+      "files": {
+        "model": {
+          "path": "lama_512/lama_512_fp16.onnx",
+          "sha256": "1fa042eaf30a6660b9190f0a1512d27bdceff90fab172af295303cdf2905e516"
+        }
+      },
+      "evaluationVariants": [
+        {
+          "path": "lama_512/lama_512_int8.onnx",
+          "sha256": "cab19978adc306622fe37ef60d4a52103b99c98141d499c2a2366a7ed1255dbe",
+          "result": "dml_session_fail_0x80070057; cpu_p50_537.2ms"
+        },
+        {
+          "path": "lama_512/lama_fp16.onnx",
+          "sha256": "11ba60a0e23344f7d42d2aba31cf9a599e9d1b3bb265b41b68595e2a2d72df16",
+          "result": "dml_run_fail_reshape_0x80070057; cpu_p50_1994.7ms"
+        }
+      ],
+      "io": {
+        "imageInput": "input",
+        "output": "output",
+        "inputChannels": 4,
+        "note": "Channels 0-2 RGB 0-1 with the hole zeroed; channel 3 is the binary mask. Fixed 512x512."
+      },
+      "notes": "DirectML cannot initialise this graph on the tested AMD iGPU (E_INVALIDARG). CPU is 1.63 fps with the preferred graph, below the 2 fps quality gate."
+    }
+  ],
+  "notEvaluated": [
+    {
+      "id": "mobile-sam",
+      "reason": "Last-resort image-only fallback; not downloaded or probed in Task 0. Apache-2.0 code/weights, SA-1B distillation caveat. No manifest hash because no file was acquired."
+    },
+    {
+      "id": "sam2.1-hiera-small",
+      "reason": "Quality upgrade path only; Tiny is the default. Not downloaded or probed in Task 0. Same Apache-2.0 and SA-1B/YouTube-VOS training-data caveat."
+    },
+    {
+      "id": "edgetam",
+      "reason": "Optional third tracking candidate from the research memo; not needed while SAM 2 Tiny/EfficientTAM are being evaluated."
+    }
+  ],
+  "excludedModels": [
+    "ProPainter",
+    "E2FGVI",
+    "MAT",
+    "DiffuEraser",
+    "MiniMax-Remover",
+    "Netflix VOID",
+    "XMem",
+    "SAM 3",
+    "COCOCO",
+    "ZITS",
+    "Cutie"
+  ]
+}
