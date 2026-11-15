@@ -51,6 +51,7 @@ add_executable(media_tests
   media/ExportDiskSpaceTest.cpp
   media/ExportPipelineTest.cpp
   media/RemovalCacheTest.cpp
+  media/RepairSourceTest.cpp
   TestMain.cpp)
 target_include_directories(media_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(media_tests PRIVATE
@@ -87,6 +88,7 @@ add_executable(render_tests
   media/TimelineCoalescerTest.cpp
   media/SourceCachePolicyTest.cpp
   media/OfflineRendererTest.cpp
+  media/RemovalRenderTest.cpp
   TestGuiMain.cpp)
 target_include_directories(render_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(render_tests PRIVATE
@@ -106,6 +108,7 @@ gtest_discover_tests(render_tests PROPERTIES
 add_executable(export_tests
   media/ExportMatrixTest.cpp
   media/ExportParityTest.cpp
+  media/RemovalExportTest.cpp
   TestGuiMain.cpp)
 target_link_libraries(export_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)
@@ -160,6 +163,7 @@ add_executable(ai_tests
   ai/InpaintPipelineTest.cpp
   ai/InpaintModelContractTest.cpp
   ai/TemporalStabilizerTest.cpp
+  ai/RemovalPreflightTest.cpp
   TestGuiMain.cpp)
 target_include_directories(ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ai_tests PRIVATE

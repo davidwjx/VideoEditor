@@ -25,6 +25,8 @@ void ExportWorker::run(VideoEditor::Project project,
     hooks.onProgress = [this](const ExportProgress &value) {
         emit progress(value);
     };
+    hooks.removalPreflight = m_removalChecker;
+    hooks.removalCacheRoot = m_removalCacheRoot;
     const ExportResult result =
         pipeline.run(project, settings, m_catalog, resume, hooks, m_projectPath);
     emit finished(result);

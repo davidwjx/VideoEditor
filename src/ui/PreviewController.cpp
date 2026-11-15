@@ -331,6 +331,39 @@ void PreviewController::seekFrame(qint64 frame)
     requestTimelineFrame(target);
 }
 
+void PreviewController::setRemovalCompareMode(const QString &mode,
+                                              int splitPermille)
+{
+    int value = 0; // RemovalCompareMode::Repair
+    if (mode == QStringLiteral("original"))
+        value = 1;
+    else if (mode == QStringLiteral("split"))
+        value = 2;
+
+    if (m_timelineWorker) {
+        QMetaObject::invokeMethod(m_timelineWorker, "setRemovalCompare",
+                                  Qt::QueuedConnection, Q_ARG(int, value),
+                                  Q_ARG(int, splitPermille));
+    }
+    if (m_mode != Mode::Timeline)
+        return;
+    // The compositor re-renders the paused instant with the new mode; while
+    // playing, the presentation timer picks up the change on the next tick.
+    m_lastTimelineFrame = -1;
+    m_lastTimelineSubmittedUs = -1;
+    requestTimelineFrame(m_positionUs);
+}
+
+void PreviewController::setRemovalCacheRoot(const QString &root)
+{
+    m_removalCacheRoot = root;
+    if (m_timelineWorker) {
+        QMetaObject::invokeMethod(m_timelineWorker, "setRemovalCacheRoot",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QString, m_removalCacheRoot));
+    }
+}
+
 void PreviewController::openTimeline(const Project &project, qint64 durationUs,
                                      bool useProxy)
 {

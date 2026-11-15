@@ -64,6 +64,8 @@ add_library(videoeditor_media STATIC
   render/SourceCachePolicy.cpp
   render/LayerGeometry.h
   render/LayerGeometry.cpp
+  render/RepairFrameSource.h
+  render/RepairFrameSource.cpp
   render/SubtitleRasterizer.h
   render/SubtitleRasterizer.cpp
   render/LayerCompositor.h

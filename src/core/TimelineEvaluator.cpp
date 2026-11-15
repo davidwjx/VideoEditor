@@ -69,6 +69,15 @@ FrameComposition TimelineEvaluator::frameAt(int64_t timelineUs) const
             layer.localTimeUs = timelineUs - active->timelineStartUs;
             layer.sourceTimeUs = sourceTimeAt(*active, timelineUs);
             layer.transform = active->transform;
+            // Removal is a source-time property: trimming or moving the clip
+            // must not make a cached patch appear outside its generated range.
+            const RemovalLayer *removal =
+                m_project.removalLayerById(active->removalLayerId);
+            if (removal && removal->enabled
+                && layer.sourceTimeUs >= removal->sourceInUs
+                && layer.sourceTimeUs < removal->sourceOutUs) {
+                layer.removalLayerId = removal->id;
+            }
             frame.video.append(layer);
         } else if (track.type == TrackType::Subtitle) {
             for (const SubtitleCue &cue : track.cues) {

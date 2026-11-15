@@ -31,6 +31,12 @@ public:
     OfflineFrameRenderer(const OfflineFrameRenderer &) = delete;
     OfflineFrameRenderer &operator=(const OfflineFrameRenderer &) = delete;
 
+    // The removal cache root must be set before open() (or it is applied to
+    // the compositor immediately when called later). Export is strict: after
+    // open() a missing/incomplete cache aborts the frame instead of encoding
+    // the original.
+    void setRemovalCacheRoot(const QString &root);
+
     bool open(const Project &project, int width, int height,
               QString *error = nullptr);
     void close();
@@ -56,6 +62,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_staging;
     int m_width = 0;
     int m_height = 0;
+    QString m_removalCacheRoot;
     std::function<void(const QString &)> m_warning;
 };
 

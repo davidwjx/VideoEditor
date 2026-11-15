@@ -153,6 +153,21 @@ ExportResult ExportPipeline::run(const Project &project,
         result.error = QStringLiteral("工程时间线为空，无法导出。");
         return result;
     }
+    // Removal preflight runs before anything is created on disk. A missing or
+    // expired cache would otherwise let the renderer encode the original
+    // frame, which is exactly what the removal feature promises not to do.
+    if (hooks.removalPreflight) {
+        const RemovalPreflightResult preflight =
+            hooks.removalPreflight(project);
+        if (!preflight.ok) {
+            result.error =
+                preflight.message.isEmpty()
+                    ? QStringLiteral(
+                          "AI 修复结果缺失或已过期。请先生成修复，再导出。")
+                    : preflight.message;
+            return result;
+        }
+    }
     const ExportTiming timing = computeExportTiming(
         durationUs, frozenSettings.fps, kSampleRate,
         frozenSettings.segmentTargetUs);
@@ -387,6 +402,7 @@ ExportResult ExportPipeline::run(const Project &project,
             QFile::remove(srtWrittenPath);
     };
     error.clear();
+    renderer.setRemovalCacheRoot(hooks.removalCacheRoot);
     if (!videoEncoder.open(*selected, frozenSettings, &error)
         || !audioEncoder.open(kSampleRate, kChannels, kAudioBitrateKbps, &error)
         || !renderer.open(renderProject, frozenSettings.width,
@@ -679,9 +695,17 @@ ExportResult ExportPipeline::run(const Project &project,
             const int64_t ptsUs = framePtsUs(frame, frozenSettings.fps);
             std::vector<uint8_t> rgba;
             if (!renderer.renderFrame(ptsUs, &rgba, &error)) {
-                result.error = QStringLiteral("第 %1 帧渲染失败：%2")
-                                   .arg(frame)
-                                   .arg(error);
+                // A removal-cache failure is reported verbatim: callers (and
+                // the UI) key their "regenerate then export" flow on this
+                // exact text, and it must never be mistaken for a transient
+                // decode error that could fall back to the original.
+                result.error = error.contains(QStringLiteral("AI 修复缓存"))
+                                   ? error
+                                   : QStringLiteral("第 %1 帧渲染失败：%2")
+                                         .arg(frame)
+                                         .arg(error);
+                result.resumable = checkpoint.completedSegments > 0;
+                result.audioPeak = peak;
                 break;
             }
             std::vector<EncodedPacket> packets;

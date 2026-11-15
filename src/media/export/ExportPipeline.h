@@ -31,6 +31,14 @@ public:
         // Overridable for tests and for callers that know better than
         // QStorageInfo (for example a network share).
         FreeBytesFn freeBytes;
+        // Checked before any output file or parts directory is created. The
+        // message is returned verbatim on failure. Injected by the UI layer
+        // (RemovalPreflight lives in videoeditor_ai, which media must not
+        // depend on).
+        std::function<RemovalPreflightResult(const Project &)> removalPreflight;
+        // Repair cache root used by OfflineFrameRenderer. Missing caches abort
+        // the run instead of falling back to the original frame.
+        QString removalCacheRoot;
         // Test injection: fail right before this zero-based segment is written.
         int failAtSegment = -1;
     };

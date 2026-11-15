@@ -17,6 +17,9 @@ struct VideoLayer {
     int64_t localTimeUs = 0;
     int64_t sourceTimeUs = 0;
     Transform transform;
+    // Non-empty only while the clip's enabled removal layer covers
+    // sourceTimeUs. The compositor uses it to look up a cached repair patch.
+    QString removalLayerId;
 
     bool operator==(const VideoLayer &) const = default;
 };

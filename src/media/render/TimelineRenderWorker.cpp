@@ -63,6 +63,12 @@ void TimelineRenderWorker::setProject(VideoEditor::Project project,
         reset();
         return;
     }
+    // open() clears repair sources but retains the compare settings; reapply
+    // both so a compositor created after close() still honours the user's
+    // current mode and the app's cache location.
+    m_compositor->setRemovalCacheRoot(m_removalCacheRoot);
+    m_compositor->setRemovalCompareMode(
+        static_cast<RemovalCompareMode>(m_removalCompare), m_splitPermille);
     m_width = m_compositor->width();
     m_height = m_compositor->height();
     if (!reusableRing) {
@@ -75,6 +81,26 @@ void TimelineRenderWorker::setProject(VideoEditor::Project project,
         }
     }
     m_valid = true;
+}
+
+void TimelineRenderWorker::setRemovalCompare(int mode, int splitPermille)
+{
+    m_removalCompare = std::clamp(mode, 0, 2);
+    m_splitPermille = std::clamp(splitPermille, 0, 1000);
+    if (m_compositor) {
+        m_compositor->setRemovalCompareMode(
+            static_cast<RemovalCompareMode>(m_removalCompare),
+            m_splitPermille);
+    }
+}
+
+void TimelineRenderWorker::setRemovalCacheRoot(QString root)
+{
+    if (m_removalCacheRoot == root)
+        return;
+    m_removalCacheRoot = std::move(root);
+    if (m_compositor)
+        m_compositor->setRemovalCacheRoot(m_removalCacheRoot);
 }
 
 void TimelineRenderWorker::renderFrame(qint64 timelineUs, quint64 generation)

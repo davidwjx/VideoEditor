@@ -21,9 +21,13 @@ namespace VideoEditor {
 class D3D11Context;
 class LayerCompositor;
 class ClipVideoSource;
+class RepairFrameSource;
 class VideoConverters;
 struct VideoLayer;
 struct SubtitleLayer;
+
+// How a layer's cached repair patch is composed over the original frame.
+enum class RemovalCompareMode { Repair, Original, SplitWipe };
 
 // Owns one D3D11 device, the decoders and the layer compositor that turn a
 // timeline instant into a rendered frame. TimelineRenderWorker (preview) and
@@ -50,6 +54,22 @@ public:
     void close();
     void setUseProxy(bool useProxy) { m_useProxy = useProxy; }
 
+    // Removal cache root (the directory containing the content-addressed key
+    // directories). Changing it drops open repair sources because they point
+    // at files below the previous root.
+    void setRemovalCacheRoot(const QString &root);
+    QString removalCacheRoot() const { return m_removalCacheRoot; }
+    // Compare mode and split are preview settings: they deliberately survive
+    // open()/close() so an edit does not reset the user's comparison.
+    void setRemovalCompareMode(RemovalCompareMode mode, int splitPermille = 500);
+    RemovalCompareMode removalCompareMode() const { return m_compare; }
+    int removalSplitPermille() const { return m_splitPermille; }
+    // Export mode: a missing/incomplete cache (or an unreadable patch) turns
+    // into a draw error instead of silently falling back to the original.
+    void setFailOnMissingRemoval(bool fail) { m_failOnMissingRemoval = fail; }
+    bool failOnMissingRemoval() const { return m_failOnMissingRemoval; }
+    int removalLayerCountForTest() const { return int(m_repairSources.size()); }
+
     // Composes the frame covering timelineUs into target and returns the number
     // of video layers actually drawn. clearBlack clears the target first.
     int drawFrame(int64_t timelineUs, ID3D11RenderTargetView *target,
@@ -72,6 +92,8 @@ private:
     };
 
     ClipVideoSource *sourceFor(const VideoLayer &layer);
+    RepairFrameSource *repairSourceFor(const RemovalLayer &layer,
+                                       QString *error);
     QImage subtitleImageFor(const QList<SubtitleLayer> &layers);
     bool ensureConverters(QString *error);
     void reportOnce(const QString &key, const QString &message);
@@ -81,6 +103,13 @@ private:
     std::unique_ptr<LayerCompositor> m_compositor;
     std::unique_ptr<VideoConverters> m_converters;
     std::map<QString, SourceEntry> m_sources;
+    // Keyed by "layerId|cacheKey" so a regenerated layer never reuses the
+    // previous manifest's frame locations.
+    std::map<QString, std::unique_ptr<RepairFrameSource>> m_repairSources;
+    QString m_removalCacheRoot;
+    RemovalCompareMode m_compare = RemovalCompareMode::Repair;
+    int m_splitPermille = 500;
+    bool m_failOnMissingRemoval = false;
     QSet<QString> m_failedClips;
     QSet<QString> m_reportedErrors;
     QString m_subtitleKey;

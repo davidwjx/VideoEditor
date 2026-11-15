@@ -10,6 +10,7 @@
 #include "ExportEncoderCatalog.h"
 #include "ExportProgress.h"
 #include "ExportSettings.h"
+#include "Removal.h"
 
 class QThread;
 
@@ -60,9 +61,15 @@ class ExportController : public QObject {
     Q_PROPERTY(QString validationSummary READ validationSummary
                    NOTIFY validationSummaryChanged)
     Q_PROPERTY(QString encoderName READ encoderName NOTIFY encoderNameChanged)
+    Q_PROPERTY(bool removalRequired READ removalRequired
+                   NOTIFY removalRequiredChanged)
+    Q_PROPERTY(QString removalMessage READ removalMessage
+                   NOTIFY removalMessageChanged)
 
 public:
     using ProgressCallback = std::function<void(const ExportProgress &)>;
+    using RemovalChecker =
+        std::function<RemovalPreflightResult(const Project &)>;
     using SyncRunner = std::function<ExportResult(
         const Project &, const ExportSettings &, bool, const ProgressCallback &)>;
 
@@ -103,6 +110,8 @@ public:
     QString validationError() const { return m_validationError; }
     QString validationSummary() const { return m_validationSummary; }
     QString encoderName() const { return m_encoderName; }
+    bool removalRequired() const { return m_removalRequired; }
+    QString removalMessage() const { return m_removalMessage; }
 
     Q_INVOKABLE void applyPreset(const QString &id);
     // Re-probes encoders for the current resolution unless a catalog was
@@ -112,7 +121,7 @@ public:
     Q_INVOKABLE void cancelExport();
     Q_INVOKABLE void resumeExport();
     Q_INVOKABLE void setOutputPath(const QString &path);
-    Q_INVOKABLE QString validate() const;
+    Q_INVOKABLE QString validate();
 
     void setPresetId(const QString &id);
     void setCodec(const QString &codec);
@@ -126,6 +135,12 @@ public:
     void setBurnSubtitles(bool enabled);
     void setWriteSrt(bool enabled);
     void setSrtPath(const QString &path);
+
+    // Injected by AppController. Not owned: the lambda captures the removal
+    // cache and model registry, which outlive this controller.
+    void setRemovalChecker(RemovalChecker checker);
+    // Repair cache root forwarded to the export worker.
+    void setRemovalCacheRoot(const QString &root) { m_removalCacheRoot = root; }
 
     // Test injection: a deterministic catalog and a synchronous pipeline
     // stand-in so the controller can be tested without FFmpeg or a GPU.
@@ -159,6 +174,12 @@ signals:
     void validationErrorChanged();
     void validationSummaryChanged();
     void encoderNameChanged();
+    void removalRequiredChanged();
+    void removalMessageChanged();
+    // Emitted instead of starting an export that would silently encode the
+    // original in place of a required repair. Task 8 connects this to the
+    // removal generation flow.
+    void removalGenerationRequired(QString message);
     void finished(bool ok, const QString &message);
 
 private:
@@ -171,6 +192,7 @@ private:
     void finishWith(const ExportResult &result);
     void handleWorkerFinished(const VideoEditor::ExportResult &result);
     void cleanupThread();
+    void syncRemovalState(const RemovalPreflightResult *result);
     void setErrorText(const QString &message);
     void setStatusText(const QString &message);
     void setStageText(const QString &message);
@@ -216,6 +238,10 @@ private:
     QString m_validationError;
     QString m_validationSummary;
     QString m_encoderName;
+    bool m_removalRequired = false;
+    QString m_removalMessage;
+    RemovalChecker m_removalChecker;
+    QString m_removalCacheRoot;
 
     EncoderCatalog m_catalog;
     bool m_catalogInjected = false;

@@ -33,6 +33,10 @@ public slots:
     void setProject(VideoEditor::Project project, QString projectPath,
                     quint64 generation, bool useProxy);
     void renderFrame(qint64 timelineUs, quint64 generation);
+    // int instead of the C++ enum so QML can forward the mode across a queued
+    // connection without registering a new metatype.
+    void setRemovalCompare(int mode, int splitPermille);
+    void setRemovalCacheRoot(QString root);
     void close();
 
 signals:
@@ -59,6 +63,11 @@ private:
     int m_height = 1080;
     bool m_useProxy = true;
     bool m_valid = false;
+    QString m_removalCacheRoot;
+    // 0=Repair, 1=Original, 2=SplitWipe. Persisted so a compositor rebuilt
+    // after close() starts in the user's current comparison mode.
+    int m_removalCompare = 0;
+    int m_splitPermille = 500;
 };
 
 } // namespace VideoEditor

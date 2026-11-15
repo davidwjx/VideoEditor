@@ -42,6 +42,11 @@ public:
                          const LayerRect &rect, float opacity,
                          QString *error = nullptr);
 
+    // Restricts subsequent draws to a rectangle in output pixels. nullptr
+    // restores the full target. begin() always resets to the full target, so
+    // a caller that forgets to clear it cannot leak into the next frame.
+    void setScissorRect(const RECT *rect);
+
     // Unbinds the render target and shader resources from the shared context.
     void end();
 
@@ -87,6 +92,7 @@ private:
     // compositor caches its pass state and reapplies it before every draw.
     ID3D11RenderTargetView *m_target = nullptr;
     D3D11_VIEWPORT m_viewport{};
+    D3D11_RECT m_scissor{};
     int m_width = 0;
     int m_height = 0;
 };

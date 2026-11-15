@@ -107,6 +107,16 @@ bool RemovalController::generate()
     return false;
 }
 
+void RemovalController::beginGenerateForExport(const QString &message)
+{
+    // Task 8 wires the real job + retry-export flow. Until then the user still
+    // gets the preflight explanation instead of a silent no-op.
+    setError(message.isEmpty()
+                 ? QStringLiteral(
+                       "AI 修复结果缺失或已过期。请先生成修复，再导出。")
+                 : message);
+}
+
 void RemovalController::setBrushSize(int px)
 {
     const int bounded = qBound(1, px, 256);

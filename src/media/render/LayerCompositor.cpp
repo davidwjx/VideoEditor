@@ -162,6 +162,10 @@ bool LayerCompositor::initialize(D3D11Context &context, int width, int height,
     D3D11_RASTERIZER_DESC rasterizerDesc{};
     rasterizerDesc.FillMode = D3D11_FILL_SOLID;
     rasterizerDesc.CullMode = D3D11_CULL_NONE;
+    // The split-wipe comparison draws the repair patch through the left
+    // scissor rectangle. ScissorEnable is part of the rasterizer state, so
+    // applyDrawState() re-binds the same state before every draw.
+    rasterizerDesc.ScissorEnable = TRUE;
     rasterizerDesc.DepthClipEnable = TRUE;
     if (FAILED(m_device->CreateRasterizerState(&rasterizerDesc, &m_rasterizer))) {
         setError(error, QStringLiteral("无法创建合成光栅化状态。"));
@@ -182,6 +186,9 @@ void LayerCompositor::applyDrawState()
     m_context->RSSetViewports(1, &m_viewport);
     m_context->OMSetBlendState(m_blend.Get(), nullptr, 0xffffffff);
     m_context->RSSetState(m_rasterizer.Get());
+    // Scissor rectangles are dynamic state, not part of the rasterizer state
+    // object; reapply it every draw along with the rest of the pass state.
+    m_context->RSSetScissorRects(1, &m_scissor);
     m_context->IASetInputLayout(nullptr);
     m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
@@ -217,14 +224,24 @@ void LayerCompositor::begin(ID3D11RenderTargetView *target, bool clearBlack)
     m_viewport.Height = float(viewportHeight);
     m_viewport.MinDepth = 0.0f;
     m_viewport.MaxDepth = 1.0f;
+    m_scissor = RECT{0, 0, LONG(viewportWidth), LONG(viewportHeight)};
 
     m_context->OMSetRenderTargets(1, &m_target, nullptr);
+    m_context->RSSetScissorRects(1, &m_scissor);
     m_context->RSSetViewports(1, &m_viewport);
     if (clearBlack) {
         const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         m_context->ClearRenderTargetView(target, black);
     }
     m_context->OMSetBlendState(m_blend.Get(), nullptr, 0xffffffff);
+}
+
+void LayerCompositor::setScissorRect(const RECT *rect)
+{
+    if (rect)
+        m_scissor = *rect;
+    else
+        m_scissor = RECT{0, 0, LONG(m_width), LONG(m_height)};
 }
 
 void LayerCompositor::end()

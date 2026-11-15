@@ -64,6 +64,12 @@ public:
     Q_INVOKABLE void stepFrames(int delta);
     // Timeline mode only: seek to an absolute project frame number.
     Q_INVOKABLE void seekFrame(qint64 frame);
+    // Compare the cached repair over the original frame. mode is
+    // "repair" | "original" | "split"; an unknown value means "repair".
+    Q_INVOKABLE void setRemovalCompareMode(const QString &mode,
+                                           int splitPermille = 500);
+    // The render worker opens repair manifests below this directory.
+    void setRemovalCacheRoot(const QString &root);
 
     // Timeline mode entry point. Takes ownership of its own rendering thread;
     // the caller keeps using play()/pause()/seekFrame() as usual. useProxy is
@@ -148,6 +154,7 @@ private:
     Rational m_timelineFps{30, 1};
     int64_t m_playStartUs = 0;
     bool m_useProxy = true;
+    QString m_removalCacheRoot;
     int64_t m_lastTimelineFrame = -1;
     qint64 m_lastTimelineSubmittedUs = -1;
     int m_lastTimelineLayerCount = 0;

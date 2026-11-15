@@ -6,6 +6,7 @@
 #include "D3D11Context.h"
 #include "LayerCompositor.h"
 #include "LayerGeometry.h"
+#include "RepairFrameSource.h"
 #include "SourceCachePolicy.h"
 #include "SubtitleRasterizer.h"
 #include "TimelineEvaluator.h"
@@ -17,6 +18,21 @@ namespace {
 // Upper bound on open decoders. Sources active in the current frame are always
 // kept; the LRU policy only evicts decoders no layer is using.
 constexpr int kMaxCachedSources = 4;
+
+// Maps a patch crop (pixels in the display-sized source) into the normalized
+// destination rect computed for the full frame.
+LayerRect insetLayerRectForCrop(const LayerRect &rect, const QRect &crop,
+                                int sourceWidth, int sourceHeight)
+{
+    if (sourceWidth <= 0 || sourceHeight <= 0 || crop.isEmpty())
+        return rect;
+    LayerRect inset;
+    inset.x = rect.x + rect.w * float(crop.x()) / float(sourceWidth);
+    inset.y = rect.y + rect.h * float(crop.y()) / float(sourceHeight);
+    inset.w = rect.w * float(crop.width()) / float(sourceWidth);
+    inset.h = rect.h * float(crop.height()) / float(sourceHeight);
+    return inset;
+}
 
 } // namespace
 
@@ -30,8 +46,10 @@ TimelineCompositor::~TimelineCompositor()
 void TimelineCompositor::close()
 {
     // Sources own D3D11 decoder assets and must die before the device and the
-    // compositor that cached views over their textures.
+    // compositor that cached views over their textures. Repair sources hold
+    // file locations from a project snapshot and cannot outlive it either.
     m_sources.clear();
+    m_repairSources.clear();
     m_failedClips.clear();
     m_reportedErrors.clear();
     m_converters.reset();
@@ -51,8 +69,10 @@ bool TimelineCompositor::open(const Project &project, int width, int height,
     m_project = project;
     m_useProxy = useProxy;
     // Every snapshot re-opens clip decoders; a proxy toggle in particular must
-    // discard sources opened from the other file.
+    // discard sources opened from the other file. Repair sources are keyed by
+    // the snapshot's cache keys and must be rebuilt from the new manifest.
     m_sources.clear();
+    m_repairSources.clear();
     m_failedClips.clear();
     m_reportedErrors.clear();
     m_subtitleKey.clear();
@@ -87,6 +107,23 @@ bool TimelineCompositor::open(const Project &project, int width, int height,
     }
     m_valid = true;
     return true;
+}
+
+void TimelineCompositor::setRemovalCacheRoot(const QString &root)
+{
+    if (m_removalCacheRoot == root)
+        return;
+    m_removalCacheRoot = root;
+    // Existing sources were opened below the previous root; never serve them
+    // against a new cache location.
+    m_repairSources.clear();
+}
+
+void TimelineCompositor::setRemovalCompareMode(RemovalCompareMode mode,
+                                               int splitPermille)
+{
+    m_compare = mode;
+    m_splitPermille = std::clamp(splitPermille, 0, 1000);
 }
 
 bool TimelineCompositor::ensureConverters(QString *error)
@@ -155,6 +192,40 @@ ClipVideoSource *TimelineCompositor::sourceFor(const VideoLayer &layer)
     return raw;
 }
 
+RepairFrameSource *
+TimelineCompositor::repairSourceFor(const RemovalLayer &layer, QString *error)
+{
+    const QString key = layer.id + QLatin1Char('|') + layer.cacheKey;
+    const auto existing = m_repairSources.find(key);
+    if (existing != m_repairSources.end())
+        return existing->second.get();
+
+    if (m_removalCacheRoot.isEmpty()) {
+        if (error)
+            *error = QStringLiteral(
+                "AI 修复缓存缺失或损坏：未设置修复缓存目录。");
+        return nullptr;
+    }
+
+    const RemovalCache cache(m_removalCacheRoot);
+    QString openError;
+    auto source = RepairFrameSource::open(cache, layer.cacheKey, &openError);
+    if (!source) {
+        reportOnce(QStringLiteral("removal:") + layer.id,
+                   QStringLiteral("AI 修复结果缺失，当前显示原片；请重新生成。"));
+        if (error) {
+            *error = openError.isEmpty()
+                         ? QStringLiteral("AI 修复缓存缺失或损坏。")
+                         : openError;
+        }
+        return nullptr;
+    }
+
+    RepairFrameSource *raw = source.get();
+    m_repairSources.emplace(key, std::move(source));
+    return raw;
+}
+
 QImage
 TimelineCompositor::subtitleImageFor(const QList<SubtitleLayer> &layers)
 {
@@ -214,10 +285,74 @@ int TimelineCompositor::drawFrame(int64_t timelineUs,
                          m_width, m_height);
         const float opacity =
             std::clamp(layer.transform.opacityMilli / 1000.0f, 0.0f, 1.0f);
-        if (m_compositor->drawFrame(*decoded, rect, opacity, &layerError))
+        const bool originalDrawn =
+            m_compositor->drawFrame(*decoded, rect, opacity, &layerError);
+        if (originalDrawn) {
             ++drawnLayers;
-        else if (!layerError.isEmpty())
+        } else if (!layerError.isEmpty()) {
             reportOnce(QStringLiteral("draw:") + layer.clipId, layerError);
+            continue;
+        }
+
+        if (!originalDrawn || layer.removalLayerId.isEmpty()
+            || m_compare == RemovalCompareMode::Original) {
+            continue;
+        }
+        const RemovalLayer *removal =
+            m_project.removalLayerById(layer.removalLayerId);
+        if (!removal || !removal->enabled)
+            continue;
+
+        const auto failDraw = [&](const QString &message) {
+            m_compositor->setScissorRect(nullptr);
+            m_compositor->end();
+            if (error)
+                *error = message;
+            return -1;
+        };
+
+        QString removalError;
+        RepairFrameSource *repair = repairSourceFor(*removal, &removalError);
+        if (!repair) {
+            // repairSourceFor already warned once. Export must never encode
+            // the original frame in place of a required repair.
+            if (m_failOnMissingRemoval)
+                return failDraw(removalError);
+            continue;
+        }
+
+        const RepairFrameSource::Frame *patch =
+            repair->frameAt(layer.sourceTimeUs, &removalError);
+        if (!patch) {
+            if (!removalError.isEmpty()) {
+                reportOnce(QStringLiteral("removal:") + removal->id,
+                           QStringLiteral("AI 修复结果缺失，当前显示原片；"
+                                          "请重新生成。"));
+                if (m_failOnMissingRemoval)
+                    return failDraw(removalError);
+            }
+            // Sparse cache: this frame has no hole, so the original is the
+            // correct result.
+            continue;
+        }
+
+        const LayerRect patchRect = insetLayerRectForCrop(
+            rect, patch->crop, patch->sourceWidth, patch->sourceHeight);
+        if (m_compare == RemovalCompareMode::SplitWipe) {
+            RECT left{0, 0, LONG(m_width * m_splitPermille / 1000),
+                      LONG(m_height)};
+            m_compositor->setScissorRect(&left);
+        }
+        QString patchError;
+        if (m_compositor->drawImage(patch->patch, patchRect, opacity,
+                                    &patchError)) {
+            ++drawnLayers;
+        } else if (!patchError.isEmpty()) {
+            reportOnce(QStringLiteral("draw:removal:") + layer.clipId,
+                       patchError);
+        }
+        if (m_compare == RemovalCompareMode::SplitWipe)
+            m_compositor->setScissorRect(nullptr);
     }
 
     // No decoder may accumulate for clips that are no longer on screen.

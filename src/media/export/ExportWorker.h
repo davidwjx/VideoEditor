@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
+#include <utility>
 
 #include <QObject>
 
@@ -26,6 +28,14 @@ public:
     // Project file path, used by the pipeline to refuse an output that would
     // overwrite the project itself. Empty for an unsaved document.
     void setProjectPath(const QString &path) { m_projectPath = path; }
+    // Injected by ExportController; runs on this worker thread inside the
+    // pipeline before any output is created.
+    void setRemovalChecker(
+        std::function<RemovalPreflightResult(const Project &)> checker)
+    {
+        m_removalChecker = std::move(checker);
+    }
+    void setRemovalCacheRoot(const QString &root) { m_removalCacheRoot = root; }
 
     bool isCanceled() const { return m_cancel.load(); }
 
@@ -41,6 +51,8 @@ signals:
 private:
     EncoderCatalog m_catalog;
     QString m_projectPath;
+    QString m_removalCacheRoot;
+    std::function<RemovalPreflightResult(const Project &)> m_removalChecker;
     std::atomic_bool m_cancel{false};
 };
 

@@ -26,6 +26,13 @@ void OfflineFrameRenderer::close()
     m_height = 0;
 }
 
+void OfflineFrameRenderer::setRemovalCacheRoot(const QString &root)
+{
+    m_removalCacheRoot = root;
+    if (m_compositor)
+        m_compositor->setRemovalCacheRoot(root);
+}
+
 bool OfflineFrameRenderer::open(const Project &project, int width, int height,
                                 QString *error)
 {
@@ -42,8 +49,13 @@ bool OfflineFrameRenderer::open(const Project &project, int width, int height,
         if (m_warning)
             m_warning(message);
     });
+    m_compositor->setRemovalCacheRoot(m_removalCacheRoot);
     if (!m_compositor->open(project, width, height, false, error))
         return false;
+    // Export always draws the repaired result and never silently encodes the
+    // original when a cache chunk is missing.
+    m_compositor->setRemovalCompareMode(RemovalCompareMode::Repair);
+    m_compositor->setFailOnMissingRemoval(true);
     if (!ensureTarget(error)) {
         close();
         return false;

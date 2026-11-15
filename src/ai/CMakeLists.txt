@@ -7,6 +7,7 @@ add_library(videoeditor_ai STATIC
   AiJobManager.h AiJobManager.cpp
   ModelRegistry.h ModelRegistry.cpp
   AiFeatureGate.h AiFeatureGate.cpp
+  RemovalPreflight.h RemovalPreflight.cpp
   engine/Confidence.h engine/Confidence.cpp
   engine/FrameReader.h engine/FrameReader.cpp
 )

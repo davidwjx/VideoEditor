@@ -215,13 +215,20 @@ void ExportController::applyPreset(const QString &id)
     refreshValidation();
 }
 
-QString ExportController::validate() const
+QString ExportController::validate()
 {
+    const auto finishValidation = [this](const QString &error) {
+        // Any non-removal validation failure means the removal check was not
+        // reached; clear a stale "regenerate first" prompt.
+        syncRemovalState(nullptr);
+        return error;
+    };
+
     const ExportSettings settings = currentSettings();
     const QString error =
         validateExportSettings(settings, m_document.project().timeline);
     if (!error.isEmpty())
-        return error;
+        return finishValidation(error);
 
     // Finalization replaces the destination, so an output that is also an
     // imported asset (or the project file) would delete source media. Reject
@@ -231,7 +238,7 @@ QString ExportController::validate() const
     const QString destinationError = validateExportDestinations(
         settings, m_document.project(), projectPath);
     if (!destinationError.isEmpty())
-        return destinationError;
+        return finishValidation(destinationError);
 
     // Ask the catalog for the encoder the pipeline would actually pick. A
     // bare hasAny() also counts rows that the selection gate never uses (for
@@ -239,23 +246,48 @@ QString ExportController::validate() const
     QString reason;
     const QString encoderId = m_catalog.selectEncoder(
         m_codec, m_hardwarePreferred, nullptr, &reason);
-    if (!encoderId.isEmpty())
-        return {};
-    // The first dialog open probes encoders on a worker thread. Until that
-    // catalog arrives it is empty; reporting "no encoder" then would flash a
-    // false error over an otherwise valid configuration.
-    if (!m_capabilitiesReady)
-        return {};
-    if (m_codec == ExportVideoCodec::H265) {
-        return reason.isEmpty()
-                   ? QStringLiteral("当前系统没有可用的 H.265/HEVC 硬件编码器。")
-                   : reason;
+    if (encoderId.isEmpty()) {
+        // The first dialog open probes encoders on a worker thread. Until that
+        // catalog arrives it is empty; reporting "no encoder" then would
+        // flash a false error over an otherwise valid configuration.
+        if (!m_capabilitiesReady)
+            return finishValidation(QString());
+        if (m_codec == ExportVideoCodec::H265) {
+            return finishValidation(
+                reason.isEmpty()
+                    ? QStringLiteral(
+                          "当前系统没有可用的 H.265/HEVC 硬件编码器。")
+                    : reason);
+        }
+        if (m_codec == ExportVideoCodec::H264) {
+            return finishValidation(
+                reason.isEmpty()
+                    ? QStringLiteral("当前系统没有可用的 H.264 编码器。")
+                    : reason);
+        }
+        return finishValidation(
+            reason.isEmpty() ? QStringLiteral("没有可用的视频编码器。")
+                             : reason);
     }
-    if (m_codec == ExportVideoCodec::H264) {
-        return reason.isEmpty() ? QStringLiteral("当前系统没有可用的 H.264 编码器。")
-                                : reason;
+
+    // AI removal is checked only after the ordinary settings/encoder checks:
+    // a missing model or cache must never mask a more fundamental export
+    // problem. The checker owns the cache/model types; the controller only
+    // forwards the verdict.
+    if (m_removalChecker) {
+        const RemovalPreflightResult result =
+            m_removalChecker(m_document.project());
+        syncRemovalState(&result);
+        if (!result.ok) {
+            return result.message.isEmpty()
+                       ? QStringLiteral(
+                             "AI 修复结果缺失或已过期。请先生成修复，再导出。")
+                       : result.message;
+        }
+        return {};
     }
-    return reason.isEmpty() ? QStringLiteral("没有可用的视频编码器。") : reason;
+    syncRemovalState(nullptr);
+    return {};
 }
 
 bool ExportController::hasResumableCheckpoint() const
@@ -449,6 +481,12 @@ void ExportController::startExport()
         // plain start would unexpectedly continue the old export.
         m_resumeRequested = false;
         setErrorText(errorText);
+        // The removal check failed: route the user to generation instead of
+        // leaving them with a dead export button.
+        if (m_removalRequired)
+            emit removalGenerationRequired(m_removalMessage.isEmpty()
+                                              ? errorText
+                                              : m_removalMessage);
         return;
     }
 
@@ -490,6 +528,8 @@ void ExportController::startExport()
     m_thread = new QThread;
     m_worker = new ExportWorker;
     m_worker->setCatalog(m_catalog);
+    m_worker->setRemovalChecker(m_removalChecker);
+    m_worker->setRemovalCacheRoot(m_removalCacheRoot);
     // The pipeline needs the project path to reject an output that would
     // overwrite the project file itself.
     m_worker->setProjectPath(m_projectPath.isEmpty() ? m_document.filePath()
@@ -630,6 +670,31 @@ void ExportController::cleanupThread()
     thread->quit();
     thread->wait();
     thread->deleteLater();
+}
+
+void ExportController::setRemovalChecker(RemovalChecker checker)
+{
+    m_removalChecker = std::move(checker);
+    refreshValidation();
+}
+
+void ExportController::syncRemovalState(const RemovalPreflightResult *result)
+{
+    const bool required = result && !result->ok;
+    const QString message =
+        required ? (result->message.isEmpty()
+                        ? QStringLiteral(
+                              "AI 修复结果缺失或已过期。请先生成修复，再导出。")
+                        : result->message)
+                 : QString();
+    if (required != m_removalRequired) {
+        m_removalRequired = required;
+        emit removalRequiredChanged();
+    }
+    if (message != m_removalMessage) {
+        m_removalMessage = message;
+        emit removalMessageChanged();
+    }
 }
 
 void ExportController::setErrorText(const QString &message)

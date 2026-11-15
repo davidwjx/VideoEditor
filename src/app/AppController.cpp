@@ -31,6 +31,7 @@
 #include "ProxyPlanner.h"
 #include "ProxyService.h"
 #include "RemovalCache.h"
+#include "RemovalPreflight.h"
 #include "TimelineController.h"
 #include "TimelineEvaluator.h"
 #include "WaveformService.h"
@@ -161,6 +162,52 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     m_removal->setJobManager(m_aiJobs.get());
     m_removal->setCache(m_removalCache.get());
     m_removal->setFeatureGate(m_aiGate.get());
+
+    // Export preflight is injected: ExportController must not know about the
+    // cache or the model registry. A failed manifest load leaves registry()
+    // null; report the gate reason instead of dereferencing it.
+    m_export->setRemovalChecker([this](const Project &project) {
+        const ModelRegistry *registry =
+            m_aiGate ? m_aiGate->registry() : nullptr;
+        if (!registry) {
+            RemovalPreflightResult result;
+            const QString reason =
+                m_aiGate
+                    ? m_aiGate->disabledReason()
+                    : QStringLiteral("AI 消除功能未启用：未加载模型清单。");
+            QStringList lines;
+            for (const Track &track : project.tracks) {
+                if (track.type != TrackType::Video)
+                    continue;
+                for (const Clip &clip : track.clips) {
+                    if (clip.removalLayerId.isEmpty())
+                        continue;
+                    const RemovalLayer *layer =
+                        project.removalLayerById(clip.removalLayerId);
+                    if (!layer || !layer->enabled)
+                        continue;
+                    RemovalPreflightIssue issue;
+                    issue.clipId = clip.id;
+                    issue.layerId = layer->id;
+                    issue.startUs = clip.timelineStartUs;
+                    issue.endUs = clip.timelineEndUs();
+                    issue.reason = reason;
+                    result.issues.append(issue);
+                    lines.append(QStringLiteral("片段“%1”：%2")
+                                     .arg(clip.id, reason));
+                }
+            }
+            result.ok = result.issues.isEmpty();
+            result.message = lines.join(QLatin1Char('\n'));
+            return result;
+        }
+        return RemovalPreflight::check(project, *m_removalCache, *registry);
+    });
+    m_export->setRemovalCacheRoot(m_removalCache->root());
+    m_preview->setRemovalCacheRoot(m_removalCache->root());
+    // Task 8 replaces the placeholder with the real generate-and-export flow.
+    connect(m_export.get(), &ExportController::removalGenerationRequired,
+            m_removal.get(), &RemovalController::beginGenerateForExport);
     // Timeline position is authoritative for mask authoring; the preview clock
     // mirrors it in timeline mode. The fallback keeps the controller useful
     // when only the timeline controller exists (asset-mode preview).
@@ -222,6 +269,11 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     connect(m_document, &ProjectDocument::timelineChanged, this,
             scheduleTimelineUpdate);
     connect(m_document, &ProjectDocument::tracksChanged, this,
+            scheduleTimelineUpdate);
+    // Enabling/deleting a removal layer changes which cached patch the
+    // compositor should draw. Without this the paused preview keeps the old
+    // snapshot until the next unrelated edit.
+    connect(m_document, &ProjectDocument::removalLayersChanged, this,
             scheduleTimelineUpdate);
 
     const QString cacheRoot = QDir(appData).filePath(QStringLiteral("cache"));

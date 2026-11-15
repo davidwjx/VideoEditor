@@ -60,4 +60,21 @@ struct RemovalLayer {
 // preview and export.
 QSize displaySizeForAsset(const Asset &asset);
 
+// Export preflight outcome. The types live in core (not in the AI library) so
+// ExportPipeline::Hooks can reference them without creating a media -> ai
+// dependency; RemovalPreflight (videoeditor_ai) fills them.
+struct RemovalPreflightIssue {
+    QString clipId;
+    QString layerId;
+    int64_t startUs = 0;
+    int64_t endUs = 0;
+    QString reason;
+};
+
+struct RemovalPreflightResult {
+    bool ok = true;
+    QList<RemovalPreflightIssue> issues;
+    QString message;
+};
+
 } // namespace VideoEditor

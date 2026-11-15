@@ -97,6 +97,10 @@ public:
     Q_INVOKABLE void clearError();
     Q_INVOKABLE bool track();
     Q_INVOKABLE bool generate();
+    // Task 8 replaces this placeholder with the real "generate, then start the
+    // export" flow. ExportController emits removalGenerationRequired(message)
+    // when a preflight failure blocks export.
+    Q_INVOKABLE void beginGenerateForExport(const QString &message = QString());
 
     // Test/timeline-delegate entry points. sourceTimeUs is relative to the
     // clip's source media, not the timeline.
