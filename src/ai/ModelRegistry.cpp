@@ -206,6 +206,48 @@ bool verifyRecordFiles(const AiModelRecord &model, const QString &rootDir,
     return true;
 }
 
+bool recordTextMentions(const AiModelRecord &record, const QString &needle)
+{
+    if (record.id.contains(needle, Qt::CaseInsensitive)
+        || record.version.contains(needle, Qt::CaseInsensitive)) {
+        return true;
+    }
+    for (auto it = record.files.constBegin(); it != record.files.constEnd();
+         ++it) {
+        if (it.value().path.contains(needle, Qt::CaseInsensitive))
+            return true;
+    }
+    return false;
+}
+
+// fp16 must never be selected implicitly. The real manifest keeps the
+// fp16/only bundle under a plain "lama-512" id, so the file path is the
+// authoritative signal in addition to id/version.
+bool recordIsFp16(const AiModelRecord &record)
+{
+    return recordTextMentions(record, QStringLiteral("fp16"));
+}
+
+bool recordIsMigan(const AiModelRecord &record)
+{
+    if (!record.isInpaint())
+        return false;
+    const bool migan = recordTextMentions(record, QStringLiteral("migan"));
+    const bool lama = recordTextMentions(record, QStringLiteral("lama"))
+                      || recordTextMentions(record, QStringLiteral("allowzero0"));
+    return migan && !lama;
+}
+
+bool recordIsLama(const AiModelRecord &record)
+{
+    if (!record.isInpaint())
+        return false;
+    const bool migan = recordTextMentions(record, QStringLiteral("migan"));
+    const bool lama = recordTextMentions(record, QStringLiteral("lama"))
+                      || recordTextMentions(record, QStringLiteral("allowzero0"));
+    return lama && !migan;
+}
+
 } // namespace
 
 bool AiModelRecord::isTracking() const
@@ -492,6 +534,39 @@ const AiModelRecord *ModelRegistry::defaultTrackingModel() const
         return approvedCompatible;
     if (compatible)
         return compatible;
+    return fallback;
+}
+
+const AiModelRecord *ModelRegistry::preferredInpaintModel(RepairMode mode) const
+{
+    const QString preferredId =
+        mode == RepairMode::Fast ? QStringLiteral("migan-512")
+                                 : QStringLiteral("lama-512-int8-allowzero0");
+    if (const AiModelRecord *exact = model(preferredId)) {
+        if (exact->isInpaint())
+            return exact;
+    }
+
+    // Mode-appropriate fallback only: no silent cross-mode substitution and
+    // no fp16 variant. Prefer a commercially approved record when one exists,
+    // but the caller (feature gate) has already enforced approval.
+    const AiModelRecord *approvedFallback = nullptr;
+    const AiModelRecord *fallback = nullptr;
+    for (const AiModelRecord &record : m_manifest.models) {
+        if (recordIsFp16(record))
+            continue;
+        const bool appropriate =
+            mode == RepairMode::Fast ? recordIsMigan(record)
+                                     : recordIsLama(record);
+        if (!appropriate)
+            continue;
+        if (!fallback)
+            fallback = &record;
+        if (record.commercialApproved && !approvedFallback)
+            approvedFallback = &record;
+    }
+    if (approvedFallback)
+        return approvedFallback;
     return fallback;
 }
 

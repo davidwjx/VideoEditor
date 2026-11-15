@@ -196,6 +196,85 @@ TEST(ExportController, RemovalPreflightIsCachedAndWarnsWithoutBlocking)
     EXPECT_EQ(controller.removalWarning(), warning);
 }
 
+TEST(ExportController, DocumentEditInvalidatesRemovalPreflightCache)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ProjectDocument document;
+    Project project;
+    project.timeline.width = 320;
+    project.timeline.height = 180;
+    project.timeline.fps = Rational{30, 1};
+    document.setProject(project);
+
+    ExportController controller(document, QString());
+    controller.setCatalogForTest(EncoderCatalog::withoutHardwareForTest());
+    controller.refreshCapabilities();
+    controller.applyPreset(QStringLiteral("h264-720p30"));
+    controller.setOutputPath(dir.filePath(QStringLiteral("out.mp4")));
+
+    int calls = 0;
+    controller.setRemovalChecker([&calls](const Project &) {
+        ++calls;
+        RemovalPreflightResult result;
+        result.ok = true;
+        return result;
+    });
+    ASSERT_TRUE(controller.validate().isEmpty());
+    ASSERT_EQ(calls, 1);
+
+    // Mirror AppController's wiring; a real removal edit must invalidate the
+    // cached verdict and force the next validate to re-run the checker.
+    QObject::connect(&document, &ProjectDocument::changed, &controller,
+                     &ExportController::invalidateRemovalPreflight);
+    RemovalLayer layer;
+    layer.id = QStringLiteral("rl-1");
+    layer.clipId = QStringLiteral("c1");
+    layer.sourceOutUs = 1'000'000;
+    RemovalLayerEdit edit;
+    edit.clipId = layer.clipId;
+    edit.after = layer;
+    document.applyRemovalLayerEdit(edit, QStringLiteral("add removal"));
+    EXPECT_EQ(document.project().removalLayers.size(), 1);
+
+    EXPECT_TRUE(controller.validate().isEmpty());
+    EXPECT_EQ(calls, 2);
+}
+
+TEST(ExportController, EncoderErrorClearsStaleRemovalWarning)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ProjectDocument document;
+    Project project;
+    project.timeline.width = 320;
+    project.timeline.height = 180;
+    project.timeline.fps = Rational{30, 1};
+    document.setProject(project);
+
+    ExportController controller(document, QString());
+    controller.setCatalogForTest(EncoderCatalog::withoutHardwareForTest());
+    controller.refreshCapabilities();
+    controller.applyPreset(QStringLiteral("h264-720p30"));
+    controller.setOutputPath(dir.filePath(QStringLiteral("out.mp4")));
+    controller.setRemovalChecker([](const Project &) {
+        RemovalPreflightResult result;
+        result.ok = true;
+        result.message = QStringLiteral("跟踪置信度较低。");
+        return result;
+    });
+    ASSERT_TRUE(controller.validate().isEmpty());
+    ASSERT_FALSE(controller.removalWarning().isEmpty());
+
+    // H.265 is hardware-only and unavailable in the injected catalog; the
+    // settings error must clear the now-irrelevant removal warning.
+    controller.applyPreset(QStringLiteral("h265-1080p30"));
+    EXPECT_FALSE(controller.validate().isEmpty());
+    EXPECT_TRUE(controller.removalRequired() == false);
+    EXPECT_TRUE(controller.removalWarning().isEmpty())
+        << controller.removalWarning().toStdString();
+}
+
 TEST(ExportController, SyncRunnerDrivesProgressAndFinish)
 {
     ProjectDocument document;

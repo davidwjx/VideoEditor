@@ -34,15 +34,6 @@ QString cacheMessageFor(const QString &clipId)
         .arg(clipId);
 }
 
-QString inpaintModelHint(RepairMode mode)
-{
-    // The engine resolves the mode's default record by these id fragments:
-    // Fast -> MI-GAN, Quality -> LaMa. Keep the cache key aligned with the
-    // pixels the generator will actually produce.
-    return mode == RepairMode::Quality ? QStringLiteral("lama")
-                                       : QStringLiteral("migan");
-}
-
 struct RemovalTarget {
     const Clip *clip = nullptr;
     const RemovalLayer *layer = nullptr;
@@ -126,7 +117,7 @@ RemovalKeyInput RemovalPreflight::keyInputFor(const Project &project,
 
     const AiModelRecord *tracking = models.defaultTrackingModel();
     const AiModelRecord *inpaint =
-        models.defaultInpaintModel(inpaintModelHint(layer.parameters.mode));
+        models.preferredInpaintModel(layer.parameters.mode);
     input.trackingModelId = tracking ? tracking->id : QString();
     input.trackingModelHash = modelBundleHash(tracking);
     input.inpaintModelId = inpaint ? inpaint->id : QString();
@@ -194,6 +185,18 @@ RemovalPreflightResult RemovalPreflight::check(const Project &project,
         if (!asset) {
             addIssue(&result, clip, layer, QStringLiteral("素材缺失"));
             messageLines.append(cacheMessageFor(clip.id));
+            continue;
+        }
+
+        // Quality must never silently fall back to MI-GAN (or an fp16 LaMa).
+        // A mode with no appropriate model cannot have a valid cache.
+        if (!models.preferredInpaintModel(layer->parameters.mode)) {
+            addIssue(&result, clip, layer,
+                     QStringLiteral("没有可用的修复模型。"));
+            messageLines.append(
+                QStringLiteral("片段“%1”没有可用的修复模型，"
+                               "请安装对应的模型后再导出。")
+                    .arg(clip.id));
             continue;
         }
 

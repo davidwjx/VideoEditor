@@ -50,6 +50,10 @@ std::unique_ptr<RepairFrameSource> RepairFrameSource::open(
                                        : manifestError));
         return nullptr;
     }
+    if (manifest->cacheKey != cacheKey) {
+        setError(error, cacheError(QStringLiteral("修复缓存清单的缓存键不匹配。")));
+        return nullptr;
+    }
     if (manifest->status != QStringLiteral("complete")) {
         setError(error, cacheError(QStringLiteral("修复缓存不完整（%1）。")
                                        .arg(manifest->status)));
@@ -57,6 +61,14 @@ std::unique_ptr<RepairFrameSource> RepairFrameSource::open(
     }
     if (manifest->width <= 0 || manifest->height <= 0) {
         setError(error, cacheError(QStringLiteral("修复缓存尺寸无效。")));
+        return nullptr;
+    }
+    // state() and readManifest() are two separate reads. A concurrent rewrite
+    // could truncate the chunk list between them; re-validate this exact
+    // manifest so it cannot open as an all-sparse cache.
+    QString coverageError;
+    if (!cache.validateCompleteManifest(*manifest, &coverageError)) {
+        setError(error, cacheError(coverageError));
         return nullptr;
     }
 

@@ -218,15 +218,10 @@ const AiModelRecord *resolveInpaintRecord(const ModelRegistry &registry,
     }
 
     // Measured defaults: MI-GAN for Fast, int8 allowzero LaMa for Quality.
-    const QString preferred = spec.parameters.mode == RepairMode::Fast
-        ? QStringLiteral("migan-512")
-        : QStringLiteral("lama-512-int8-allowzero0");
-    const AiModelRecord *record = registry.model(preferred);
-    if (record && record->isInpaint())
-        return record;
-    record = registry.defaultInpaintModel(spec.parameters.mode == RepairMode::Fast
-                                              ? QStringLiteral("migan")
-                                              : QStringLiteral("lama"));
+    // The registry resolves both the exact ids and a strict mode-appropriate
+    // fallback so Quality can never silently run MI-GAN or an fp16 LaMa.
+    const AiModelRecord *record =
+        registry.preferredInpaintModel(spec.parameters.mode);
     if (!record || !record->isInpaint()) {
         return fail(QStringLiteral("没有可用的修复模型。"));
     }

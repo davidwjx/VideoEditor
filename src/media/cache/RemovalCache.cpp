@@ -236,20 +236,29 @@ bool validateCompleteCoverage(const QString &cacheDir,
                               const RemovalCacheManifest &manifest,
                               QString *reason)
 {
-    if (manifest.totalFrames <= 0) {
+    // 100M frames is ~38 days at 30 fps; anything larger is a corrupt header.
+    // qint64 math prevents (totalFrames + 29) overflowing for INT_MAX input.
+    constexpr qint64 kMaxRepairFrames = 100'000'000;
+    const qint64 totalFrames = manifest.totalFrames;
+    if (totalFrames <= 0) {
         setError(reason, QStringLiteral("修复缓存帧数无效。"));
         return false;
     }
-    const int chunkCount = (manifest.totalFrames + 29) / 30;
+    if (totalFrames > kMaxRepairFrames) {
+        setError(reason, QStringLiteral("修复缓存帧数超出上限。"));
+        return false;
+    }
+    const qint64 chunkCount = (totalFrames + 29) / 30;
     QHash<int, const RemovalCacheChunk *> byIndex;
     for (const RemovalCacheChunk &chunk : manifest.chunks) {
         if (chunk.index >= 0 && chunk.index < chunkCount)
             byIndex.insert(chunk.index, &chunk);
     }
-    for (int index = 0; index < chunkCount; ++index) {
+    for (qint64 position = 0; position < chunkCount; ++position) {
+        const int index = int(position);
         const int expectedFirst = index * 30;
         const int expectedCount =
-            std::min(30, manifest.totalFrames - expectedFirst);
+            int(std::min<qint64>(30, totalFrames - expectedFirst));
         const auto it = byIndex.constFind(index);
         if (it == byIndex.constEnd()) {
             setError(reason, QStringLiteral("修复缓存缺少分块 %1。")
@@ -620,6 +629,17 @@ QImage RemovalCache::readFrameImage(const QString &cacheKey,
     return QImage();
 }
 
+bool RemovalCache::validateCompleteManifest(
+    const RemovalCacheManifest &manifest, QString *reason) const
+{
+    const QString dir = cacheDir(manifest.cacheKey);
+    if (dir.isEmpty()) {
+        setError(reason, QStringLiteral("修复缓存键无效：需要 64 位十六进制哈希。"));
+        return false;
+    }
+    return validateCompleteCoverage(dir, manifest, reason);
+}
+
 RemovalCacheState RemovalCache::state(const QString &cacheKey,
                                       QString *reason) const
 {
@@ -657,7 +677,7 @@ RemovalCacheState RemovalCache::state(const QString &cacheKey,
     }
 
     QString coverageError;
-    if (!validateCompleteCoverage(dir, *manifest, &coverageError)) {
+    if (!validateCompleteManifest(*manifest, &coverageError)) {
         setError(reason, coverageError);
         return RemovalCacheState::Corrupt;
     }
@@ -680,7 +700,7 @@ bool RemovalCache::verify(const QString &cacheKey, QString *reason) const
     // Re-check explicitly so verify() never relies solely on state()'s earlier
     // verdict if the manifest changes between the two reads.
     QString coverageError;
-    if (!validateCompleteCoverage(dir, *manifest, &coverageError)) {
+    if (!validateCompleteManifest(*manifest, &coverageError)) {
         setError(reason, coverageError);
         return false;
     }

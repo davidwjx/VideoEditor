@@ -1,4 +1,8 @@
 #include <gtest/gtest.h>
+
+#include <algorithm>
+#include <limits>
+
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
@@ -34,6 +38,35 @@ QList<QImage> patches()
         images.append(image);
     }
     return images;
+}
+
+// Writes every 30-frame chunk for totalFrames (one sparse patch per chunk) and
+// a complete manifest listing all of them, or only `listedChunks` when given.
+bool writeCoverageCache(RemovalCache &cache, const QString &key,
+                        int totalFrames, const QList<int> &listedChunks = {},
+                        QString *error = nullptr)
+{
+    const int chunkCount = (totalFrames + 29) / 30;
+    QList<RemovalCacheChunk> chunks;
+    for (int chunk = 0; chunk < chunkCount; ++chunk) {
+        QImage patch(8, 8, QImage::Format_ARGB32);
+        patch.fill(QColor(40, 80, 120, 255));
+        RemovalChunkIndex index;
+        if (!cache.writeChunkFrames(key, chunk, {chunk * 30}, {patch},
+                                    {QRect(0, 0, 8, 8)}, &index, error))
+            return false;
+        chunks.append(RemovalCacheChunk{
+            chunk, chunk * 30, std::min(30, totalFrames - chunk * 30),
+            index.treeSha256});
+    }
+
+    RemovalCacheManifest manifest = manifestFor(key);
+    manifest.totalFrames = totalFrames;
+    for (const RemovalCacheChunk &chunk : chunks) {
+        if (listedChunks.isEmpty() || listedChunks.contains(chunk.index))
+            manifest.chunks.append(chunk);
+    }
+    return cache.writeManifest(manifest, error);
 }
 } // namespace
 
@@ -238,6 +271,53 @@ TEST(RemovalCache, RejectsUnknownManifestStatus)
     QString error;
     EXPECT_FALSE(cache.writeManifest(manifest, &error));
     EXPECT_FALSE(error.isEmpty());
+}
+
+TEST(RemovalCache, CompleteCoverageHandlesEveryChunkBoundary)
+{
+    for (int totalFrames : {1, 29, 30, 31, 60, 61}) {
+        QTemporaryDir dir;
+        ASSERT_TRUE(dir.isValid());
+        RemovalCache cache(dir.path());
+        const QString key(64, QLatin1Char('a'));
+        QString error;
+        ASSERT_TRUE(writeCoverageCache(cache, key, totalFrames, {}, &error))
+            << totalFrames << ": " << error.toStdString();
+        EXPECT_EQ(cache.state(key, &error), RemovalCacheState::Complete)
+            << totalFrames << ": " << error.toStdString();
+        EXPECT_TRUE(cache.verify(key, &error))
+            << totalFrames << ": " << error.toStdString();
+    }
+}
+
+TEST(RemovalCache, RejectsNonContiguousOrAbsurdCompleteCoverage)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+    const QString key(64, QLatin1Char('b'));
+    QString error;
+
+    // 61 frames need chunks 0,1,2; listing only 0 and 2 is not complete.
+    ASSERT_TRUE(writeCoverageCache(cache, key, 61, {0, 2}, &error))
+        << error.toStdString();
+    EXPECT_EQ(cache.state(key, &error), RemovalCacheState::Corrupt);
+    EXPECT_TRUE(error.contains(QStringLiteral("缺少分块")))
+        << error.toStdString();
+    EXPECT_FALSE(cache.verify(key, &error));
+
+    // A corrupt header must not overflow (totalFrames + 29) or make the
+    // coverage loop effectively unbounded.
+    QTemporaryDir absurdDir;
+    ASSERT_TRUE(absurdDir.isValid());
+    RemovalCache absurd(absurdDir.path());
+    const QString absurdKey(64, QLatin1Char('c'));
+    RemovalCacheManifest manifest = manifestFor(absurdKey);
+    manifest.totalFrames = std::numeric_limits<int>::max();
+    ASSERT_TRUE(absurd.writeManifest(manifest, &error)) << error.toStdString();
+    EXPECT_EQ(absurd.state(absurdKey, &error), RemovalCacheState::Corrupt);
+    EXPECT_TRUE(error.contains(QStringLiteral("上限")))
+        << error.toStdString();
 }
 
 TEST(CacheStoreRemoval, PathsAreValidatedAndClearable)

@@ -3,7 +3,11 @@
 #include <algorithm>
 
 #include <QColor>
+#include <QFile>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 
 #include "RemovalPreflight.h"
@@ -35,6 +39,16 @@ ModelManifest approvedManifest()
         {{QStringLiteral("model"),
           AiModelFile{QStringLiteral("unused.onnx"),
                       QString(64, QLatin1Char('b'))}}},
+        {}});
+    // Real manifest ordering: the fp16-only record appears before the int8
+    // allowzero graph. Quality must resolve the int8 id, not this one.
+    manifest.models.append(AiModelRecord{
+        QStringLiteral("lama-512"), QStringLiteral("inpaint"),
+        QStringLiteral("1.0.0"), QStringLiteral("Apache-2.0"),
+        QStringLiteral("Apache-2.0"), {}, true,
+        {{QStringLiteral("model"),
+          AiModelFile{QStringLiteral("lama_512/lama_512_fp16.onnx"),
+                      QString(64, QLatin1Char('d'))}}},
         {}});
     manifest.models.append(AiModelRecord{
         QStringLiteral("lama-512-int8-allowzero0"), QStringLiteral("inpaint"),
@@ -311,6 +325,111 @@ TEST(RemovalPreflight, TruncatedCompleteManifestIsReportedAsDamaged)
     EXPECT_TRUE(result.issues.first().reason.contains(
         QStringLiteral("缺失或已损坏")))
         << result.issues.first().reason.toStdString();
+}
+
+TEST(RemovalPreflight, QualityWithoutLamaFailsInsteadOfUsingMigan)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+
+    ModelManifest manifest = approvedManifest();
+    // Remove the int8 allowzero LaMa; only MI-GAN and the fp16 LaMa remain.
+    for (int i = manifest.models.size() - 1; i >= 0; --i) {
+        if (manifest.models[i].id
+            == QStringLiteral("lama-512-int8-allowzero0")) {
+            manifest.models.removeAt(i);
+        }
+    }
+    const ModelRegistry registry = ModelRegistry::forTest(manifest);
+
+    Project project;
+    RemovalLayer layer;
+    projectWithRemovalLayer(registry, &project, &layer);
+    project.removalLayers[0].parameters.mode = RepairMode::Quality;
+
+    const RemovalPreflightResult result =
+        RemovalPreflight::check(project, cache, registry);
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.issues.size(), 1);
+    EXPECT_TRUE(result.issues.first().reason.contains(
+        QStringLiteral("没有可用的修复模型")))
+        << result.issues.first().reason.toStdString();
+    EXPECT_TRUE(result.message.contains(QStringLiteral("没有可用的修复模型")))
+        << result.message.toStdString();
+}
+
+TEST(RemovalPreflight, ModelsAlreadyVerifiedSkipsModelFileHashing)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString manifestPath =
+        dir.filePath(QStringLiteral("models.manifest.json"));
+    const auto fileObject = [](const QString &path, QChar hashChar) {
+        return QJsonObject{
+            {QStringLiteral("path"), path},
+            {QStringLiteral("sha256"), QString(64, hashChar)}};
+    };
+    const QJsonObject manifestJson{
+        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("commercialApproved"), true},
+        {QStringLiteral("pipelineVersion"), QStringLiteral("m4.0")},
+        {QStringLiteral("legalSignOff"),
+         QJsonObject{{QStringLiteral("approvedBy"), QStringLiteral("legal")},
+                     {QStringLiteral("date"), QStringLiteral("2026-11-15")},
+                     {QStringLiteral("scope"), QStringLiteral("commercial")}}},
+        {QStringLiteral("models"),
+         QJsonArray{
+             QJsonObject{{QStringLiteral("id"), QStringLiteral("tracker")},
+                         {QStringLiteral("family"), QStringLiteral("tracking")},
+                         {QStringLiteral("commercialApproved"), true},
+                         {QStringLiteral("files"),
+                          QJsonObject{{QStringLiteral("image_encoder"),
+                                       fileObject(QStringLiteral(
+                                                      "missing-tracking.onnx"),
+                                                  QLatin1Char('a'))}}}},
+             QJsonObject{{QStringLiteral("id"), QStringLiteral("migan-512")},
+                         {QStringLiteral("family"), QStringLiteral("inpaint")},
+                         {QStringLiteral("commercialApproved"), true},
+                         {QStringLiteral("files"),
+                          QJsonObject{{QStringLiteral("model"),
+                                       fileObject(QStringLiteral(
+                                                      "missing-migan.onnx"),
+                                                  QLatin1Char('b'))}}}}}}};
+    QFile manifestFile(manifestPath);
+    ASSERT_TRUE(manifestFile.open(QIODevice::WriteOnly));
+    manifestFile.write(
+        QJsonDocument(manifestJson).toJson(QJsonDocument::Compact));
+    manifestFile.close();
+
+    QString error;
+    const auto registry = ModelRegistry::load(manifestPath, &error);
+    ASSERT_TRUE(registry.has_value()) << error.toStdString();
+
+    Project project;
+    RemovalLayer layer;
+    projectWithRemovalLayer(*registry, &project, &layer);
+    RemovalCache cache(dir.path());
+
+    // Without the flag, the gate re-hashes the missing files and fails before
+    // the cache check.
+    const RemovalPreflightResult unverified =
+        RemovalPreflight::check(project, cache, *registry, false);
+    EXPECT_FALSE(unverified.ok);
+    EXPECT_FALSE(unverified.issues.isEmpty());
+    EXPECT_TRUE(unverified.issues.first().reason.contains(
+        QStringLiteral("未启用")))
+        << unverified.issues.first().reason.toStdString();
+
+    // With the flag (AiFeatureGate already verified), the cache verdict is
+    // reached without touching the model files; sampleLayer has a fake key.
+    const RemovalPreflightResult verified =
+        RemovalPreflight::check(project, cache, *registry, true);
+    EXPECT_FALSE(verified.ok);
+    EXPECT_FALSE(verified.issues.isEmpty());
+    EXPECT_TRUE(verified.issues.first().reason.contains(
+        QStringLiteral("已过期")))
+        << verified.issues.first().reason.toStdString();
 }
 
 TEST(RemovalPreflight, IncompleteTrackingBlocksButLowConfidenceOnlyWarns)

@@ -91,6 +91,11 @@ public:
     RemovalCacheState state(const QString &cacheKey,
                             QString *reason = nullptr) const;
     bool verify(const QString &cacheKey, QString *reason = nullptr) const;
+    // Re-runs the complete-manifest coverage check against a manifest the
+    // caller already read. Used by RepairFrameSource so a concurrent rewrite
+    // between state() and readManifest() cannot open as all-sparse.
+    bool validateCompleteManifest(const RemovalCacheManifest &manifest,
+                                  QString *reason = nullptr) const;
     bool invalidateFrameRange(const QString &cacheKey, int firstFrame,
                               int lastFrame, QString *error = nullptr);
     bool collectGarbage(const QSet<QString> &pinnedKeys, qint64 maxBytes,

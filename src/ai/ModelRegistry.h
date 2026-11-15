@@ -9,6 +9,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "Removal.h"
+
 namespace VideoEditor {
 
 struct AiModelFile {
@@ -67,6 +69,12 @@ public:
     const AiModelRecord *approvedModel(const QString &id) const;
     const AiModelRecord *defaultTrackingModel() const;
     const AiModelRecord *defaultInpaintModel(const QString &mode) const;
+    // Strict mode-specific repair model. The exact measured ids win:
+    // Fast -> migan-512, Quality -> lama-512-int8-allowzero0. A fallback is
+    // only a non-fp16 record appropriate for the mode (Quality never accepts
+    // MI-GAN or an fp16/fp32 LaMa variant); otherwise null. Used by the engine
+    // and by the export cache key so both resolve the same record.
+    const AiModelRecord *preferredInpaintModel(RepairMode mode) const;
     QString manifestPath() const { return m_manifestPath; }
     QString rootDir() const { return m_rootDir; }
     const ModelManifest &manifest() const { return m_manifest; }

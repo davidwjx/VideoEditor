@@ -41,6 +41,18 @@ AiModelRecord trackingRecord(const QString &id, bool offlineParts)
     return record;
 }
 
+AiModelRecord inpaintRecord(const QString &id, const QString &version,
+                            const QString &path, bool approved)
+{
+    AiModelRecord record;
+    record.id = id;
+    record.family = QStringLiteral("inpaint");
+    record.version = version;
+    record.commercialApproved = approved;
+    record.files.insert(QStringLiteral("model"), fileRecord(path));
+    return record;
+}
+
 QString sha256(const QByteArray &data)
 {
     return QString::fromLatin1(
@@ -115,6 +127,54 @@ TEST(ModelRegistry, DefaultTrackingModelNeverPicksApprovedFp16)
     ASSERT_NE(fallbackRegistry.defaultTrackingModel(), nullptr);
     EXPECT_EQ(fallbackRegistry.defaultTrackingModel()->id,
               QStringLiteral("sam2.1-hiera-tiny"));
+}
+
+TEST(ModelRegistry, PreferredInpaintModelUsesExactModeIds)
+{
+    ModelManifest manifest;
+    manifest.schemaVersion = 1;
+    // Mirror the real manifest ordering: the fp16-only "lama-512" record comes
+    // before the int8 allowzero graph, and both are approved.
+    manifest.models = {
+        inpaintRecord(QStringLiteral("migan-512"), QStringLiteral("1.0.0"),
+                      QStringLiteral("migan_512/migan_pipeline_v2.onnx"), true),
+        inpaintRecord(QStringLiteral("lama-512"), QStringLiteral("1.0.0"),
+                      QStringLiteral("lama_512/lama_512_fp16.onnx"), true),
+        inpaintRecord(QStringLiteral("lama-512-int8-allowzero0"),
+                      QStringLiteral("1.0.0-int8-allowzero0"),
+                      QStringLiteral("lama_512/lama_512_int8_allowzero0.onnx"),
+                      true),
+    };
+    const ModelRegistry registry =
+        ModelRegistry::forTest(manifest, QStringLiteral("C:/models"));
+
+    const AiModelRecord *fast = registry.preferredInpaintModel(RepairMode::Fast);
+    ASSERT_NE(fast, nullptr);
+    EXPECT_EQ(fast->id, QStringLiteral("migan-512"));
+
+    const AiModelRecord *quality =
+        registry.preferredInpaintModel(RepairMode::Quality);
+    ASSERT_NE(quality, nullptr);
+    // The fp16 lama-512 record must never win by manifest order.
+    EXPECT_EQ(quality->id, QStringLiteral("lama-512-int8-allowzero0"));
+}
+
+TEST(ModelRegistry, PreferredQualityModelRefusesMiganOnlyManifest)
+{
+    ModelManifest manifest;
+    manifest.schemaVersion = 1;
+    manifest.models = {
+        inpaintRecord(QStringLiteral("migan-512"), QStringLiteral("1.0.0"),
+                      QStringLiteral("migan_512/migan_pipeline_v2.onnx"), true),
+        inpaintRecord(QStringLiteral("lama-512"), QStringLiteral("1.0.0"),
+                      QStringLiteral("lama_512/lama_512_fp16.onnx"), true),
+    };
+    const ModelRegistry registry =
+        ModelRegistry::forTest(manifest, QStringLiteral("C:/models"));
+
+    EXPECT_NE(registry.preferredInpaintModel(RepairMode::Fast), nullptr);
+    // No non-fp16 LaMa: Quality must fail instead of silently using MI-GAN.
+    EXPECT_EQ(registry.preferredInpaintModel(RepairMode::Quality), nullptr);
 }
 
 TEST(ModelRegistry, VerifyFilesByIdOnlyHashesRequestedModels)
