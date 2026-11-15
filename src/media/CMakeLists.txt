@@ -70,6 +70,8 @@ add_library(videoeditor_media STATIC
   render/ClipVideoSource.cpp
   render/TimelineRenderWorker.h
   render/TimelineRenderWorker.cpp
+  export/ExportEncoderCatalog.h
+  export/ExportEncoderCatalog.cpp
 )
 # Accept both "probe/MediaProbe.h" and "MediaProbe.h" from consumers, and the
 # same for the decode, proxy/cache, audio and render headers.
@@ -80,7 +82,10 @@ target_include_directories(videoeditor_media PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/proxy
   ${CMAKE_CURRENT_SOURCE_DIR}/cache
   ${CMAKE_CURRENT_SOURCE_DIR}/audio
-  ${CMAKE_CURRENT_SOURCE_DIR}/render)
+  ${CMAKE_CURRENT_SOURCE_DIR}/render
+  ${CMAKE_CURRENT_SOURCE_DIR}/export
+  # ExportEncoderCatalog.h exposes AVPixelFormat/AVCodecContext to consumers.
+  ${FFMPEG_INCLUDE_DIR})
 target_link_libraries(videoeditor_media
   PUBLIC videoeditor_core Qt6::Core Qt6::Gui
   PRIVATE FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale FFmpeg::swresample
