@@ -12,6 +12,8 @@ add_library(videoeditor_core STATIC
   TimelineEvaluator.cpp
   Project.h
   Project.cpp
+  Removal.h
+  Removal.cpp
   ProjectSerializer.h
   ProjectSerializer.cpp
   ProjectStore.h
@@ -28,6 +30,8 @@ add_library(videoeditor_core STATIC
   commands/AddAssetCommand.cpp
   commands/RemoveAssetCommand.h
   commands/RemoveAssetCommand.cpp
+  commands/RemovalLayerCommand.h
+  commands/RemovalLayerCommand.cpp
   commands/TimelineEditCommand.h
   commands/TimelineEditCommand.cpp
   commands/TrackListCommand.h

@@ -68,6 +68,7 @@ struct Clip {
     bool enabled = true;
     Transform transform;
     AudioParams audio;
+    QString removalLayerId;     // empty = no AI removal generation layer
 
     int64_t timelineDurationUs() const;
     int64_t timelineEndUs() const { return timelineStartUs + timelineDurationUs(); }

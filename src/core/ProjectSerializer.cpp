@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 
@@ -160,6 +161,94 @@ AudioParams audioFromJson(const QJsonObject &json)
     return value;
 }
 
+QJsonObject maskKeyframeToJson(const MaskKeyframe &keyframe)
+{
+    return {{QStringLiteral("id"), keyframe.id},
+            {QStringLiteral("sourceTimeUs"), static_cast<double>(keyframe.sourceTimeUs)},
+            {QStringLiteral("maskHash"), keyframe.maskHash},
+            {QStringLiteral("featherPx"), keyframe.featherPx},
+            {QStringLiteral("revision"), keyframe.revision}};
+}
+
+MaskKeyframe maskKeyframeFromJson(const QJsonObject &json)
+{
+    MaskKeyframe keyframe;
+    keyframe.id = json.value(QStringLiteral("id")).toString();
+    keyframe.sourceTimeUs = static_cast<int64_t>(
+        json.value(QStringLiteral("sourceTimeUs")).toDouble(0));
+    keyframe.maskHash = json.value(QStringLiteral("maskHash")).toString();
+    keyframe.featherPx = json.value(QStringLiteral("featherPx")).toInt(4);
+    keyframe.revision = json.value(QStringLiteral("revision")).toInt(1);
+    return keyframe;
+}
+
+QJsonObject removalParametersToJson(const RemovalParameters &parameters)
+{
+    return {{QStringLiteral("mode"), repairModeToString(parameters.mode)},
+            {QStringLiteral("temporalStabilization"), parameters.temporalStabilization},
+            {QStringLiteral("stabilizationStrength"), parameters.stabilizationStrength},
+            {QStringLiteral("processingWidth"), parameters.processingWidth},
+            {QStringLiteral("processingHeight"), parameters.processingHeight}};
+}
+
+RemovalParameters removalParametersFromJson(const QJsonObject &json)
+{
+    RemovalParameters parameters;
+    parameters.mode = repairModeFromString(
+        json.value(QStringLiteral("mode")).toString(QStringLiteral("fast")));
+    parameters.temporalStabilization = json.value(QStringLiteral("temporalStabilization"))
+                                           .toBool(true);
+    parameters.stabilizationStrength = json.value(QStringLiteral("stabilizationStrength"))
+                                           .toInt(50);
+    parameters.processingWidth = json.value(QStringLiteral("processingWidth")).toInt(1920);
+    parameters.processingHeight = json.value(QStringLiteral("processingHeight")).toInt(1080);
+    return parameters;
+}
+
+QJsonObject removalLayerToJson(const RemovalLayer &layer)
+{
+    QJsonArray maskKeyframes;
+    for (const MaskKeyframe &keyframe : layer.maskKeyframes)
+        maskKeyframes.append(maskKeyframeToJson(keyframe));
+    return {{QStringLiteral("id"), layer.id},
+            {QStringLiteral("clipId"), layer.clipId},
+            {QStringLiteral("sourceInUs"), static_cast<double>(layer.sourceInUs)},
+            {QStringLiteral("sourceOutUs"), static_cast<double>(layer.sourceOutUs)},
+            {QStringLiteral("maskKeyframes"), maskKeyframes},
+            {QStringLiteral("trackingState"),
+             removalTrackingStateToString(layer.trackingState)},
+            {QStringLiteral("trackingConfidenceHash"), layer.trackingConfidenceHash},
+            {QStringLiteral("parameters"), removalParametersToJson(layer.parameters)},
+            {QStringLiteral("cacheKey"), layer.cacheKey},
+            {QStringLiteral("cachePath"), layer.cachePath},
+            {QStringLiteral("revision"), layer.revision},
+            {QStringLiteral("enabled"), layer.enabled}};
+}
+
+RemovalLayer removalLayerFromJson(const QJsonObject &json)
+{
+    RemovalLayer layer;
+    layer.id = json.value(QStringLiteral("id")).toString();
+    layer.clipId = json.value(QStringLiteral("clipId")).toString();
+    layer.sourceInUs = static_cast<int64_t>(
+        json.value(QStringLiteral("sourceInUs")).toDouble(0));
+    layer.sourceOutUs = static_cast<int64_t>(
+        json.value(QStringLiteral("sourceOutUs")).toDouble(0));
+    for (const QJsonValue &value : json.value(QStringLiteral("maskKeyframes")).toArray())
+        layer.maskKeyframes.append(maskKeyframeFromJson(value.toObject()));
+    layer.trackingState = removalTrackingStateFromString(
+        json.value(QStringLiteral("trackingState")).toString());
+    layer.trackingConfidenceHash = json.value(QStringLiteral("trackingConfidenceHash"))
+                                       .toString();
+    layer.parameters = removalParametersFromJson(
+        json.value(QStringLiteral("parameters")).toObject());
+    layer.cacheKey = json.value(QStringLiteral("cacheKey")).toString();
+    layer.cachePath = json.value(QStringLiteral("cachePath")).toString();
+    layer.revision = json.value(QStringLiteral("revision")).toInt(1);
+    layer.enabled = json.value(QStringLiteral("enabled")).toBool(true);
+    return layer;
+}
+
 QJsonObject clipToJson(const Clip &clip)
 {
     return {{QStringLiteral("id"), clip.id},
@@ -171,6 +260,7 @@ QJsonObject clipToJson(const Clip &clip)
             {QStringLiteral("speedMilli"), clip.speedMilli},
             {QStringLiteral("preservePitch"), clip.preservePitch},
             {QStringLiteral("enabled"), clip.enabled},
+            {QStringLiteral("removalLayerId"), clip.removalLayerId},
             {QStringLiteral("transform"), transformToJson(clip.transform)},
             {QStringLiteral("audio"), audioToJson(clip.audio)}};
 }
@@ -190,6 +280,7 @@ Clip clipFromJson(const QJsonObject &json)
     clip.speedMilli = json.value(QStringLiteral("speedMilli")).toInt(kDefaultSpeedMilli);
     clip.preservePitch = json.value(QStringLiteral("preservePitch")).toBool(false);
     clip.enabled = json.value(QStringLiteral("enabled")).toBool(true);
+    clip.removalLayerId = json.value(QStringLiteral("removalLayerId")).toString();
     clip.transform = transformFromJson(json.value(QStringLiteral("transform")).toObject());
     clip.audio = audioFromJson(json.value(QStringLiteral("audio")).toObject());
     return clip;
@@ -352,6 +443,74 @@ QString validateProject(const Project &project)
                 return QStringLiteral("字幕“%1”的时间范围无效。").arg(cue.id);
         }
     }
+
+    QSet<QString> layerIds;
+    QSet<QString> attachedClips;
+    for (const RemovalLayer &layer : project.removalLayers) {
+        if (layer.id.isEmpty() || layerIds.contains(layer.id))
+            return QStringLiteral("AI 消除层包含无效或重复的 id。");
+        layerIds.insert(layer.id);
+
+        const Clip *clip = nullptr;
+        for (const Track &track : project.tracks) {
+            if (track.type != TrackType::Video)
+                continue;
+            for (const Clip &candidate : track.clips) {
+                if (candidate.id == layer.clipId) {
+                    clip = &candidate;
+                    break;
+                }
+            }
+        }
+        if (!clip)
+            return QStringLiteral("AI 消除层“%1”引用了不存在的视频片段。").arg(layer.id);
+        if (layer.sourceOutUs <= layer.sourceInUs)
+            return QStringLiteral("AI 消除层“%1”的区间无效。").arg(layer.id);
+        const Asset *asset = project.assetById(clip->assetId);
+        if (asset && asset->info.durationUs > 0
+            && layer.sourceOutUs > asset->info.durationUs)
+            return QStringLiteral("AI 消除层“%1”的区间超出素材时长。").arg(layer.id);
+        if (layer.maskKeyframes.isEmpty())
+            return QStringLiteral("AI 消除层“%1”至少需要一个遮罩关键帧。").arg(layer.id);
+
+        const QRegularExpression hex64(QStringLiteral("^[0-9a-f]{64}$"));
+        int64_t previousUs = -1;
+        for (const MaskKeyframe &keyframe : layer.maskKeyframes) {
+            if (keyframe.id.isEmpty() || keyframe.sourceTimeUs <= previousUs)
+                return QStringLiteral("AI 消除层“%1”的遮罩关键帧必须按时间排序且不重复。")
+                    .arg(layer.id);
+            if (!hex64.match(keyframe.maskHash).hasMatch())
+                return QStringLiteral("AI 消除层“%1”的遮罩引用无效。").arg(layer.id);
+            if (keyframe.featherPx < 0 || keyframe.featherPx > 64)
+                return QStringLiteral("AI 消除层“%1”的羽化超出 0–64 像素。").arg(layer.id);
+            previousUs = keyframe.sourceTimeUs;
+        }
+        if (layer.parameters.processingWidth <= 0
+            || layer.parameters.processingWidth > 8192
+            || layer.parameters.processingHeight <= 0
+            || layer.parameters.processingHeight > 8192)
+            return QStringLiteral("AI 消除层“%1”的处理分辨率无效。").arg(layer.id);
+        if (!layer.cacheKey.isEmpty() && !hex64.match(layer.cacheKey).hasMatch())
+            return QStringLiteral("AI 消除层“%1”的缓存键无效。").arg(layer.id);
+        if (!layer.cachePath.isEmpty()
+            && (!layer.cachePath.startsWith(QStringLiteral("removal/"))
+                || layer.cachePath.contains(QStringLiteral(".."))))
+            return QStringLiteral("AI 消除层“%1”的缓存路径无效。").arg(layer.id);
+        if (!clip->removalLayerId.isEmpty()) {
+            if (attachedClips.contains(clip->id) || clip->removalLayerId != layer.id)
+                return QStringLiteral("片段“%1”关联了多个 AI 消除层。").arg(clip->id);
+            attachedClips.insert(clip->id);
+        }
+    }
+    // Reverse check: a clip may not reference a layer that does not exist
+    // (hand-edited project or a stale reference from an older version).
+    for (const Track &track : project.tracks) {
+        for (const Clip &clip : track.clips) {
+            if (!clip.removalLayerId.isEmpty()
+                && !layerIds.contains(clip.removalLayerId))
+                return QStringLiteral("片段“%1”引用了不存在的 AI 消除层。").arg(clip.id);
+        }
+    }
     return {};
 }
 
@@ -377,6 +536,10 @@ QJsonObject ProjectSerializer::toJson(const Project &project)
     for (const SubtitleStyle &style : project.subtitleStyles)
         subtitleStyles.append(styleToJson(style));
 
+    QJsonArray removalLayers;
+    for (const RemovalLayer &layer : project.removalLayers)
+        removalLayers.append(removalLayerToJson(layer));
+
     return {
         {QStringLiteral("schemaVersion"), Project::kSchemaVersion},
         {QStringLiteral("name"), project.name},
@@ -384,6 +547,7 @@ QJsonObject ProjectSerializer::toJson(const Project &project)
         {QStringLiteral("assets"), assets},
         {QStringLiteral("tracks"), tracks},
         {QStringLiteral("subtitleStyles"), subtitleStyles},
+        {QStringLiteral("removalLayers"), removalLayers},
     };
 }
 
@@ -435,6 +599,12 @@ std::optional<Project> ProjectSerializer::fromJson(const QJsonObject &json,
     }
     for (const QJsonValue &value : json.value(QStringLiteral("subtitleStyles")).toArray())
         project.subtitleStyles.append(styleFromJson(value.toObject()));
+    if (version < 3) {
+        // v1/v2 have no removalLayers; the field stays empty.
+        project.removalLayers.clear();
+    }
+    for (const QJsonValue &value : json.value(QStringLiteral("removalLayers")).toArray())
+        project.removalLayers.append(removalLayerFromJson(value.toObject()));
     // Presets are application data, not user data: merge them on load so a v2
     // project saved before boxed/bold-outline existed can still render them.
     project.ensureSubtitleStyles();

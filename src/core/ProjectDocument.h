@@ -6,6 +6,7 @@
 #include <QUndoStack>
 
 #include "Project.h"
+#include "commands/RemovalLayerCommand.h"
 #include "commands/TimelineEditCommand.h"
 
 namespace VideoEditor {
@@ -36,6 +37,10 @@ public:
     Track *trackById(const QString &id);
     const Track *trackById(const QString &id) const;
 
+    void applyRemovalLayerEdit(const RemovalLayerEdit &edit, const QString &text);
+    const RemovalLayer *removalLayerById(const QString &id) const;
+    RemovalLayer *removalLayerById(const QString &id);
+
     bool save(const QString &path, QString *error = nullptr);
     bool load(const QString &path, QString *error = nullptr);
 
@@ -52,6 +57,7 @@ signals:
     void assetsChanged();
     void timelineChanged();
     void tracksChanged();
+    void removalLayersChanged();
     // Emitted when setProject() replaces the whole document (load, recovery,
     // tests). Consumers holding document-scoped transient state clear it here.
     void projectReplaced();
@@ -61,10 +67,14 @@ signals:
 private:
     friend class AddAssetCommand;
     friend class RemoveAssetCommand;
+    friend class RemovalLayerCommand;
 
     void insertAssetInternal(const Asset &asset);
     void insertAssetInternalAt(int index, const Asset &asset);
     void removeAssetInternal(const QString &assetId);
+    void upsertRemovalLayerInternal(const RemovalLayer &layer);
+    void removeRemovalLayerInternal(const QString &layerId);
+    void setClipRemovalLayerInternal(const QString &clipId, const QString &layerId);
 
     Project m_project;
     QUndoStack m_undoStack;

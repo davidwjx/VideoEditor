@@ -22,7 +22,10 @@ add_executable(core_tests
   core/SrtTest.cpp
   core/SubtitleEditorTest.cpp
   core/ExportSettingsTest.cpp
+  core/RemovalSerializerTest.cpp
+  core/RemovalCommandTest.cpp
 )
+target_include_directories(core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(core_tests PRIVATE videoeditor_core GTest::gtest_main Qt6::Core)
 gtest_discover_tests(core_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
@@ -45,6 +48,7 @@ add_executable(media_tests
   media/ExportDiskSpaceTest.cpp
   media/ExportPipelineTest.cpp
   TestMain.cpp)
+target_include_directories(media_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(media_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui Qt6::Test d3d11 dxgi d3dcompiler)
 target_compile_definitions(media_tests PRIVATE
@@ -59,6 +63,7 @@ add_executable(ui_tests
   ui/WaveformImageProviderTest.cpp
   ui/ExportControllerTest.cpp
   TestGuiMain.cpp)
+target_include_directories(ui_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ui_tests PRIVATE
   videoeditor_ui GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(ui_tests PRIVATE
@@ -78,6 +83,7 @@ add_executable(render_tests
   media/SourceCachePolicyTest.cpp
   media/OfflineRendererTest.cpp
   TestGuiMain.cpp)
+target_include_directories(render_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(render_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)
 target_compile_definitions(render_tests PRIVATE

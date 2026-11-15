@@ -248,9 +248,11 @@ TEST(ProjectSerializer, MigratesVersionOneProject)
     EXPECT_EQ(restored->timeline.fps, (Rational{30, 1}));
     EXPECT_EQ(restored->subtitleStyles.size(), 3);
 
-    // Saving a migrated project writes schemaVersion 2.
+    // Saving a migrated project writes the current schema version (v3 since
+    // AI removal layers were added; v1/v2 files still load).
     const QJsonObject saved = ProjectSerializer::toJson(*restored);
-    EXPECT_EQ(saved.value(QStringLiteral("schemaVersion")).toInt(), 2);
+    EXPECT_EQ(saved.value(QStringLiteral("schemaVersion")).toInt(),
+              Project::kSchemaVersion);
 }
 
 TEST(ProjectSerializer, RejectsInvalidClipRanges)

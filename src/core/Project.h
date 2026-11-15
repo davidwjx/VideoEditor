@@ -5,6 +5,7 @@
 #include <QString>
 
 #include "MediaInfo.h"
+#include "Removal.h"
 #include "Timeline.h"
 
 namespace VideoEditor {
@@ -19,13 +20,14 @@ struct Asset {
 };
 
 struct Project {
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
 
     QString name = QStringLiteral("未命名工程");
     TimelineSettings timeline;
     QList<Asset> assets;
     QList<Track> tracks;
     QList<SubtitleStyle> subtitleStyles;
+    QList<RemovalLayer> removalLayers;
 
     void ensureDefaultTracks();
     // Merges every builtin subtitle style (default, boxed, bold-outline) into
@@ -33,6 +35,8 @@ struct Project {
     // a builtin while still gaining presets added by a newer app version.
     void ensureSubtitleStyles();
     const Asset *assetById(const QString &id) const;
+    const RemovalLayer *removalLayerById(const QString &id) const;
+    RemovalLayer *removalLayerById(const QString &id);
 
     bool operator==(const Project &) const = default;
 };

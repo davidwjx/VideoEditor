@@ -64,4 +64,22 @@ const Asset *Project::assetById(const QString &id) const
     return nullptr;
 }
 
+const RemovalLayer *Project::removalLayerById(const QString &id) const
+{
+    for (const RemovalLayer &layer : removalLayers) {
+        if (layer.id == id)
+            return &layer;
+    }
+    return nullptr;
+}
+
+RemovalLayer *Project::removalLayerById(const QString &id)
+{
+    for (RemovalLayer &layer : removalLayers) {
+        if (layer.id == id)
+            return &layer;
+    }
+    return nullptr;
+}
+
 } // namespace VideoEditor

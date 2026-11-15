@@ -3,6 +3,7 @@
 #include "ProjectSerializer.h"
 #include "commands/AddAssetCommand.h"
 #include "commands/RemoveAssetCommand.h"
+#include "commands/RemovalLayerCommand.h"
 
 namespace VideoEditor {
 
@@ -150,6 +151,62 @@ const Track *ProjectDocument::trackById(const QString &id) const
             return &track;
     }
     return nullptr;
+}
+
+void ProjectDocument::applyRemovalLayerEdit(const RemovalLayerEdit &edit,
+                                            const QString &text)
+{
+    m_undoStack.push(new RemovalLayerCommand(this, text, edit));
+}
+
+const RemovalLayer *ProjectDocument::removalLayerById(const QString &id) const
+{
+    return m_project.removalLayerById(id);
+}
+
+RemovalLayer *ProjectDocument::removalLayerById(const QString &id)
+{
+    return m_project.removalLayerById(id);
+}
+
+void ProjectDocument::upsertRemovalLayerInternal(const RemovalLayer &layer)
+{
+    for (RemovalLayer &existing : m_project.removalLayers) {
+        if (existing.id == layer.id) {
+            existing = layer;
+            return;
+        }
+    }
+    m_project.removalLayers.append(layer);
+}
+
+void ProjectDocument::removeRemovalLayerInternal(const QString &layerId)
+{
+    for (int i = 0; i < m_project.removalLayers.size(); ++i) {
+        if (m_project.removalLayers[i].id == layerId) {
+            m_project.removalLayers.removeAt(i);
+            break;
+        }
+    }
+    for (Track &track : m_project.tracks) {
+        for (Clip &clip : track.clips) {
+            if (clip.removalLayerId == layerId)
+                clip.removalLayerId.clear();
+        }
+    }
+}
+
+void ProjectDocument::setClipRemovalLayerInternal(const QString &clipId,
+                                                  const QString &layerId)
+{
+    for (Track &track : m_project.tracks) {
+        for (Clip &clip : track.clips) {
+            if (clip.id == clipId) {
+                clip.removalLayerId = layerId;
+                return;
+            }
+        }
+    }
 }
 
 void ProjectDocument::insertAssetInternal(const Asset &asset)
