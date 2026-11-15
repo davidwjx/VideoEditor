@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <QDir>
 #include <QFileInfo>
@@ -21,6 +22,15 @@ int64_t roundDiv(int64_t num, int64_t den)
 int evenDimension(int value)
 {
     return std::max(2, (value / 2) * 2);
+}
+
+int clampToInt(int64_t value)
+{
+    if (value < 0)
+        return 0;
+    if (value > int64_t(std::numeric_limits<int>::max()))
+        return std::numeric_limits<int>::max();
+    return int(value);
 }
 
 QString rateControlToString(ExportRateControl rateControl)
@@ -173,7 +183,9 @@ ExportSettings settingsFromPreset(const ExportPreset &preset,
     settings.quality = preset.quality;
     settings.bitrateKbps = preset.bitrateKbps;
     // A preset bitrate is an explicit target; otherwise the quality tier
-    // derives the bitrate from resolution and frame rate.
+    // derives the bitrate from resolution and frame rate. ExportRateControl::
+    // Quality would ignore a non-zero preset bitrate, so presets that carry
+    // one select Bitrate mode. The brief does not pin this field explicitly.
     settings.rateControl = preset.bitrateKbps > 0 ? ExportRateControl::Bitrate
                                                   : ExportRateControl::Quality;
     settings.width = evenDimension(settings.width);
@@ -196,7 +208,8 @@ int effectiveBitrateKbps(const ExportSettings &settings)
     const double fps = settings.fps.isValid() ? settings.fps.toDouble() : 30.0;
     const double kbps = double(settings.width) * settings.height * fps
                         * bitsPerPixel / 1000.0;
-    return std::clamp(int(std::lround(kbps)), 500, 100'000);
+    const int64_t rounded = std::llround(kbps);
+    return clampToInt(std::clamp<int64_t>(rounded, 500, 100'000));
 }
 
 int64_t framePtsUs(int64_t frame, const Rational &fps)
@@ -238,7 +251,7 @@ ExportTiming computeExportTiming(int64_t durationUs, const Rational &fps,
         1024, roundDiv(int64_t(segmentTargetUs) * sampleRate, 1'000'000LL));
     const int64_t aacFrames = std::max<int64_t>(1, (targetSamples + 512) / 1024);
     timing.segmentSamples = aacFrames * 1024;
-    timing.segmentCount = int(
+    timing.segmentCount = clampToInt(
         (timing.totalSamples + timing.segmentSamples - 1) / timing.segmentSamples);
     return timing;
 }
@@ -264,14 +277,16 @@ void videoFrameRangeForSegment(const ExportTiming &timing, const Rational &fps,
                                int segmentIndex, int64_t *frameBegin,
                                int64_t *frameEnd)
 {
-    const int64_t begin =
+    int64_t begin =
         firstVideoFrameAtOrAfter(segmentStartUs(timing, segmentIndex), fps);
+    if (begin > timing.totalFrames)
+        begin = timing.totalFrames;
     int64_t end = timing.totalFrames;
     if (segmentIndex + 1 < timing.segmentCount) {
         end = firstVideoFrameAtOrAfter(segmentStartUs(timing, segmentIndex + 1),
                                        fps);
     }
-    end = std::clamp(end, begin, timing.totalFrames);
+    end = std::max(begin, std::min(end, timing.totalFrames));
     if (frameBegin)
         *frameBegin = begin;
     if (frameEnd)
@@ -290,8 +305,11 @@ QString validateExportSettings(const ExportSettings &settings,
     }
     if (settings.width % 2 != 0 || settings.height % 2 != 0)
         return QStringLiteral("导出宽高必须是偶数。");
-    if (!settings.fps.isValid() || settings.fps.num > 120
-        || settings.fps.toDouble() < 1.0) {
+    // Validate the actual rate, not the raw numerator: NTSC rates such as
+    // 30000/1001 and 24000/1001 have num > 120, and unreduced rationals such
+    // as 240/2 are equivalent to 120 fps.
+    if (!settings.fps.isValid() || settings.fps.toDouble() < 1.0
+        || settings.fps.toDouble() > 120.0) {
         return QStringLiteral("导出帧率必须在 1 到 120 fps 之间。");
     }
     if (settings.rateControl == ExportRateControl::Bitrate
@@ -316,8 +334,11 @@ QString normalizedOutputPath(QString path)
 
 QString defaultSrtPathFor(const QString &outputPath)
 {
-    QFileInfo info(outputPath);
-    return info.dir().filePath(info.completeBaseName() + QStringLiteral(".srt"));
+    const QFileInfo info(outputPath);
+    // cleanPath keeps relative paths relative while removing the "./" that
+    // QFileInfo::dir() yields for a bare file name.
+    return QDir::cleanPath(
+        info.dir().filePath(info.completeBaseName() + QStringLiteral(".srt")));
 }
 
 QJsonObject exportSettingsToJson(const ExportSettings &settings)
@@ -355,7 +376,9 @@ std::optional<ExportSettings> exportSettingsFromJson(const QJsonObject &json,
     };
 
     const QString codecText =
-        json.value(QStringLiteral("codec")).toString();
+        json.value(QStringLiteral("codec")).toString().trimmed();
+    if (codecText.isEmpty())
+        return fail(QStringLiteral("导出设置缺少视频编码字段。"));
     ExportVideoCodec codec = ExportVideoCodec::H264;
     if (!exportCodecFromString(codecText, &codec))
         return fail(QStringLiteral("无法识别的视频编码：%1。").arg(codecText));

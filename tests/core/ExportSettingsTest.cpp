@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <QJsonObject>
+#include <QPair>
 
 #include "ExportSettings.h"
 
@@ -144,6 +147,161 @@ TEST(ExportSettings, ValidationRejectsBadOutputs)
     settings.fps = Rational{30, 1};
     settings.outputPath.clear();
     EXPECT_FALSE(validateExportSettings(settings, timeline).isEmpty());
+}
+
+TEST(ExportSettings, ValidationAcceptsNtscFractionalRates)
+{
+    TimelineSettings timeline;
+    ExportSettings settings;
+    settings.outputPath = QStringLiteral("out.mp4");
+
+    settings.fps = Rational{30000, 1001};
+    EXPECT_TRUE(validateExportSettings(settings, timeline).isEmpty());
+    settings.fps = Rational{24000, 1001};
+    EXPECT_TRUE(validateExportSettings(settings, timeline).isEmpty());
+    settings.fps = Rational{240, 2}; // equivalent to 120 fps
+    EXPECT_TRUE(validateExportSettings(settings, timeline).isEmpty());
+    settings.fps = Rational{121, 1};
+    EXPECT_FALSE(validateExportSettings(settings, timeline).isEmpty());
+}
+
+TEST(ExportSettings, CodecNamesMapAndParse)
+{
+    EXPECT_EQ(exportCodecToString(ExportVideoCodec::Mpeg4Part2),
+              QStringLiteral("mpeg4"));
+    EXPECT_EQ(exportCodecToString(ExportVideoCodec::H264),
+              QStringLiteral("h264"));
+    EXPECT_EQ(exportCodecToString(ExportVideoCodec::H265),
+              QStringLiteral("h265"));
+
+    EXPECT_EQ(exportCodecFfmpegName(ExportVideoCodec::Mpeg4Part2),
+              QStringLiteral("mpeg4"));
+    EXPECT_EQ(exportCodecFfmpegName(ExportVideoCodec::H264),
+              QStringLiteral("h264"));
+    // MediaProbe stores avcodec_get_name() output, which is "hevc".
+    EXPECT_EQ(exportCodecFfmpegName(ExportVideoCodec::H265),
+              QStringLiteral("hevc"));
+
+    EXPECT_EQ(exportCodecDisplayName(ExportVideoCodec::Mpeg4Part2),
+              QStringLiteral("MPEG-4 Part 2"));
+    EXPECT_EQ(exportCodecDisplayName(ExportVideoCodec::H264),
+              QStringLiteral("H.264"));
+    EXPECT_EQ(exportCodecDisplayName(ExportVideoCodec::H265),
+              QStringLiteral("H.265"));
+
+    ExportVideoCodec codec = ExportVideoCodec::H264;
+    EXPECT_TRUE(exportCodecFromString(QStringLiteral("MPEG4"), &codec));
+    EXPECT_EQ(codec, ExportVideoCodec::Mpeg4Part2);
+    EXPECT_TRUE(exportCodecFromString(QStringLiteral(" h264 "), &codec));
+    EXPECT_EQ(codec, ExportVideoCodec::H264);
+    EXPECT_TRUE(exportCodecFromString(QStringLiteral("HEVC"), &codec));
+    EXPECT_EQ(codec, ExportVideoCodec::H265);
+    EXPECT_FALSE(exportCodecFromString(QStringLiteral("vp9"), &codec));
+    EXPECT_EQ(codec, ExportVideoCodec::H265); // unchanged on failure
+    EXPECT_FALSE(exportCodecFromString(QString(), &codec));
+}
+
+TEST(ExportSettings, JsonRejectsMissingCodecAndInvalidFields)
+{
+    QString error;
+    EXPECT_FALSE(exportSettingsFromJson(QJsonObject{}, &error).has_value());
+    EXPECT_NE(error.indexOf(QStringLiteral("缺少")), -1);
+
+    QJsonObject unknownCodec;
+    unknownCodec.insert(QStringLiteral("codec"), QStringLiteral("vp9"));
+    error.clear();
+    EXPECT_FALSE(exportSettingsFromJson(unknownCodec, &error).has_value());
+    EXPECT_NE(error.indexOf(QStringLiteral("vp9")), -1);
+
+    QJsonObject badFps;
+    badFps.insert(QStringLiteral("codec"), QStringLiteral("h264"));
+    badFps.insert(QStringLiteral("fpsNum"), 0);
+    badFps.insert(QStringLiteral("fpsDen"), 1);
+    error.clear();
+    EXPECT_FALSE(exportSettingsFromJson(badFps, &error).has_value());
+    EXPECT_FALSE(error.isEmpty());
+
+    QJsonObject badQuality;
+    badQuality.insert(QStringLiteral("codec"), QStringLiteral("h264"));
+    badQuality.insert(QStringLiteral("quality"), QStringLiteral("ultra"));
+    error.clear();
+    EXPECT_FALSE(exportSettingsFromJson(badQuality, &error).has_value());
+    EXPECT_FALSE(error.isEmpty());
+
+    QJsonObject minimal;
+    minimal.insert(QStringLiteral("codec"), QStringLiteral("h265"));
+    error = QStringLiteral("stale");
+    EXPECT_TRUE(exportSettingsFromJson(minimal, &error).has_value());
+    EXPECT_TRUE(error.isEmpty());
+}
+
+TEST(ExportSettings, BuiltinPresetIdsAndBitratesMatchContract)
+{
+    const QList<ExportPreset> presets = builtinExportPresets();
+    const QList<QPair<QString, int>> expected = {
+        {QStringLiteral("match"), 0},
+        {QStringLiteral("h264-1080p30"), 12'000},
+        {QStringLiteral("h264-720p30"), 6'000},
+        {QStringLiteral("h265-1080p30"), 8'000},
+        {QStringLiteral("mpeg4-1080p30"), 10'000},
+    };
+    ASSERT_EQ(presets.size(), expected.size());
+    for (const auto &pair : expected) {
+        const auto it = std::find_if(presets.cbegin(), presets.cend(),
+                                     [&pair](const ExportPreset &preset) {
+                                         return preset.id == pair.first;
+                                     });
+        ASSERT_NE(it, presets.cend()) << pair.first.toStdString();
+        EXPECT_EQ(it->bitrateKbps, pair.second);
+    }
+
+    TimelineSettings timeline;
+    const auto it = std::find_if(presets.cbegin(), presets.cend(),
+                                 [](const ExportPreset &preset) {
+                                     return preset.id
+                                            == QStringLiteral("h264-720p30");
+                                 });
+    ASSERT_NE(it, presets.cend());
+    const ExportSettings settings = settingsFromPreset(*it, timeline);
+    EXPECT_EQ(settings.codec, ExportVideoCodec::H264);
+    EXPECT_EQ(settings.width, 1280);
+    EXPECT_EQ(settings.height, 720);
+    EXPECT_EQ(settings.fps, (Rational{30, 1}));
+    EXPECT_EQ(settings.bitrateKbps, 6'000);
+    EXPECT_EQ(settings.rateControl, ExportRateControl::Bitrate);
+    EXPECT_EQ(settings.quality, ExportQuality::Medium);
+    EXPECT_TRUE(settings.outputPath.isEmpty());
+}
+
+TEST(ExportSettings, EffectiveBitrateClampsBothRateControlModes)
+{
+    ExportSettings settings;
+    settings.rateControl = ExportRateControl::Bitrate;
+    settings.bitrateKbps = 1;
+    EXPECT_EQ(effectiveBitrateKbps(settings), 100);
+    settings.bitrateKbps = 10'000'000;
+    EXPECT_EQ(effectiveBitrateKbps(settings), 200'000);
+
+    settings.rateControl = ExportRateControl::Quality;
+    settings.quality = ExportQuality::Low;
+    settings.width = 16;
+    settings.height = 16;
+    settings.fps = Rational{1, 1};
+    EXPECT_EQ(effectiveBitrateKbps(settings), 500);
+
+    settings.quality = ExportQuality::High;
+    settings.width = 7680;
+    settings.height = 4320;
+    settings.fps = Rational{120, 1};
+    EXPECT_EQ(effectiveBitrateKbps(settings), 100'000);
+}
+
+TEST(ExportSettings, DefaultSrtPathIsNormalized)
+{
+    EXPECT_EQ(defaultSrtPathFor(QStringLiteral("D:/视频/成片.MP4")),
+              QStringLiteral("D:/视频/成片.srt"));
+    EXPECT_EQ(defaultSrtPathFor(QStringLiteral("out.mp4")),
+              QStringLiteral("out.srt"));
 }
 
 TEST(ExportSettings, JsonRoundTripsEveryField)
