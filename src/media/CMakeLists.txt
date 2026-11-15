@@ -76,6 +76,9 @@ add_library(videoeditor_media STATIC
   render/OfflineFrameRenderer.cpp
   export/ExportEncoderCatalog.h
   export/ExportEncoderCatalog.cpp
+  export/ExportPackets.h
+  export/VideoEncoder.h
+  export/VideoEncoder.cpp
 )
 # Accept both "probe/MediaProbe.h" and "MediaProbe.h" from consumers, and the
 # same for the decode, proxy/cache, audio and render headers.
