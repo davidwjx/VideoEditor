@@ -25,7 +25,7 @@ public:
 
     bool isReady() const override;
     QString lastError() const override;
-    QString provider() const;
+    QString provider() const override;
     bool usingCpuFallback() const;
     QString cpuFallbackReason() const;
 

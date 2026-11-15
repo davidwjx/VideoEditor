@@ -46,6 +46,8 @@ public:
                                               QString *error) = 0;
     virtual bool isReady() const { return true; }
     virtual QString lastError() const { return QString(); }
+    // "dml", "cpu" or empty when the backend does not report it.
+    virtual QString provider() const { return QString(); }
 };
 
 // Turns per-frame masks into feathered, colour-matched repair patches. The

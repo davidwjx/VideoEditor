@@ -1,6 +1,7 @@
 #include "AppController.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <thread>
 #include <utility>
@@ -9,10 +10,12 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QUuid>
 #include <QVariantList>
 #include <QVariantMap>
@@ -24,14 +27,19 @@
 #include "ExportController.h"
 #include "ExportEncoderCatalog.h"
 #include "ExportPipeline.h"
+#include "FrameReader.h"
+#include "MaskCodec.h"
 #include "MaskSidecarStore.h"
 #include "MediaListModel.h"
 #include "MediaProbe.h"
+#include "ModelRegistry.h"
 #include "PreviewController.h"
 #include "ProxyPlanner.h"
 #include "ProxyService.h"
 #include "RemovalCache.h"
+#include "RemovalCacheKey.h"
 #include "RemovalPreflight.h"
+#include "RepairFrameSource.h"
 #include "TimelineController.h"
 #include "TimelineEvaluator.h"
 #include "WaveformService.h"
@@ -1032,6 +1040,339 @@ void AppController::selftestExport()
     });
     worker.join();
     QCoreApplication::exit(ok ? 0 : 5);
+}
+
+void AppController::selftestRemoval()
+{
+    const auto fail = [](const QString &reason) {
+        qCritical("REMOVAL_SELFTEST_FAIL %s", qPrintable(reason));
+        QCoreApplication::exit(4);
+    };
+
+    // Fail closed: never fabricate a pass without a verified model bundle. The
+    // internal technical preview only exists when VIDEOEDITOR_M4_TECHNICAL=1.
+    if (!m_aiGate || !m_aiGate->enabled() || !m_aiGate->registry()) {
+        const QString reason =
+            m_aiGate ? m_aiGate->disabledReason()
+                     : QStringLiteral("AI 消除功能未启用：未加载模型清单。");
+        qInfo("REMOVAL_SELFTEST_SKIP %s", qPrintable(reason));
+        QCoreApplication::exit(4);
+        return;
+    }
+    const ModelRegistry *registry = m_aiGate->registry();
+
+    // Prefer the full-size acceptance assets when they are installed; the
+    // repository only carries the 640x360 corpus.
+    const QString acceptance = QStringLiteral("C:/m4-spike/acceptance");
+    QString videoPath =
+        QDir(acceptance).filePath(QStringLiteral("static_logo_1080p_10s.mp4"));
+    QString maskPath = QDir(acceptance).filePath(
+        QStringLiteral("static_logo_mask_1080p_10s.mp4"));
+    QString cleanPath = QDir(acceptance).filePath(
+        QStringLiteral("clean_background_1080p_10s.mp4"));
+    bool is1080p = QFileInfo::exists(videoPath) && QFileInfo::exists(maskPath)
+                   && QFileInfo::exists(cleanPath);
+    if (!is1080p) {
+        const QString dir = QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR))
+                                .filePath(QStringLiteral("removal"));
+        videoPath = QDir(dir).filePath(QStringLiteral("static_logo.mp4"));
+        maskPath = QDir(dir).filePath(QStringLiteral("static_logo_mask.mp4"));
+        cleanPath = QDir(dir).filePath(QStringLiteral("clean_background.mp4"));
+    }
+    if (!QFileInfo::exists(videoPath) || !QFileInfo::exists(maskPath)
+        || !QFileInfo::exists(cleanPath)) {
+        fail(QStringLiteral("fixtures_missing video=%1 mask=%2 clean=%3")
+                 .arg(videoPath, maskPath, cleanPath));
+        return;
+    }
+
+    QString error;
+    const auto info = MediaProbe::probe(videoPath, &error);
+    if (!info || !info->hasVideo || info->durationUs <= 0) {
+        fail(QStringLiteral("probe_failed %1").arg(error));
+        return;
+    }
+    const Rational fps =
+        info->frameRate.isValid() ? info->frameRate : Rational{30, 1};
+    const int64_t durationUs = info->durationUs;
+    Asset asset;
+    asset.id = QStringLiteral("selftest-asset");
+    asset.path = videoPath;
+    asset.info = *info;
+    const QSize display = displaySizeForAsset(asset);
+
+    // Mask keyframe 0 from the ground-truth mask video (luma > 127).
+    FrameReader maskReader;
+    if (!maskReader.open(maskPath, fps, 0, durationUs, display, &error)) {
+        fail(QStringLiteral("mask_open_failed %1").arg(error));
+        return;
+    }
+    const QImage maskFrame = maskReader.readFrame(0, &error);
+    if (maskFrame.isNull() || maskFrame.size() != display) {
+        fail(QStringLiteral("mask_decode_failed size=%1x%2 expected=%3x%4 %5")
+                 .arg(maskFrame.width())
+                 .arg(maskFrame.height())
+                 .arg(display.width())
+                 .arg(display.height())
+                 .arg(error));
+        return;
+    }
+    BinaryMask mask;
+    mask.width = display.width();
+    mask.height = display.height();
+    mask.bits.assign(size_t(mask.width) * size_t(mask.height), 0);
+    int maskPixels = 0;
+    for (int y = 0; y < mask.height; ++y) {
+        for (int x = 0; x < mask.width; ++x) {
+            if (qGray(maskFrame.pixel(x, y)) > 127) {
+                mask.set(x, y, true);
+                ++maskPixels;
+            }
+        }
+    }
+    if (maskPixels == 0) {
+        fail(QStringLiteral("mask_empty"));
+        return;
+    }
+
+    QTemporaryDir workDir(QDir(QDir::tempPath())
+                              .filePath(QStringLiteral(
+                                  "videoeditor-removal-selftest-XXXXXX")));
+    if (!workDir.isValid()) {
+        fail(QStringLiteral("temp_dir_failed"));
+        return;
+    }
+    MaskSidecarStore sidecars(workDir.filePath(QStringLiteral("selftest.veproj")));
+    if (!sidecars.ensureLayout(&error)) {
+        fail(QStringLiteral("sidecar_layout_failed %1").arg(error));
+        return;
+    }
+    QString maskHash;
+    if (!sidecars.writeMask(mask, &maskHash, &error)) {
+        fail(QStringLiteral("sidecar_write_failed %1").arg(error));
+        return;
+    }
+
+    Project project;
+    project.timeline.width = display.width();
+    project.timeline.height = display.height();
+    project.timeline.fps = fps;
+    project.assets.append(asset);
+
+    Track track;
+    track.id = QStringLiteral("selftest-track");
+    track.type = TrackType::Video;
+    Clip clip;
+    clip.id = QStringLiteral("selftest-clip");
+    clip.assetId = asset.id;
+    clip.sourceInUs = 0;
+    clip.sourceOutUs = durationUs;
+    clip.timelineStartUs = 0;
+    clip.removalLayerId = QStringLiteral("selftest-layer");
+    track.clips.append(clip);
+    project.tracks.append(track);
+
+    RemovalLayer layer;
+    layer.id = QStringLiteral("selftest-layer");
+    layer.clipId = clip.id;
+    layer.sourceInUs = 0;
+    layer.sourceOutUs = durationUs;
+    layer.parameters.mode = RepairMode::Fast;
+    layer.maskKeyframes.append(MaskKeyframe{
+        QStringLiteral("selftest-mask-0"), 0, maskHash, 4, 1});
+    project.removalLayers.append(layer);
+
+    // The cache key must be exactly the one export preflight will later check.
+    const RemovalKeyInput keyInput = RemovalPreflight::keyInputFor(
+        project, project.tracks.first().clips.first(),
+        project.removalLayers.first(), *registry);
+    const QString key = computeRemovalCacheKey(keyInput);
+    if (key.isEmpty()) {
+        fail(QStringLiteral("cache_key_failed"));
+        return;
+    }
+
+    const AiModelRecord *tracking = registry->defaultTrackingModel();
+    const AiModelRecord *inpaint =
+        registry->preferredInpaintModel(layer.parameters.mode);
+    if (!tracking || !inpaint) {
+        fail(QStringLiteral("model_missing"));
+        return;
+    }
+
+    QTemporaryDir cacheDir(QDir(QDir::tempPath())
+                               .filePath(QStringLiteral(
+                                   "videoeditor-removal-cache-XXXXXX")));
+    if (!cacheDir.isValid()) {
+        fail(QStringLiteral("cache_dir_failed"));
+        return;
+    }
+    RemovalCache cache(cacheDir.path());
+
+    AiJobSpec spec;
+    spec.jobId = QStringLiteral("selftest-removal");
+    spec.clipId = clip.id;
+    spec.assetPath = videoPath;
+    spec.sidecarRoot = sidecars.sidecarRoot();
+    spec.cacheDir = cache.cacheDir(key);
+    spec.cacheKey = key;
+    spec.modelsManifestPath = registry->manifestPath();
+    spec.trackingModelId = tracking->id;
+    spec.inpaintModelId = inpaint->id;
+    spec.sourceInUs = 0;
+    spec.sourceOutUs = durationUs;
+    spec.width = display.width();
+    spec.height = display.height();
+    spec.fps = fps;
+    spec.maskKeyframes = layer.maskKeyframes;
+    spec.parameters = layer.parameters;
+
+    QElapsedTimer clock;
+    clock.start();
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    timeout.setInterval(600'000); // ten minutes
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    AiJobResult result;
+    bool finished = false;
+    const QMetaObject::Connection finishedConnection = QObject::connect(
+        m_aiJobs.get(), &AiJobManager::jobFinished, &loop,
+        [&loop, &result, &finished](const AiJobResult &jobResult) {
+            result = jobResult;
+            finished = true;
+            loop.quit();
+        });
+    QString startError;
+    if (!m_aiJobs->start(spec, &startError)) {
+        QObject::disconnect(finishedConnection);
+        fail(QStringLiteral("job_start_failed %1").arg(startError));
+        return;
+    }
+    timeout.start();
+    loop.exec();
+    QObject::disconnect(finishedConnection);
+    const double seconds = double(clock.elapsed()) / 1000.0;
+    if (!finished) {
+        m_aiJobs->cancel();
+        fail(QStringLiteral("timeout seconds=%1")
+                 .arg(seconds, 0, 'f', 1));
+        return;
+    }
+    if (!result.ok) {
+        fail(QStringLiteral("job_failed code=%1 message=%2")
+                 .arg(result.errorCode, result.errorMessage));
+        return;
+    }
+
+    QString stateReason;
+    if (cache.state(key, &stateReason) != RemovalCacheState::Complete) {
+        fail(QStringLiteral("cache_not_complete %1").arg(stateReason));
+        return;
+    }
+    QString verifyError;
+    if (!cache.verify(key, &verifyError)) {
+        fail(QStringLiteral("cache_verify_failed %1").arg(verifyError));
+        return;
+    }
+    error.clear();
+    const auto source = RepairFrameSource::open(cache, key, &error);
+    if (!source) {
+        fail(QStringLiteral("repair_source_open_failed %1").arg(error));
+        return;
+    }
+
+    FrameReader cleanReader;
+    if (!cleanReader.open(cleanPath, fps, 0, durationUs, display, &error)) {
+        fail(QStringLiteral("clean_open_failed %1").arg(error));
+        return;
+    }
+
+    // Overall hole PSNR: accumulate squared error over every patch pixel with
+    // alpha > 0 (the feathered repair mask) and compare to the clean GT.
+    const double frameUs =
+        1'000'000.0 * double(fps.den) / double(fps.num);
+    double mseSum = 0.0;
+    qint64 sampleCount = 0;
+    int framesWithPatch = 0;
+    const int totalFrames = source->frameCount();
+    for (int i = 0; i < totalFrames; ++i) {
+        // The half-frame offset makes floor() resolve to exactly frame i.
+        const int64_t sourceUs =
+            int64_t(std::llround((double(i) + 0.5) * frameUs));
+        const RepairFrameSource::Frame *frame =
+            source->frameAt(sourceUs, &error);
+        if (!error.isEmpty()) {
+            fail(QStringLiteral("patch_read_failed %1").arg(error));
+            return;
+        }
+        if (!frame || frame->patch.isNull())
+            continue;
+        const QImage clean = cleanReader.readFrame(i, &error);
+        if (clean.isNull()) {
+            fail(QStringLiteral("clean_decode_failed frame=%1 %2")
+                     .arg(i)
+                     .arg(error));
+            return;
+        }
+        if (frame->patch.size() != frame->crop.size()) {
+            fail(QStringLiteral("patch_crop_mismatch frame=%1").arg(i));
+            return;
+        }
+        ++framesWithPatch;
+        const QRect crop = frame->crop;
+        for (int y = 0; y < crop.height(); ++y) {
+            for (int x = 0; x < crop.width(); ++x) {
+                const QRgb patchPixel = frame->patch.pixel(x, y);
+                if (qAlpha(patchPixel) == 0)
+                    continue;
+                const QRgb cleanPixel =
+                    clean.pixel(crop.x() + x, crop.y() + y);
+                const double dr = double(qRed(patchPixel)) - qRed(cleanPixel);
+                const double dg = double(qGreen(patchPixel)) - qGreen(cleanPixel);
+                const double db = double(qBlue(patchPixel)) - qBlue(cleanPixel);
+                mseSum += dr * dr + dg * dg + db * db;
+                sampleCount += 3;
+            }
+        }
+    }
+    if (sampleCount == 0) {
+        fail(QStringLiteral("no_repair_pixels frames=%1").arg(totalFrames));
+        return;
+    }
+    const double mse = mseSum / double(sampleCount);
+    const double psnr = mse <= 1e-9 ? 100.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
+
+    QString sizeError;
+    const qint64 cacheBytes = cache.sizeOnDisk(&sizeError);
+    const qint64 sourceBytes = QFileInfo(videoPath).size();
+    const qint64 budget = removalCacheBudgetBytes(sourceBytes);
+    const bool psnrOk = psnr >= 28.0;
+    const bool cacheOk = cacheBytes <= budget;
+    // The ten-minute budget only applies to the full 1080p10s acceptance clip;
+    // the 5 s 640x360 fixture is recorded but not gated on time.
+    const bool timingOk = !is1080p || seconds <= 300.0;
+
+    if (!psnrOk || !cacheOk || !timingOk) {
+        const QString reason = QString::asprintf(
+            "threshold file=%s psnr=%.2f psnrThreshold=28.00 seconds=%.1f "
+            "timingThreshold=%s cacheBytes=%lld cacheBudget=%lld "
+            "sourceBytes=%lld frames=%d provider=%s",
+            qPrintable(videoPath), psnr, seconds,
+            is1080p ? "300" : "-", static_cast<long long>(cacheBytes),
+            static_cast<long long>(budget),
+            static_cast<long long>(sourceBytes), framesWithPatch,
+            qPrintable(result.provider));
+        fail(reason);
+        return;
+    }
+
+    qInfo("REMOVAL_SELFTEST_OK file=%s frames=%d psnr=%.2f seconds=%.1f "
+          "cacheBytes=%lld sourceBytes=%lld provider=%s",
+          qPrintable(videoPath), framesWithPatch, psnr, seconds,
+          static_cast<long long>(cacheBytes),
+          static_cast<long long>(sourceBytes), qPrintable(result.provider));
+    QCoreApplication::exit(0);
 }
 
 void AppController::setLastError(const QString &message)

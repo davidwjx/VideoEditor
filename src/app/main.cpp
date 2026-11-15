@@ -42,6 +42,10 @@ int main(int argc, char *argv[])
     parser.addOption({QStringLiteral("selftest-export"),
                       QStringLiteral("Export the multi-track fixture project "
                                      "with every available codec and exit")});
+    parser.addOption(
+        {QStringLiteral("selftest-removal"),
+         QStringLiteral("Run one real Fast/MI-GAN removal job on the removal "
+                        "acceptance fixture, verify the cache and exit")});
     parser.process(app);
 
     VideoEditor::AppController controller;
@@ -57,6 +61,15 @@ int main(int argc, char *argv[])
     if (parser.isSet(QStringLiteral("selftest-export"))) {
         QTimer::singleShot(0, &controller, [&controller] {
             controller.selftestExport();
+        });
+        return app.exec();
+    }
+
+    // The removal self-test decodes with FFmpeg and runs the engine as a child
+    // process; it needs no QML scene graph or window.
+    if (parser.isSet(QStringLiteral("selftest-removal"))) {
+        QTimer::singleShot(0, &controller, [&controller] {
+            controller.selftestRemoval();
         });
         return app.exec();
     }

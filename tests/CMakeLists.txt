@@ -166,6 +166,8 @@ add_executable(ai_tests
   ai/InpaintModelContractTest.cpp
   ai/TemporalStabilizerTest.cpp
   ai/RemovalPreflightTest.cpp
+  ai/RemovalEvalTest.cpp
+  ai/RemovalRobustnessTest.cpp
   TestGuiMain.cpp)
 target_include_directories(ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ai_tests PRIVATE

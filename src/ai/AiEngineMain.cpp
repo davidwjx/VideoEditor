@@ -374,6 +374,10 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
     // A redo job reuses masks written by an earlier tracking run. Tracking-only
     // jobs always track, even when a redo range is present.
     const bool redo = !spec.trackingOnly && spec.redoFirstFrame >= 0;
+    // Execution-provider evidence for the selftest/acceptance report. Redo jobs
+    // skip tracking, so only the repair provider is reported there.
+    QString trackerProvider;
+    QString inpaintProvider;
     TrackingRunResult trackingResult;
     if (!redo) {
         TrackingConfig config;
@@ -404,6 +408,7 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
             return modelUnavailable(
                 QStringLiteral("无法加载跟踪模型：%1").arg(error));
         }
+        trackerProvider = tracker.provider();
 
         TrackingPipeline trackingPipeline;
         trackingPipeline.setTracker(&tracker);
@@ -449,7 +454,11 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
             {QStringLiteral("trackingState"),
              removalTrackingStateToString(trackingResult.state)},
             {QStringLiteral("completedFrames"),
-             trackingResult.completedFrames}});
+             trackingResult.completedFrames},
+            {QStringLiteral("provider"),
+             trackerProvider.isEmpty()
+                 ? QString()
+                 : QStringLiteral("tracker=") + trackerProvider}});
         return 0;
     }
 
@@ -501,6 +510,7 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
         return modelUnavailable(
             QStringLiteral("无法加载修复模型：%1").arg(inpainter->lastError()));
     }
+    inpaintProvider = inpainter->provider();
 
     InpaintPipeline pipeline;
     pipeline.setInpainter(std::move(inpainter));
@@ -730,13 +740,22 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
         return 0;
     }
 
+    QString providerEvidence;
+    if (!trackerProvider.isEmpty())
+        providerEvidence = QStringLiteral("tracker=") + trackerProvider;
+    if (!inpaintProvider.isEmpty()) {
+        if (!providerEvidence.isEmpty())
+            providerEvidence += QLatin1Char(';');
+        providerEvidence += QStringLiteral("inpaint=") + inpaintProvider;
+    }
     send(QJsonObject{
         {QStringLiteral("event"), QStringLiteral("done")},
         {QStringLiteral("cacheKey"), spec.cacheKey},
         {QStringLiteral("confidenceHash"), trackingResult.confidenceHash},
         {QStringLiteral("trackingState"),
          removalTrackingStateToString(state)},
-        {QStringLiteral("completedFrames"), totalFrames}});
+        {QStringLiteral("completedFrames"), totalFrames},
+        {QStringLiteral("provider"), providerEvidence}});
     return 0;
 }
 

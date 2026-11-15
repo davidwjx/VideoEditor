@@ -58,6 +58,9 @@ struct AiJobResult {
     int completedFrames = 0;
     QString confidenceHash;
     RemovalTrackingState trackingState = RemovalTrackingState::NotTracked;
+    // Engine execution provider evidence (for example "tracker=cpu;inpaint=dml").
+    // Empty when the engine does not report it.
+    QString provider;
 };
 
 // Newline-delimited JSON framing shared by both sides of the local socket.

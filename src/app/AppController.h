@@ -111,6 +111,10 @@ public:
     // --selftest-export: exports the same multi-track fixture project with
     // every codec the machine actually has and exits 0 (5 on failure).
     void selftestExport();
+    // --selftest-removal: runs one real Fast/MI-GAN removal job on the 1080p
+    // acceptance clip (or the committed 640x360 fixture), verifies the repair
+    // cache and prints one metric line. Exits 0 on success, 4 otherwise.
+    void selftestRemoval();
 
     // Called on clean shutdown: removes a stale autosave only when the open
     // document is clean and no startup recovery prompt is still pending.

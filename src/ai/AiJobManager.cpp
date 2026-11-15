@@ -211,6 +211,8 @@ void AiJobManager::handleMessage(const QJsonObject &message)
         result.errorCode = message.value(QStringLiteral("code")).toString();
         result.errorMessage =
             message.value(QStringLiteral("message")).toString();
+        result.provider =
+            message.value(QStringLiteral("provider")).toString();
         finish(result);
     } else if (event == QLatin1String("done")) {
         const QJsonValue cacheValue =
@@ -244,6 +246,8 @@ void AiJobManager::handleMessage(const QJsonObject &message)
             if (!ok)
                 result.trackingState = RemovalTrackingState::Failed;
         }
+        result.provider =
+            message.value(QStringLiteral("provider")).toString();
         // A done that arrives after the user cancelled must never be reported
         // as success: the engine may have finished the last chunk between the
         // cancel request and its own cancel handling. Preserve the completion
