@@ -14,13 +14,6 @@ namespace VideoEditor {
 
 namespace {
 
-bool isHex64(const QString &text)
-{
-    static const QRegularExpression pattern(
-        QStringLiteral("^[0-9a-fA-F]{64}$"));
-    return pattern.match(text).hasMatch();
-}
-
 bool isLowerHex64(const QString &text)
 {
     static const QRegularExpression pattern(QStringLiteral("^[0-9a-f]{64}$"));
@@ -386,14 +379,32 @@ bool AiProtocol::validateJobSpec(const AiJobSpec &spec, QString *error)
         return fail(QStringLiteral("trackingModelId 为空。"));
     if (spec.inpaintModelId.isEmpty())
         return fail(QStringLiteral("inpaintModelId 为空。"));
+    // Beyond 2^53 a JSON double can no longer round-trip an int64 exactly;
+    // reject here so the manager reports a parameter error instead of the
+    // engine silently reading a different timestamp.
+    constexpr int64_t kMaxExactUs = 9007199254740992LL; // 2^53
     if (spec.sourceInUs < 0)
         return fail(QStringLiteral("sourceInUs 为负数。"));
+    if (spec.sourceInUs > kMaxExactUs || spec.sourceOutUs > kMaxExactUs)
+        return fail(QStringLiteral("时间戳超出 2^53 微秒范围。"));
     if (spec.sourceOutUs <= spec.sourceInUs)
         return fail(QStringLiteral("sourceOutUs 必须大于 sourceInUs。"));
     if (spec.width < 1 || spec.width > 8192)
         return fail(QStringLiteral("width 超出 1..8192。"));
     if (spec.height < 1 || spec.height > 8192)
         return fail(QStringLiteral("height 超出 1..8192。"));
+    if (spec.parameters.processingWidth < 1
+        || spec.parameters.processingWidth > 8192) {
+        return fail(QStringLiteral("processingWidth 超出 1..8192。"));
+    }
+    if (spec.parameters.processingHeight < 1
+        || spec.parameters.processingHeight > 8192) {
+        return fail(QStringLiteral("processingHeight 超出 1..8192。"));
+    }
+    if (spec.parameters.stabilizationStrength < 0
+        || spec.parameters.stabilizationStrength > 100) {
+        return fail(QStringLiteral("stabilizationStrength 超出 0..100。"));
+    }
     if (spec.fps.num <= 0 || spec.fps.den <= 0)
         return fail(QStringLiteral("fps 无效。"));
 
@@ -411,8 +422,15 @@ bool AiProtocol::validateJobSpec(const AiJobSpec &spec, QString *error)
         if (i > 0 && keyframe.sourceTimeUs <= previousTime)
             return fail(QStringLiteral("遮罩关键帧时间必须严格递增。"));
         previousTime = keyframe.sourceTimeUs;
-        if (!isHex64(keyframe.maskHash))
-            return fail(QStringLiteral("遮罩关键帧 maskHash 不是 64 位十六进制。"));
+        if (keyframe.sourceTimeUs > kMaxExactUs
+            || keyframe.sourceTimeUs < -kMaxExactUs) {
+            return fail(QStringLiteral("遮罩关键帧时间戳超出 2^53 微秒范围。"));
+        }
+        // Sidecar filenames use lowercase hashes; an uppercase hash would
+        // never resolve to an existing mask.
+        if (!isLowerHex64(keyframe.maskHash))
+            return fail(QStringLiteral(
+                "遮罩关键帧 maskHash 不是 64 位小写十六进制。"));
         if (keyframe.featherPx < 0 || keyframe.featherPx > 64)
             return fail(QStringLiteral("遮罩关键帧 featherPx 超出 0..64。"));
     }
@@ -430,8 +448,13 @@ bool AiProtocol::validateJobSpec(const AiJobSpec &spec, QString *error)
             microsToFrames(spec.sourceOutUs - spec.sourceInUs, spec.fps);
         if (totalFrames <= 0)
             return fail(QStringLiteral("重做范围超出片段帧数。"));
-        if (spec.redoLastFrame >= totalFrames)
+        // Task 8's redoRange() is chunk-aligned (30 frames) and inclusive:
+        // the last chunk of a 40-frame segment legitimately ends at frame 59.
+        const int64_t paddedFrames = ((totalFrames + 29) / 30) * 30;
+        if (spec.redoFirstFrame >= paddedFrames
+            || spec.redoLastFrame >= paddedFrames) {
             return fail(QStringLiteral("重做范围超出片段帧数。"));
+        }
     }
 
     if (error)

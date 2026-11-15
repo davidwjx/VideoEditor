@@ -293,6 +293,14 @@ INSTANTIATE_TEST_SUITE_P(
                         [](AiJobSpec &s) { s.inpaintModelId.clear(); }},
         InvalidSpecCase{"negativeSourceIn",
                         [](AiJobSpec &s) { s.sourceInUs = -1; }},
+        InvalidSpecCase{"sourceInTooLarge",
+                        [](AiJobSpec &s) {
+                            s.sourceInUs = 9007199254740994LL;
+                        }},
+        InvalidSpecCase{"sourceOutTooLarge",
+                        [](AiJobSpec &s) {
+                            s.sourceOutUs = 9007199254740994LL;
+                        }},
         InvalidSpecCase{"emptySourceRange",
                         [](AiJobSpec &s) { s.sourceOutUs = s.sourceInUs; }},
         InvalidSpecCase{"widthZero", [](AiJobSpec &s) { s.width = 0; }},
@@ -300,6 +308,30 @@ INSTANTIATE_TEST_SUITE_P(
         InvalidSpecCase{"heightZero", [](AiJobSpec &s) { s.height = 0; }},
         InvalidSpecCase{"heightTooLarge",
                         [](AiJobSpec &s) { s.height = 8193; }},
+        InvalidSpecCase{"processingWidthZero",
+                        [](AiJobSpec &s) {
+                            s.parameters.processingWidth = 0;
+                        }},
+        InvalidSpecCase{"processingWidthTooLarge",
+                        [](AiJobSpec &s) {
+                            s.parameters.processingWidth = 8193;
+                        }},
+        InvalidSpecCase{"processingHeightZero",
+                        [](AiJobSpec &s) {
+                            s.parameters.processingHeight = 0;
+                        }},
+        InvalidSpecCase{"processingHeightTooLarge",
+                        [](AiJobSpec &s) {
+                            s.parameters.processingHeight = 8193;
+                        }},
+        InvalidSpecCase{"stabilizationTooHigh",
+                        [](AiJobSpec &s) {
+                            s.parameters.stabilizationStrength = 101;
+                        }},
+        InvalidSpecCase{"stabilizationNegative",
+                        [](AiJobSpec &s) {
+                            s.parameters.stabilizationStrength = -1;
+                        }},
         InvalidSpecCase{"zeroFpsNum", [](AiJobSpec &s) { s.fps.num = 0; }},
         InvalidSpecCase{"zeroFpsDen", [](AiJobSpec &s) { s.fps.den = 0; }},
         InvalidSpecCase{"noMaskKeyframes",
@@ -323,6 +355,16 @@ INSTANTIATE_TEST_SUITE_P(
                         [](AiJobSpec &s) {
                             s.maskKeyframes[0].maskHash =
                                 QStringLiteral("not-a-hash");
+                        }},
+        InvalidSpecCase{"uppercaseMaskHash",
+                        [](AiJobSpec &s) {
+                            s.maskKeyframes[0].maskHash =
+                                QString(64, QLatin1Char('B'));
+                        }},
+        InvalidSpecCase{"keyframeTimeTooLarge",
+                        [](AiJobSpec &s) {
+                            s.maskKeyframes[0].sourceTimeUs =
+                                9007199254740994LL;
                         }},
         InvalidSpecCase{"featherNegative",
                         [](AiJobSpec &s) {
@@ -365,6 +407,44 @@ TEST(AiProtocol, AcceptsValidFullJobSpec)
     EXPECT_TRUE(AiProtocol::validateJobSpec(spec, &error))
         << error.toStdString();
     EXPECT_TRUE(error.isEmpty());
+}
+
+TEST(AiProtocol, AcceptsChunkAlignedRedoAtSegmentEnd)
+{
+    AiJobSpec spec = makeSpec();
+    spec.sourceInUs = 0;
+    spec.sourceOutUs = 1'333'333; // 40 frames at 30 fps
+    spec.redoFirstFrame = 30;
+    spec.redoLastFrame = 59; // chunk-padded end of the last 30-frame chunk
+    QString error;
+    EXPECT_TRUE(AiProtocol::validateJobSpec(spec, &error))
+        << error.toStdString();
+}
+
+TEST(AiProtocol, RejectsRedoBeyondChunkPaddedBound)
+{
+    AiJobSpec spec = makeSpec();
+    spec.sourceInUs = 0;
+    spec.sourceOutUs = 1'333'333;
+    spec.redoFirstFrame = 30;
+    spec.redoLastFrame = 60;
+    QString error;
+    EXPECT_FALSE(AiProtocol::validateJobSpec(spec, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("重做范围")))
+        << error.toStdString();
+}
+
+TEST(AiProtocol, RejectsInvertedRedoRange)
+{
+    AiJobSpec spec = makeSpec();
+    spec.sourceInUs = 0;
+    spec.sourceOutUs = 1'333'333;
+    spec.redoFirstFrame = 30;
+    spec.redoLastFrame = 29;
+    QString error;
+    EXPECT_FALSE(AiProtocol::validateJobSpec(spec, &error));
+    EXPECT_TRUE(error.contains(QStringLiteral("重做范围")))
+        << error.toStdString();
 }
 
 TEST(AiProtocol, RoundTripsJobSpec)
@@ -541,6 +621,36 @@ TEST(AiFeatureGate, WhitespaceSignOffIsRejected)
 {
     ModelManifest manifest = approvedManifest();
     manifest.legalSignOffBy = QStringLiteral("   ");
+    manifest.models = {
+        modelRecord(QStringLiteral("track-1"), QStringLiteral("tracking"), true),
+        modelRecord(QStringLiteral("inpaint-1"),
+                    QStringLiteral("inpainting"), true)};
+
+    ModelRegistry registry = ModelRegistry::forTest(manifest);
+    QString reason;
+    EXPECT_FALSE(registry.featureEnabled(&reason));
+    EXPECT_TRUE(reason.contains(QStringLiteral("许可证"))) << reason.toStdString();
+}
+
+TEST(AiFeatureGate, WhitespaceSignOffDateIsRejected)
+{
+    ModelManifest manifest = approvedManifest();
+    manifest.legalSignOffDate = QStringLiteral("\t ");
+    manifest.models = {
+        modelRecord(QStringLiteral("track-1"), QStringLiteral("tracking"), true),
+        modelRecord(QStringLiteral("inpaint-1"),
+                    QStringLiteral("inpainting"), true)};
+
+    ModelRegistry registry = ModelRegistry::forTest(manifest);
+    QString reason;
+    EXPECT_FALSE(registry.featureEnabled(&reason));
+    EXPECT_TRUE(reason.contains(QStringLiteral("许可证"))) << reason.toStdString();
+}
+
+TEST(AiFeatureGate, WhitespaceSignOffScopeIsRejected)
+{
+    ModelManifest manifest = approvedManifest();
+    manifest.legalScope = QStringLiteral("  ");
     manifest.models = {
         modelRecord(QStringLiteral("track-1"), QStringLiteral("tracking"), true),
         modelRecord(QStringLiteral("inpaint-1"),
