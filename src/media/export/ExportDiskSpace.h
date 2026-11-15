@@ -8,6 +8,11 @@
 
 namespace VideoEditor {
 
+// Smallest amount of free space any export may proceed with. Pre-flight and
+// the per-segment re-check both use this floor, so an export that passes at
+// start cannot be stopped by the stricter per-segment minimum later.
+constexpr qint64 kExportDiskFloorBytes = 64LL << 20;
+
 // Disk-space verdict for one export. `requiredBytes` includes the estimated
 // payload plus encoder/muxer overhead and a fixed safety headroom so a small
 // overrun does not fill the disk halfway through the last segment.
@@ -19,8 +24,9 @@ struct DiskSpaceEstimate {
 };
 
 // Estimated bytes the export needs: video at the effective bitrate, 192 kbps
-// AAC, 10 % container/segment overhead and 32 MiB headroom. Never returns a
-// negative value.
+// AAC, doubled for the finalization peak (segments + assembled temp), plus
+// 10 % container/segment overhead and 32 MiB headroom, with a floor of
+// kExportDiskFloorBytes. Never returns a negative value.
 qint64 estimateExportBytes(const ExportSettings &settings,
                            const ExportTiming &timing);
 

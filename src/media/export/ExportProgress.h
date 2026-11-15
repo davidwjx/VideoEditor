@@ -5,7 +5,6 @@
 #include <QMetaType>
 #include <QString>
 
-#include "ExportSettings.h"
 #include "ExportValidator.h"
 
 namespace VideoEditor {

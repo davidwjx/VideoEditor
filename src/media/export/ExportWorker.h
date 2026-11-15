@@ -24,6 +24,8 @@ public:
 
     void setCatalog(const EncoderCatalog &catalog);
 
+    bool isCanceled() const { return m_cancel.load(); }
+
 public slots:
     void run(VideoEditor::Project project,
              VideoEditor::ExportSettings settings, bool resume);

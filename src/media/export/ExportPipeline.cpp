@@ -1,7 +1,6 @@
 #include "ExportPipeline.h"
 
 #include <algorithm>
-#include <cmath>
 #include <vector>
 
 #include <QDateTime>
@@ -11,12 +10,18 @@
 #include <QSaveFile>
 #include <QStringList>
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+}
+
 #include "AudioEncoder.h"
 #include "AudioTrackWriter.h"
 #include "ExportDiskSpace.h"
 #include "Mp4Assembler.h"
 #include "OfflineFrameRenderer.h"
 #include "SegmentRouter.h"
+#include "SegmentWriter.h"
 #include "Srt.h"
 #include "TimelineEvaluator.h"
 #include "TimelineMixer.h"
@@ -31,6 +36,89 @@ constexpr int kChannels = 2;
 constexpr int kAudioBitrateKbps = 192;
 constexpr int kAudioBlockSamples = 480;
 constexpr int kAacFrameSamples = 1024;
+
+void appendWarning(ExportResult *result, const QString &message)
+{
+    if (result->warning.isEmpty())
+        result->warning = message;
+    else
+        result->warning += QStringLiteral("\n") + message;
+}
+
+// Reads the video stream extradata of an MP4 part. extradata is empty for a
+// stream that carries none.
+bool readVideoExtradata(const QString &path, std::vector<uint8_t> *extradata)
+{
+    extradata->clear();
+    AVFormatContext *in = nullptr;
+    if (avformat_open_input(&in, path.toUtf8().constData(), nullptr, nullptr)
+        < 0)
+        return false;
+    // Extradata normally comes straight from the container header, but a
+    // one-frame probe file may need stream info before codecpar is complete.
+    avformat_find_stream_info(in, nullptr);
+    const int vi = av_find_best_stream(in, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr,
+                                       0);
+    bool ok = false;
+    if (vi >= 0) {
+        const AVCodecParameters *par = in->streams[vi]->codecpar;
+        if (par->extradata && par->extradata_size > 0) {
+            extradata->assign(par->extradata,
+                              par->extradata + par->extradata_size);
+        }
+        ok = true;
+    }
+    avformat_close_input(&in);
+    return ok;
+}
+
+// Writes a throwaway one-frame part with a fresh encoder instance of the same
+// descriptor and reads back the extradata the MP4 muxer publishes. The
+// parameter sets then live in the container-native form (avcC/hvcC/VOL),
+// directly comparable with the parts already on disk. A dedicated instance is
+// used so the probe frame (and any packet the hardware encoder delays) can
+// never leak into the real export stream with a stale pts.
+bool probeSegmentExtradata(const EncoderDescriptor &descriptor,
+                           const ExportSettings &settings, const Rational &fps,
+                           const QString &scratchPath,
+                           std::vector<uint8_t> *extradata)
+{
+    VideoEncoder probe;
+    QString error;
+    if (!probe.open(descriptor, settings, &error))
+        return false;
+    std::vector<EncodedPacket> packets;
+    if (!probe.encodeBlack(0, true, &packets, &error))
+        return false;
+    std::vector<EncodedPacket> tail;
+    if (!probe.flush(&tail, &error))
+        return false;
+    packets.insert(packets.end(), tail.begin(), tail.end());
+    SegmentWriter writer;
+    if (!writer.open(scratchPath, fps, probe.context(), 0, &error))
+        return false;
+    bool ok = true;
+    for (const EncodedPacket &packet : packets) {
+        if (!writer.writeVideo(packet, &error)) {
+            ok = false;
+            break;
+        }
+    }
+    if (ok && !writer.finish(&error))
+        ok = false;
+    if (!ok) {
+        writer.finish(nullptr);
+        QFile::remove(scratchPath);
+        return false;
+    }
+    std::vector<uint8_t> probeExtradata;
+    const bool read = readVideoExtradata(scratchPath, &probeExtradata);
+    QFile::remove(scratchPath);
+    if (!read)
+        return false;
+    *extradata = std::move(probeExtradata);
+    return true;
+}
 
 } // namespace
 
@@ -171,7 +259,9 @@ ExportResult ExportPipeline::run(const Project &project,
     checkpoint.segmentCount = timing.segmentCount;
     checkpoint.completedSegments = 0;
     int startSegment = 0;
+    bool encoderParametersChanged = false;
     if (resume) {
+        error.clear();
         const auto loaded = ExportCheckpoint::load(checkpointPath, &error);
         if (loaded && loaded->projectHash == hash
             && loaded->encoderKey == selected->key()
@@ -199,6 +289,25 @@ ExportResult ExportPipeline::run(const Project &project,
                     break;
                 }
             }
+            // Hardware encoders may publish different SPS/PPS when reopened.
+            // Such parts can never be joined by the assembler, so detect it
+            // now and restart instead of failing every retry.
+            if (startSegment > 0) {
+                std::vector<uint8_t> partExtradata;
+                std::vector<uint8_t> encoderExtradata;
+                const QString scratchPath =
+                    QDir(partsDir).filePath(
+                        QStringLiteral("parameter_probe.mp4"));
+                const bool readPart =
+                    readVideoExtradata(segmentPath(partsDir, 0), &partExtradata);
+                const bool probed = probeSegmentExtradata(
+                    *selected, frozenSettings, frozenSettings.fps, scratchPath,
+                    &encoderExtradata);
+                if (readPart && probed && partExtradata != encoderExtradata) {
+                    encoderParametersChanged = true;
+                    startSegment = 0;
+                }
+            }
             for (int i = startSegment; i < timing.segmentCount; ++i)
                 QFile::remove(segmentPath(partsDir, i));
             result.resumed = startSegment > 0;
@@ -210,10 +319,37 @@ ExportResult ExportPipeline::run(const Project &project,
         // A fresh export must never mix in parts from an older run.
         clearParts(partsDir);
     }
+    if (encoderParametersChanged) {
+        appendWarning(
+            &result,
+            QStringLiteral("硬件编码器重新打开后参数集（SPS/PPS）发生变化，"
+                           "已从头重新导出。"));
+    }
     if (!QDir().mkpath(partsDir)) {
         result.error = QStringLiteral("无法创建导出临时目录：%1").arg(partsDir);
         return result;
     }
+
+    // Open every encoder only after the resume decision (the parameter probe
+    // needs its own instance) and before writing the checkpoint or the SRT
+    // sidecar: a hardware encoder that fails to open must not leave new resume
+    // state or a subtitle file from a run that never produced video.
+    VideoEncoder videoEncoder;
+    AudioEncoder audioEncoder;
+    OfflineFrameRenderer renderer;
+    QStringList warnings;
+    error.clear();
+    if (!videoEncoder.open(*selected, frozenSettings, &error)
+        || !audioEncoder.open(kSampleRate, kChannels, kAudioBitrateKbps, &error)
+        || !renderer.open(renderProject, frozenSettings.width,
+                          frozenSettings.height, &error)) {
+        result.error = error;
+        return result;
+    }
+    renderer.setWarningCallback([&warnings](const QString &message) {
+        if (!warnings.contains(message))
+            warnings.append(message);
+    });
 
     // The SRT sidecar is written atomically before rendering: a failed write
     // aborts the export instead of producing "video ok, subtitles lost".
@@ -239,26 +375,22 @@ ExportResult ExportPipeline::run(const Project &project,
         }
     }
 
+    error.clear();
     if (!checkpoint.save(checkpointPath, &error)) {
         result.error = error;
         return result;
     }
-
-    VideoEncoder videoEncoder;
-    AudioEncoder audioEncoder;
-    OfflineFrameRenderer renderer;
-    QStringList warnings;
-    if (!videoEncoder.open(*selected, frozenSettings, &error)
-        || !audioEncoder.open(kSampleRate, kChannels, kAudioBitrateKbps, &error)
-        || !renderer.open(renderProject, frozenSettings.width,
-                          frozenSettings.height, &error)) {
-        result.error = error;
-        return result;
-    }
-    renderer.setWarningCallback([&warnings](const QString &message) {
-        if (!warnings.contains(message))
-            warnings.append(message);
-    });
+    // Checkpoint updates outside the critical pre-render save must not abort a
+    // run that is otherwise progressing (the parts themselves are intact);
+    // they surface as a warning so a broken checkpoint is not silent.
+    const auto saveCheckpoint = [&] {
+        QString saveError;
+        if (checkpoint.save(checkpointPath, &saveError))
+            return;
+        appendWarning(&result,
+                      QStringLiteral("无法保存导出检查点（续跑信息可能丢失）：%1")
+                          .arg(saveError));
+    };
 
     SegmentRouter router(partsDir, timing, frozenSettings.fps,
                          videoEncoder.context());
@@ -269,14 +401,22 @@ ExportResult ExportPipeline::run(const Project &project,
     bool canceled = false;
     // Declared before the progress lambda because the lambda reads them.
     int64_t encodedFrames = 0;
+    int64_t framesAtStart = 0;
     int64_t fedSamples = 0; // audio always starts at sample 0, even on resume
     int64_t paddedSamples = 0;
+    int64_t audioBytesWritten = 0;
     if (startSegment < timing.segmentCount) {
         int64_t vBegin = 0;
         int64_t vEnd = 0;
         videoFrameRangeForSegment(timing, frozenSettings.fps, startSegment,
                                   &vBegin, &vEnd);
         encodedFrames = vBegin;
+        framesAtStart = vBegin;
+    } else {
+        // Nothing left to render: report the already finished frame count so a
+        // fully complete resume does not look like it restarted.
+        encodedFrames = timing.totalFrames;
+        framesAtStart = timing.totalFrames;
     }
     int currentSegmentFramesDone = 0;
     int currentSegmentFrameCount = 1;
@@ -312,8 +452,13 @@ ExportResult ExportPipeline::run(const Project &project,
                                                                  : 0;
         }
         progress.elapsedMs = QDateTime::currentMSecsSinceEpoch() - startedMs;
+        // Speed and ETA only describe work done by this run. Counting frames
+        // inherited from the checkpoint would overstate throughput after a
+        // resume and make the ETA collapse to zero.
+        const int64_t framesThisRun =
+            std::max<int64_t>(0, encodedFrames - framesAtStart);
         progress.encodeFps = progress.elapsedMs > 0
-                                 ? double(encodedFrames) * 1000.0
+                                 ? double(framesThisRun) * 1000.0
                                        / double(progress.elapsedMs)
                                  : 0.0;
         progress.etaMs = progress.encodeFps > 0.0
@@ -321,7 +466,7 @@ ExportResult ExportPipeline::run(const Project &project,
                                               - progress.completedFrames)
                                        * 1000.0 / progress.encodeFps)
                              : -1;
-        progress.outputBytes = router.bytesWritten();
+        progress.outputBytes = router.bytesWritten() + audioBytesWritten;
         progress.resumed = result.resumed;
         hooks.onProgress(progress);
     };
@@ -344,6 +489,17 @@ ExportResult ExportPipeline::run(const Project &project,
         result.error = error;
         return result;
     }
+    const auto writeAudioPackets =
+        [&](const std::vector<EncodedPacket> &packets) -> bool {
+        for (const EncodedPacket &packet : packets) {
+            if (!audioTrack.write(packet, &error)) {
+                result.error = QStringLiteral("音频写入失败：%1").arg(error);
+                return false;
+            }
+            audioBytesWritten += int64_t(packet.data.size());
+        }
+        return true;
+    };
     mixer.setPositionSamples(0);
     for (int64_t sample = 0;
          sample < timing.totalSamples && !canceled && result.error.isEmpty();
@@ -369,12 +525,8 @@ ExportResult ExportPipeline::run(const Project &project,
                     result.error = QStringLiteral("音频编码失败：%1").arg(error);
                     break;
                 }
-                for (const EncodedPacket &packet : packets) {
-                    if (!audioTrack.write(packet, &error)) {
-                        result.error = QStringLiteral("音频写入失败：%1").arg(error);
-                        break;
-                    }
-                }
+                if (!writeAudioPackets(packets))
+                    break;
                 fedSamples += kAacFrameSamples;
                 aacFill = 0;
             }
@@ -392,26 +544,15 @@ ExportResult ExportPipeline::run(const Project &project,
                                      fedSamples, &packets, &error)) {
                 result.error =
                     QStringLiteral("音频尾帧编码失败：%1").arg(error);
-            } else {
-                for (const EncodedPacket &packet : packets) {
-                    if (!audioTrack.write(packet, &error)) {
-                        result.error =
-                            QStringLiteral("音频写入失败：%1").arg(error);
-                        break;
-                    }
-                }
+            } else if (writeAudioPackets(packets)) {
                 fedSamples += kAacFrameSamples;
             }
         }
         std::vector<EncodedPacket> audioTail;
         if (result.error.isEmpty() && !audioEncoder.flush(&audioTail, &error))
             result.error = error;
-        for (const EncodedPacket &packet : audioTail) {
-            if (!audioTrack.write(packet, &error)) {
-                result.error = QStringLiteral("音频写入失败：%1").arg(error);
-                break;
-            }
-        }
+        if (result.error.isEmpty())
+            writeAudioPackets(audioTail);
         if (result.error.isEmpty() && !audioTrack.finish(&error))
             result.error = error;
     }
@@ -419,7 +560,7 @@ ExportResult ExportPipeline::run(const Project &project,
         audioTrack.finish(nullptr);
         QFile::remove(audioPartPath);
         checkpoint.lastError = result.error;
-        checkpoint.save(checkpointPath, nullptr);
+        saveCheckpoint();
         result.canceled = canceled;
         result.resumable = checkpoint.completedSegments > 0;
         result.audioPeak = peak;
@@ -442,7 +583,7 @@ ExportResult ExportPipeline::run(const Project &project,
             / double(std::max(1, timing.segmentCount));
         space = evaluateDiskSpace(
             freeBytes(outputDir),
-            std::max<qint64>(64LL << 20,
+            std::max<qint64>(kExportDiskFloorBytes,
                              qint64(double(required) * remainingFraction)));
         if (!space.ok) {
             result.error = space.error;
@@ -516,17 +657,20 @@ ExportResult ExportPipeline::run(const Project &project,
 
     // Always close file handles. On cancel/failure the partially written last
     // segment is deleted; only fully validated segments count as complete.
+    // `finishAll(false)` returning true only means the cleanup succeeded, so
+    // the "complete" claim needs both a clean run and a successful close.
     const bool successSoFar = !canceled && result.error.isEmpty();
-    const bool success = router.finishAll(successSoFar, &error);
-    if (!success && result.error.isEmpty())
+    const bool finishedAll = router.finishAll(successSoFar, &error);
+    if (!finishedAll && result.error.isEmpty())
         result.error = error;
     checkpoint.completedSegments =
-        success ? timing.segmentCount
-                : std::min(timing.segmentCount,
-                           startSegment + router.completedSegments());
+        (successSoFar && finishedAll)
+            ? timing.segmentCount
+            : std::min(timing.segmentCount,
+                       startSegment + router.completedSegments());
     checkpoint.bytesWritten = router.bytesWritten();
     checkpoint.lastError = result.error;
-    checkpoint.save(checkpointPath, nullptr);
+    saveCheckpoint();
 
     if (canceled) {
         result.canceled = true;
@@ -540,6 +684,9 @@ ExportResult ExportPipeline::run(const Project &project,
         return result;
     }
 
+    // Finalizing/Validating deliberately do not poll the cancel hook: the
+    // output is all but written and abandoning it there would only leave a
+    // temp file for the next run to clean up.
     report(ExportStage::Finalizing);
     const QString temp = assemblyTempPathFor(result.outputPath);
     if (!Mp4Assembler::assemble(partsDir, audioPartPath, timing,

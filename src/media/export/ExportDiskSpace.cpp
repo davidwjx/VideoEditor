@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-#include <QDir>
 #include <QFileInfo>
 #include <QStorageInfo>
 
@@ -46,7 +45,12 @@ qint64 estimateExportBytes(const ExportSettings &settings,
                                / 1'000'000LL;
     const int64_t payload = videoBytes + audioBytes;
     const int64_t overhead = payload / 10;
-    return std::max<qint64>(kHeadroomBytes, payload + overhead + kHeadroomBytes);
+    // Finalization holds the encoded parts and the assembled temp at the same
+    // time, so the peak is roughly twice the payload. Keep the same floor the
+    // per-segment re-check uses, otherwise a run can pass pre-flight and then
+    // be rejected by the first segment check.
+    const qint64 peak = payload * 2 + overhead + kHeadroomBytes;
+    return std::max<qint64>(kExportDiskFloorBytes, peak);
 }
 
 DiskSpaceEstimate evaluateDiskSpace(qint64 freeBytes, qint64 requiredBytes)

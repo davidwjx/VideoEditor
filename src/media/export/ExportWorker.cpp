@@ -15,9 +15,10 @@ void ExportWorker::setCatalog(const EncoderCatalog &catalog)
 void ExportWorker::run(VideoEditor::Project project,
                        VideoEditor::ExportSettings settings, bool resume)
 {
-    // A worker is single-use in practice, but clearing the flag makes a
-    // restarted worker behave like a fresh one instead of canceling instantly.
-    m_cancel.store(false);
+    // The cancellation flag is intentionally NOT reset here. A cancel queued
+    // between starting the worker and dequeuing run() must win, otherwise the
+    // click is silently lost and the export completes anyway. ExportController
+    // creates one worker per export, so a fresh worker starts uncancelled.
     ExportPipeline pipeline;
     ExportPipeline::Hooks hooks;
     hooks.isCanceled = [this] { return m_cancel.load(); };

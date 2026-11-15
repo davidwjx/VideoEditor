@@ -10,6 +10,7 @@
 #include "D3D11Context.h"
 #include "ExportEncoderCatalog.h"
 #include "ExportPipeline.h"
+#include "ExportWorker.h"
 #include "MediaProbe.h"
 #include "Project.h"
 
@@ -210,14 +211,93 @@ TEST_F(ExportPipelineTest, SegmentFailureKeepsResumableCheckpoint)
     EXPECT_FALSE(failed.canceled);
     EXPECT_TRUE(failed.resumable);
     EXPECT_FALSE(failed.error.isEmpty());
-    EXPECT_TRUE(QFileInfo::exists(partsDirectoryFor(output)
-                                  + QStringLiteral("/checkpoint.json")));
+    const QString checkpointPath =
+        partsDirectoryFor(output) + QStringLiteral("/checkpoint.json");
+    ASSERT_TRUE(QFileInfo::exists(checkpointPath));
+    // A failed run must not claim the whole timeline is complete just because
+    // closing the open parts succeeded.
+    const auto checkpoint = ExportCheckpoint::load(checkpointPath);
+    ASSERT_TRUE(checkpoint.has_value());
+    EXPECT_GT(checkpoint->completedSegments, 0);
+    EXPECT_LT(checkpoint->completedSegments, checkpoint->segmentCount);
 
     const ExportResult resumed =
         pipeline.run(project, settings, catalog, true, {});
     ASSERT_TRUE(resumed.ok) << resumed.error.toStdString();
     EXPECT_TRUE(resumed.resumed);
     EXPECT_TRUE(resumed.validation.ok);
+    EXPECT_TRUE(QFileInfo::exists(output));
+}
+
+// A Cancel clicked between queueing the worker and dequeuing run() must not be
+// erased by run(); otherwise the click is lost and the export completes.
+TEST_F(ExportPipelineTest, WorkerCancelBeforeRunProducesNoOutput)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("precancel.mp4"));
+    const Project project = makeProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ExportWorker worker;
+    worker.setCatalog(EncoderCatalog::withoutHardwareForTest());
+    ExportResult result;
+    bool finished = false;
+    QObject::connect(&worker, &ExportWorker::finished, &worker,
+                     [&result, &finished](const ExportResult &value) {
+                         result = value;
+                         finished = true;
+                     });
+    worker.cancel(); // clicked before run() is dequeued
+    EXPECT_TRUE(worker.isCanceled());
+    worker.run(project, settingsFor(ExportVideoCodec::Mpeg4Part2, output),
+               false);
+    ASSERT_TRUE(finished);
+    EXPECT_TRUE(result.canceled);
+    EXPECT_FALSE(result.ok);
+    EXPECT_FALSE(result.resumable);
+    EXPECT_FALSE(QFileInfo::exists(output));
+    EXPECT_FALSE(QFileInfo::exists(partsDirectoryFor(output)
+                                   + QStringLiteral("/audio.mp4")));
+}
+
+// Reopening a hardware encoder can publish different SPS/PPS. The pipeline
+// probes the new parameter sets against part 0 at resume: identical sets
+// resume, different sets restart from scratch. Either way the retry must
+// finish instead of wedging on an unassemblable parts directory.
+TEST_F(ExportPipelineTest, HardwareH264ResumeFinishesAfterFailure)
+{
+    const EncoderCatalog catalog = detectEncoders(320, 180, Rational{30, 1});
+    const EncoderDescriptor *hardware = nullptr;
+    for (const EncoderDescriptor &candidate : catalog.encoders) {
+        if (candidate.codec == ExportVideoCodec::H264 && candidate.hardware
+            && candidate.available) {
+            hardware = &candidate;
+            break;
+        }
+    }
+    if (!hardware)
+        GTEST_SKIP() << "no hardware H.264 encoder available";
+
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("hw-resume.mp4"));
+    const Project project = makeProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ExportSettings settings = settingsFor(ExportVideoCodec::H264, output);
+    settings.encoderId = hardware->key();
+    settings.segmentTargetUs = 100'000;
+    ExportPipeline::Hooks hooks;
+    hooks.failAtSegment = 10;
+    ExportPipeline pipeline;
+    const ExportResult failed =
+        pipeline.run(project, settings, catalog, false, hooks);
+    EXPECT_FALSE(failed.ok) << failed.error.toStdString();
+    EXPECT_TRUE(failed.resumable);
+
+    const ExportResult resumed =
+        pipeline.run(project, settings, catalog, true, {});
+    ASSERT_TRUE(resumed.ok) << resumed.error.toStdString()
+                            << " / warning=" << resumed.warning.toStdString()
+                            << " / resumed=" << resumed.resumed;
+    EXPECT_TRUE(resumed.validation.ok) << resumed.validation.error.toStdString();
     EXPECT_TRUE(QFileInfo::exists(output));
 }
 

@@ -15,9 +15,12 @@ TEST(ExportDiskSpace, RequiredIsPositiveAndIncludesHeadroom)
     const ExportTiming timing =
         computeExportTiming(10'000'000, settings.fps, 48000, 8'000'000);
     const qint64 required = estimateExportBytes(settings, timing);
-    // 12 Mbps * 10 s = 15 MB video + 0.24 MB audio + headroom.
-    EXPECT_GE(required, 15LL * 1024 * 1024);
-    EXPECT_LE(required, 64LL * 1024 * 1024);
+    // 12 Mbps * 10 s = 15 MB video + 0.24 MB audio. Finalization holds parts
+    // and the assembled temp together (~2x payload), plus overhead/headroom,
+    // and never estimates below the per-segment floor.
+    EXPECT_GE(required, kExportDiskFloorBytes);
+    EXPECT_GE(required, 2LL * 15'000'000);
+    EXPECT_LE(required, 96LL * 1024 * 1024);
 }
 
 TEST(ExportDiskSpace, EvaluatorExplainsShortfall)
