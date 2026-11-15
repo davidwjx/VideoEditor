@@ -303,7 +303,6 @@ private:
     int m_maskRevision = 0;
     bool m_boxMode = false;
     bool m_eraseMode = false;
-    bool m_hasLayer = false;
     bool m_layerEnabled = true;
     QString m_error;
 
@@ -314,6 +313,9 @@ private:
     bool m_generating = false;
     bool m_exportAfterGeneration = false;
     bool m_exportGenerationPending = false;
+    // Set when a redo invalidation fails after the job was accepted; the
+    // cancel completion must keep the layer untouched and show this error.
+    QString m_abortError;
     bool m_advancedOpen = false;
     QString m_compareMode = QStringLiteral("repair");
     int m_splitPermille = 500;

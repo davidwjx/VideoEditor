@@ -304,7 +304,10 @@ void RemovalController::generateForExport()
 
 void RemovalController::cancelExportGeneration()
 {
+    // Both the live arming flag and the value captured at start must be
+    // cleared; otherwise a queued done could still trigger the export start.
     m_exportAfterGeneration = false;
+    m_pendingExportAfter = false;
     setExportGenerationPending(false);
     if (m_generating)
         cancel();
@@ -400,23 +403,36 @@ void RemovalController::redoRange(qint64 sourceStartUs, qint64 sourceEndUs)
         return;
     }
 
-    QString invalidateError;
-    if (!m_cache->invalidateFrameRange(layer->cacheKey, firstFrame, lastFrame,
-                                       &invalidateError)) {
-        setError(removalErrorMessage(QStringLiteral("cache_missing"),
-                                     invalidateError));
-        emit cacheStatusChanged();
-        return;
-    }
-    emit cacheStatusChanged();
-
     spec.resume = true;
     spec.redoFirstFrame = firstFrame;
     spec.redoLastFrame = lastFrame;
 
     m_pendingLayerId = layer->id;
-    if (!startPendingJob(PendingJobKind::Redo, spec, &error))
+    if (!startPendingJob(PendingJobKind::Redo, spec, &error)) {
+        // The engine never started, so the cache must not be touched.
         setError(error);
+        return;
+    }
+
+    // Only an accepted job may destroy intersecting chunks. The engine reads
+    // masks and the manifest during tracking, not the repair patches, so the
+    // invalidation can safely happen after start().
+    QString invalidateError;
+    if (!m_cache->invalidateFrameRange(layer->cacheKey, firstFrame, lastFrame,
+                                       &invalidateError)) {
+        m_abortError = removalErrorMessage(QStringLiteral("cache_missing"),
+                                           invalidateError);
+        m_pendingExportAfter = false;
+        m_exportAfterGeneration = false;
+        setExportGenerationPending(false);
+        // Keep the layer untouched: the empty pending layer id makes
+        // handleJobFinished skip the completion command.
+        m_pendingLayerId.clear();
+        setError(m_abortError);
+        cancel();
+        return;
+    }
+    emit cacheStatusChanged();
 }
 
 void RemovalController::setCompareMode(const QString &mode)
@@ -691,7 +707,6 @@ void RemovalController::beginMask(const QString &clipId)
             : m_document.removalLayerById(clip->removalLayerId);
     if (layer) {
         m_working.layerId = layer->id;
-        m_hasLayer = true;
         m_layerEnabled = layer->enabled;
         const MaskKeyframe *exact =
             keyframeAt(*layer, m_working.sourceTimeUs);
@@ -708,7 +723,6 @@ void RemovalController::beginMask(const QString &clipId)
         }
     } else {
         m_working.layerId = newId(QStringLiteral("rl-"));
-        m_hasLayer = false;
         m_layerEnabled = true;
         m_featherPx = 4;
     }
@@ -729,7 +743,6 @@ void RemovalController::endMask()
     resetWorkingState();
     m_maskMode = false;
     m_activeClipId.clear();
-    m_hasLayer = false;
     m_layerEnabled = true;
     m_boxMode = false;
     m_eraseMode = false;
@@ -907,7 +920,6 @@ bool RemovalController::commitMaskChange(const QString &text)
     m_working.beforeMaskHash = storedHash;
     m_document.applyRemovalLayerEdit(edit, text);
 
-    m_hasLayer = true;
     m_layerEnabled = after.enabled;
     emit layerChanged();
     updateOverlay();
@@ -1162,7 +1174,6 @@ void RemovalController::refreshFromDocument()
         return;
 
     const RemovalLayer *layer = currentLayer();
-    m_hasLayer = layer != nullptr;
 
     if (layer) {
         m_layerEnabled = layer->enabled;
@@ -1374,9 +1385,15 @@ bool RemovalController::startPendingJob(PendingJobKind kind,
 void RemovalController::handleJobFinished(const AiJobResult &result)
 {
     const PendingJobKind kind = m_pendingKind;
-    const QString layerId = m_pendingLayerId;
-    const bool exportAfter = m_pendingExportAfter;
+    QString layerId = m_pendingLayerId;
+    // Consult the live flags as well as the value captured at start: a dialog
+    // close may have disarmed the export while the job was already finishing.
+    const bool exportAfter = m_pendingExportAfter && m_exportAfterGeneration;
     const bool wasTracking = kind == PendingJobKind::Track;
+    const QString abortError = m_abortError;
+    m_abortError.clear();
+    if (!abortError.isEmpty())
+        layerId.clear(); // abort path keeps the layer untouched
     m_pendingKind = PendingJobKind::None;
     m_pendingLayerId.clear();
     m_pendingCacheKey.clear();
@@ -1393,6 +1410,8 @@ void RemovalController::handleJobFinished(const AiJobResult &result)
                               ? nullptr
                               : m_document.removalLayerById(layerId);
     if (!layer) {
+        if (!abortError.isEmpty())
+            setError(abortError);
         notifyAnalysisChanged();
         return;
     }
@@ -1466,7 +1485,6 @@ void RemovalController::applyLayerUpdate(const RemovalLayer &after,
         edit.before = *before;
     edit.after = after;
     m_document.applyRemovalLayerEdit(edit, text);
-    m_hasLayer = true;
     m_layerEnabled = after.enabled;
     emit layerChanged();
     notifyAnalysisChanged();
@@ -1556,10 +1574,14 @@ QVariantList RemovalController::confidenceBand() const
         const qint64 sourceUs =
             qint64(frame.value(QStringLiteral("timeUs")).toDouble());
         qint64 timelineUs = sourceUs;
-        if (clip)
+        if (clip) {
+            // Out-of-range sidecar entries must never seek outside the clip.
+            const qint64 clamped =
+                qBound(clip->sourceInUs, sourceUs, clip->sourceOutUs);
             timelineUs = clip->timelineStartUs
-                         + unscaleBySpeed(sourceUs - clip->sourceInUs,
+                         + unscaleBySpeed(clamped - clip->sourceInUs,
                                           clip->speedMilli);
+        }
         const QString state =
             frame.value(QStringLiteral("state")).toString();
         QVariantMap entry;

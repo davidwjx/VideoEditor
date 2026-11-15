@@ -32,7 +32,7 @@ namespace {
 
 class FakeTransport : public AiTransport {
 public:
-    enum class Mode { Complete, Silent, Error, ProgressHold };
+    enum class Mode { Complete, Silent, Error, ProgressHold, DoneAfterCancel };
 
     explicit FakeTransport(Mode mode, AiJobSpec *captured)
         : m_mode(mode)
@@ -83,12 +83,16 @@ public:
 
     void cancel() override
     {
+        if (m_mode == Mode::DoneAfterCancel)
+            return; // the test queues a done after the cancel request
         emit message(QJsonObject{
             {QStringLiteral("event"), QStringLiteral("cancelled")},
             {QStringLiteral("completedFrames"), 30},
             {QStringLiteral("trackingState"), QStringLiteral("partial")}});
         emit finished(0, QProcess::NormalExit);
     }
+
+    void emitMessage(const QJsonObject &message) { emit this->message(message); }
 
     AiJobSpec m_spec;
 
@@ -296,7 +300,9 @@ TEST(RemovalControllerProgress, PartialRedoInvalidatesOnlyIntersectingChunks)
     EXPECT_EQ(updated->chunks[0].index, 0);
     EXPECT_EQ(updated->chunks[1].index, 4);
 
-    // The redo job resumes and requests the chunk-padded range.
+    // The redo job was accepted before invalidation: the engine owns the
+    // repair writes from here and sees the chunks already removed.
+    EXPECT_FALSE(harness.captured.jobId.isEmpty());
     EXPECT_TRUE(harness.captured.resume);
     EXPECT_EQ(harness.captured.redoFirstFrame, 30);
     EXPECT_EQ(harness.captured.redoLastFrame, 119);
@@ -589,6 +595,38 @@ TEST(RemovalControllerProgress, ExportGenerationPendingIsCancelledCleanly)
     EXPECT_FALSE(harness.controller.generating());
 }
 
+TEST(RemovalControllerProgress, DoneAfterCancelNeverStartsAnExport)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::DoneAfterCancel;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+    QSignalSpy exportSpy(&harness.controller,
+                         &RemovalController::generationFinishedForExport);
+
+    harness.controller.generateForExport();
+    ASSERT_TRUE(harness.controller.exportGenerationPending());
+    harness.controller.cancelExportGeneration();
+    EXPECT_TRUE(harness.manager.running())
+        << "the fake has not acknowledged the cancel yet";
+
+    // The engine races a successful done after the cancel request. It must be
+    // reported as cancelled, and the disarmed export must not start.
+    harness.transport->emitMessage(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("done")},
+        {QStringLiteral("cacheKey"), harness.captured.cacheKey},
+        {QStringLiteral("completedFrames"), 30},
+        {QStringLiteral("trackingState"), QStringLiteral("complete")}});
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+
+    const AiJobResult result =
+        qvariant_cast<AiJobResult>(harness.finished.at(0).at(0));
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_EQ(exportSpy.count(), 0);
+    EXPECT_FALSE(harness.controller.exportGenerationPending());
+}
+
 TEST(RemovalControllerProgress, ExportGenerationSuccessEmitsOnce)
 {
     Harness harness;
@@ -685,6 +723,45 @@ TEST(RemovalControllerProgress, RedoWhileRunningKeepsEveryChunk)
     QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
 }
 
+TEST(RemovalControllerProgress, RedoStartFailureKeepsEveryChunk)
+{
+    Harness harness;
+    Project project = projectWithRemovalLayer();
+    const QString key = computeRemovalCacheKey(RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], project.removalLayers[0],
+        *harness.gate.registry()));
+    RemovalCacheManifest manifest = makeManifest(
+        key, QStringLiteral("complete"), {0, 1, 2, 3, 4}, 150);
+    QString error;
+    ASSERT_TRUE(harness.cache.writeManifest(manifest, &error))
+        << error.toStdString();
+    for (int index = 0; index < 5; ++index)
+        makeChunkDir(harness.cache, key, index);
+    project.removalLayers[0].cacheKey = key;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+    harness.doc.setProject(project);
+    harness.controller.beginMask(QStringLiteral("clip-1"));
+
+    harness.manager.setTransportFactoryForTest([] {
+        return std::unique_ptr<AiTransport>(new RejectingTransport);
+    });
+    harness.controller.redoRange(frameUs(70), frameUs(80));
+    EXPECT_TRUE(harness.controller.error().contains(QStringLiteral("无法启动")))
+        << harness.controller.error().toStdString();
+
+    const QString chunksRoot =
+        QDir(harness.cache.cacheDir(key)).filePath(QStringLiteral("chunks"));
+    for (int index = 0; index < 5; ++index) {
+        EXPECT_TRUE(QDir(QDir(chunksRoot)
+                             .filePath(QString::number(index)))
+                        .exists())
+            << index;
+    }
+    const auto survived = harness.cache.readManifest(key, &error);
+    ASSERT_TRUE(survived.has_value()) << error.toStdString();
+    EXPECT_EQ(survived->status, QStringLiteral("complete"));
+}
+
 TEST(RemovalControllerProgress, RedoRangeClampsToLayerBounds)
 {
     Harness harness;
@@ -708,6 +785,55 @@ TEST(RemovalControllerProgress, RedoRangeClampsToLayerBounds)
 
     harness.controller.cancel();
     QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+}
+
+TEST(RemovalControllerProgress, ConfidenceMappingHandlesHalfSpeedAndOutOfRange)
+{
+    QTemporaryDir dir;
+    ProjectDocument doc;
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    QString trackingHash;
+    {
+        QJsonArray frames{
+            QJsonObject{{QStringLiteral("timeUs"), -2'000'000},
+                        {QStringLiteral("state"), QStringLiteral("missing")}},
+            QJsonObject{{QStringLiteral("timeUs"), 1'000'000},
+                        {QStringLiteral("state"), QStringLiteral("low")}},
+            QJsonObject{{QStringLiteral("timeUs"), 20'000'000},
+                        {QStringLiteral("state"), QStringLiteral("good")}}};
+        ASSERT_TRUE(sidecars.writeTracking(
+            QJsonObject{{QStringLiteral("frames"), frames}}, &trackingHash,
+            nullptr));
+    }
+    AiFeatureGate gate;
+    gate.setRegistryForTest(testRegistry(dir.path()));
+    gate.setEnabledForTest(true);
+    AiJobManager manager(gate);
+    RemovalController controller(doc, sidecars);
+    controller.setJobManager(&manager);
+    controller.setFeatureGate(&gate);
+
+    Project project = projectWithRemovalLayer(trackingHash);
+    project.tracks[0].clips[0].timelineStartUs = 0;
+    project.tracks[0].clips[0].speedMilli = 500; // 1 s source = 2 s timeline
+    doc.setProject(project);
+    controller.beginMask(QStringLiteral("clip-1"));
+
+    const QVariantList band = controller.confidenceBand();
+    ASSERT_EQ(band.size(), 3);
+    EXPECT_EQ(band[0].toMap().value(QStringLiteral("timelineUs")).toLongLong(),
+              0); // -2 s clamps to sourceIn
+    EXPECT_EQ(band[1].toMap().value(QStringLiteral("timelineUs")).toLongLong(),
+              2'000'000); // 1 s source at 0.5x
+    EXPECT_EQ(band[2].toMap().value(QStringLiteral("timelineUs")).toLongLong(),
+              20'000'000); // 20 s clamps to sourceOut, then 10 s at 0.5x
+
+    qint64 sought = -1;
+    controller.setSeekCallback([&sought](qint64 timelineUs) {
+        sought = timelineUs;
+    });
+    controller.jumpToConfidence(2);
+    EXPECT_EQ(sought, 20'000'000);
 }
 
 TEST(RemovalControllerProgress, ConfidenceMappingHonoursNonUnitSpeed)

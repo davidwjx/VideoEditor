@@ -244,9 +244,20 @@ void AiJobManager::handleMessage(const QJsonObject &message)
             if (!ok)
                 result.trackingState = RemovalTrackingState::Failed;
         }
-        // A fatal error event wins over a later done. The Task 4 stub engine
-        // reports model_unavailable and then done, so this must fail.
-        if (!m_errorCode.isEmpty() || !m_errorMessage.isEmpty()) {
+        // A done that arrives after the user cancelled must never be reported
+        // as success: the engine may have finished the last chunk between the
+        // cancel request and its own cancel handling. Preserve the completion
+        // evidence already parsed above.
+        if (m_cancelRequested) {
+            result.ok = false;
+            result.cancelled = true;
+            if (result.errorCode.isEmpty())
+                result.errorCode = m_errorCode;
+            if (result.errorMessage.isEmpty())
+                result.errorMessage = m_errorMessage;
+        } else if (!m_errorCode.isEmpty() || !m_errorMessage.isEmpty()) {
+            // A fatal error event wins over a later done. The Task 4 stub
+            // engine reports model_unavailable and then done, so this must fail.
             result.ok = false;
             result.errorCode = m_errorCode;
             result.errorMessage = m_errorMessage;

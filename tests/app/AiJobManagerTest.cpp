@@ -41,7 +41,8 @@ namespace {
 // Q_OBJECT/metaobject of its own (and therefore no .moc include).
 class FakeTransport : public AiTransport {
 public:
-    enum class Mode { ProgressDone, ErrorThenDone, Silent };
+    enum class Mode { ProgressDone, ErrorThenDone, Silent,
+                      SilentNoCancelFinish };
 
     explicit FakeTransport(Mode mode = Mode::ProgressDone) : m_mode(mode) {}
 
@@ -81,7 +82,12 @@ public:
         return true;
     }
 
-    void cancel() override { emit finished(0, QProcess::NormalExit); }
+    void cancel() override
+    {
+        if (m_mode == Mode::SilentNoCancelFinish)
+            return; // the test emits done/finished explicitly
+        emit finished(0, QProcess::NormalExit);
+    }
 
     void sendCommand(const QJsonObject &command) override
     {
@@ -1127,6 +1133,44 @@ TEST(AiJobManager, CancelYieldsCancelledResult)
         qvariant_cast<AiJobResult>(finished.at(0).at(0));
     EXPECT_FALSE(result.ok);
     EXPECT_TRUE(result.cancelled);
+}
+
+TEST(AiJobManager, DoneAfterCancelIsReportedAsCancelled)
+{
+    AiFeatureGate gate;
+    gate.setEnabledForTest(true);
+    AiJobManager manager(gate);
+    FakeTransport *raw = nullptr;
+    manager.setTransportFactoryForTest([&raw] {
+        auto transport = std::make_unique<FakeTransport>(
+            FakeTransport::Mode::SilentNoCancelFinish);
+        raw = transport.get();
+        return std::unique_ptr<AiTransport>(transport.release());
+    });
+    QSignalSpy finished(&manager, &AiJobManager::jobFinished);
+    QString error;
+    const AiJobSpec spec = makeSpec();
+    ASSERT_TRUE(manager.start(spec, &error)) << error.toStdString();
+    ASSERT_NE(raw, nullptr);
+
+    manager.cancel();
+    EXPECT_TRUE(manager.running()) << "the fake has not acknowledged cancel yet";
+
+    const QString confidenceHash(64, QLatin1Char('e'));
+    raw->emitMessage(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("done")},
+        {QStringLiteral("cacheKey"), spec.cacheKey},
+        {QStringLiteral("completedFrames"), 7},
+        {QStringLiteral("confidenceHash"), confidenceHash},
+        {QStringLiteral("trackingState"), QStringLiteral("partial")}});
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 2000);
+    const AiJobResult result =
+        qvariant_cast<AiJobResult>(finished.at(0).at(0));
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_EQ(result.completedFrames, 7);
+    EXPECT_EQ(result.confidenceHash, confidenceHash);
+    EXPECT_EQ(result.trackingState, RemovalTrackingState::Partial);
 }
 
 TEST(AiJobManager, CancelledEventCarriesTrackingState)

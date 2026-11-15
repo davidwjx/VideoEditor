@@ -466,6 +466,33 @@ TEST(RemovalPreflight, TechnicalPreviewBypassesApprovalButStillChecksCache)
     EXPECT_TRUE(technical.issues.isEmpty());
 }
 
+TEST(RemovalPreflight, TechnicalPreviewVerifiesBundleWhenNotPreviouslyVerified)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+
+    ModelManifest manifest = approvedManifest();
+    manifest.commercialApproved = false;
+    manifest.legalSignOffBy.clear();
+    const ModelRegistry registry = ModelRegistry::forTest(manifest);
+
+    Project project;
+    RemovalLayer layer;
+    const QString key = projectWithRemovalLayer(registry, &project, &layer);
+    const RemovalKeyInput input = RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], layer, registry);
+    writeCompleteCache(dir.path(), key, input);
+    project.removalLayers[0].cacheKey = key;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+
+    // modelsAlreadyVerified=false forces the technical-preview branch to call
+    // verifyFiles(); forTest uses in-memory records whose files verify as ok.
+    const RemovalPreflightResult result =
+        RemovalPreflight::check(project, cache, registry, false, true);
+    EXPECT_TRUE(result.ok) << result.message.toStdString();
+}
+
 TEST(RemovalPreflight, TechnicalPreviewStillRequiresTheModeInpaintModel)
 {
     QTemporaryDir dir;
