@@ -57,6 +57,7 @@ add_executable(ui_tests
   ui/TimelineModelTest.cpp
   ui/TimelineControllerTest.cpp
   ui/WaveformImageProviderTest.cpp
+  ui/ExportControllerTest.cpp
   TestGuiMain.cpp)
 target_link_libraries(ui_tests PRIVATE
   videoeditor_ui GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
@@ -110,6 +111,25 @@ target_compile_definitions(app_qml_tests PRIVATE
 add_test(NAME TimelineQml
          COMMAND app_qml_tests --gtest_filter=TimelineQml.*)
 set_tests_properties(TimelineQml PROPERTIES
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  LABELS "gpu"
+  TIMEOUT 60)
+
+# Loads Main.qml from the source tree (ExportDialog resolves as a sibling) and
+# checks the export entry, preset/advanced layout and the H.265 disabled reason.
+# Needs a real D3D11 window like TimelineQml.
+add_executable(export_qml_tests
+  app/ExportDialogQmlTest.cpp
+  TestGuiMain.cpp)
+target_link_libraries(export_qml_tests PRIVATE videoeditor_app GTest::gtest
+  Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml Qt6::Test)
+target_compile_definitions(export_qml_tests PRIVATE
+  VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
+  VIDEOEDITOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_test(NAME ExportQml
+         COMMAND export_qml_tests --gtest_filter=ExportQml.*)
+set_tests_properties(ExportQml PROPERTIES
   ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
   ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
   LABELS "gpu"

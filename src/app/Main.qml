@@ -113,6 +113,16 @@ ApplicationWindow {
                                               ? Preview.decodeMode : "M2 时间线编辑")
                 color: "#cccccc"
             }
+
+            // Primary export entry stays in the top-right corner, matching the
+            // CapCut-style "finish the edit, then export" flow.
+            ToolSeparator {}
+            Button {
+                objectName: "exportButton"
+                text: "导出"
+                highlighted: true
+                onClicked: exportDialog.openDialog()
+            }
         }
     }
 
@@ -376,5 +386,9 @@ ApplicationWindow {
                 onClicked: App.discardRecovery()
             }
         }
+    }
+
+    ExportDialog {
+        id: exportDialog
     }
 }

@@ -8,6 +8,7 @@
 #include <QVariantList>
 
 #include "AudioEngine.h"
+#include "ExportController.h"
 #include "MediaListModel.h"
 #include "ProjectDocument.h"
 #include "ProjectStore.h"
@@ -25,6 +26,8 @@ class AppController : public QObject {
     Q_PROPERTY(VideoEditor::TimelineController *timeline READ timeline CONSTANT)
     Q_PROPERTY(VideoEditor::AudioEngine *audioEngine READ audioEngine CONSTANT)
     Q_PROPERTY(VideoEditor::WaveformService *waveforms READ waveforms CONSTANT)
+    Q_PROPERTY(VideoEditor::ExportController *exportController READ exportController
+                   CONSTANT)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoStateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoStateChanged)
@@ -42,6 +45,7 @@ public:
     TimelineController *timeline() const { return m_timeline; }
     AudioEngine *audioEngine() const { return m_audio.get(); }
     WaveformService *waveforms() const { return m_waveforms; }
+    ExportController *exportController() const { return m_export.get(); }
     QString lastError() const { return m_lastError; }
     bool canUndo() const;
     bool canRedo() const;
@@ -112,6 +116,7 @@ private:
     ProxyService *m_proxyService = nullptr;
     TimelineController *m_timeline = nullptr;
     WaveformService *m_waveforms = nullptr;
+    std::unique_ptr<ExportController> m_export;
     std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<ProjectStore> m_store;
     QTimer m_autosaveTimer;

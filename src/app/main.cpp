@@ -59,6 +59,8 @@ int main(int argc, char *argv[])
                                              controller.timeline());
     engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
                                              controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("Export"),
+                                             controller.exportController());
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
                                              VideoEditor::appVersion());
     engine.loadFromModule(QStringLiteral("VideoEditor"), QStringLiteral("Main"));

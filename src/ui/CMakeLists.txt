@@ -17,6 +17,8 @@ add_library(videoeditor_ui STATIC
   PreviewController.cpp
   WaveformImageProvider.h
   WaveformImageProvider.cpp
+  ExportController.h
+  ExportController.cpp
 )
 target_include_directories(videoeditor_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # PreviewController includes AudioEngine (std::max) together with the Windows

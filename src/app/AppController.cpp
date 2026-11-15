@@ -80,6 +80,11 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     connect(m_timeline, &TimelineController::editFailed, this,
             &AppController::setLastError);
 
+    // The export controller reads the document lazily; only an export freezes
+    // it. Keep one instance for the lifetime of the window so QML bindings and
+    // in-flight exports share the same state.
+    m_export = std::make_unique<ExportController>(*m_document, QString());
+
     m_preview = new PreviewController(this);
     connect(m_preview, &PreviewController::framePresented, this,
             [this](qint64) { emit selftestFramePresented(); });
