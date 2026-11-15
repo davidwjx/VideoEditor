@@ -10,22 +10,35 @@
 // Task 4 stub behaviour so the protocol tests still have a real executable.
 
 #include <QCommandLineParser>
+#include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QLocalSocket>
+#include <QMap>
+#include <QSet>
 #include <QThread>
 
+#include <algorithm>
 #include <functional>
+#include <limits>
 
 #include "AiProtocol.h"
 
 #if VIDEOEDITOR_HAVE_ORT
 #include "ModelRegistry.h"
+#include "engine/FrameReader.h"
+#include "engine/InpaintPipeline.h"
+#include "engine/LamaInpainter.h"
+#include "engine/MiGanInpainter.h"
 #include "engine/Sam2Tracker.h"
+#include "engine/TemporalStabilizer.h"
 #include "engine/TrackingPipeline.h"
+#include "RemovalCache.h"
 #endif
 
 namespace {
@@ -86,6 +99,150 @@ private:
     QLocalSocket &m_socket;
     QByteArray m_buffer;
 };
+
+constexpr int kRepairChunkFrames = 30;
+constexpr int kTrackingPercent = 20;
+constexpr int kRepairPercentSpan = 80;
+
+bool maskHasPixels(const BinaryMask &mask)
+{
+    return std::any_of(mask.bits.begin(), mask.bits.end(),
+                       [](uint8_t value) { return value != 0; });
+}
+
+QString maskFilePath(const AiJobSpec &spec, int frame)
+{
+    return QDir(spec.cacheDir)
+        .filePath(QStringLiteral("tracking/masks/frame_%1.rle")
+                      .arg(frame, 6, 10, QLatin1Char('0')));
+}
+
+std::optional<BinaryMask> readFrameMask(const AiJobSpec &spec, int frame,
+                                        QString *error)
+{
+    QFile file(maskFilePath(spec, frame));
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = QStringLiteral("无法读取跟踪遮罩：%1")
+                         .arg(file.fileName());
+        return std::nullopt;
+    }
+    auto mask = MaskCodec::decode(file.readAll(), error);
+    if (mask && (mask->width != spec.width || mask->height != spec.height)) {
+        if (error)
+            *error = QStringLiteral("跟踪遮罩尺寸与任务显示尺寸不一致。");
+        return std::nullopt;
+    }
+    return mask;
+}
+
+// Feather of the authored keyframe nearest to the chunk start, constant for
+// the whole chunk so alpha never jumps between frames.
+int featherForChunk(const AiJobSpec &spec, int firstFrame)
+{
+    int best = 4;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (const MaskKeyframe &keyframe : spec.maskKeyframes) {
+        const int frame = int(microsToFrames(
+            keyframe.sourceTimeUs - spec.sourceInUs, spec.fps));
+        const int distance = std::abs(frame - firstFrame);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = std::clamp(keyframe.featherPx, 0, 64);
+        }
+    }
+    return best;
+}
+
+QString firstOnnxPath(const ModelRegistry &registry,
+                      const AiModelRecord &record)
+{
+    for (auto it = record.files.constBegin(); it != record.files.constEnd();
+         ++it) {
+        if (it.value().path.endsWith(QLatin1String(".onnx"),
+                                     Qt::CaseInsensitive)) {
+            return QDir(registry.rootDir()).filePath(it.value().path);
+        }
+    }
+    return {};
+}
+
+bool isLamaRecord(const AiModelRecord &record)
+{
+    return record.id.contains(QLatin1String("lama"), Qt::CaseInsensitive)
+        || record.version.contains(QLatin1String("lama"), Qt::CaseInsensitive);
+}
+
+const AiModelRecord *resolveInpaintRecord(const ModelRegistry &registry,
+                                          const AiJobSpec &spec)
+{
+    if (!spec.inpaintModelId.isEmpty()) {
+        const AiModelRecord *requested = registry.model(spec.inpaintModelId);
+        if (requested && requested->isInpaint())
+            return requested;
+    }
+    // Measured defaults: MI-GAN for Fast, int8 allowzero LaMa for Quality.
+    const QString preferred = spec.parameters.mode == RepairMode::Fast
+        ? QStringLiteral("migan-512")
+        : QStringLiteral("lama-512-int8-allowzero0");
+    const AiModelRecord *record = registry.model(preferred);
+    if (record && record->isInpaint())
+        return record;
+    return registry.defaultInpaintModel(spec.parameters.mode == RepairMode::Fast
+                                            ? QStringLiteral("migan")
+                                            : QStringLiteral("lama"));
+}
+
+// Shared pause/cancel poll for tracking and repair. Returns true on cancel.
+bool pollCommands(CommandPoller &poller, bool &paused)
+{
+    if (poller.poll(paused))
+        return true;
+    while (paused) {
+        if (poller.poll(paused))
+            return true;
+        if (!paused)
+            break;
+        QThread::msleep(20);
+    }
+    return false;
+}
+
+void sendRepairProgress(const MessageSink &send, int frame, int totalFrames,
+                        int completedFrames, QElapsedTimer &clock)
+{
+    const double fraction = totalFrames > 0
+        ? std::clamp(double(completedFrames) / double(totalFrames), 0.0, 1.0)
+        : 0.0;
+    qint64 etaMs = 0;
+    if (completedFrames > 0) {
+        const double perFrame =
+            double(clock.elapsed()) / double(completedFrames);
+        etaMs = qint64(perFrame * double(totalFrames - completedFrames));
+    }
+    send(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("progress")},
+        {QStringLiteral("stage"), QStringLiteral("repair")},
+        {QStringLiteral("frame"), frame},
+        {QStringLiteral("totalFrames"), totalFrames},
+        {QStringLiteral("percent"),
+         double(kTrackingPercent) + double(kRepairPercentSpan) * fraction},
+        {QStringLiteral("etaMs"), static_cast<double>(etaMs)},
+    });
+}
+
+BinaryMask cropBinaryMask(const BinaryMask &mask, const QRect &crop)
+{
+    BinaryMask result;
+    result.width = crop.width();
+    result.height = crop.height();
+    result.bits.assign(size_t(crop.width()) * size_t(crop.height()), 0);
+    for (int y = 0; y < crop.height(); ++y)
+        for (int x = 0; x < crop.width(); ++x)
+            if (mask.at(crop.x() + x, crop.y() + y))
+                result.set(x, y, true);
+    return result;
+}
 
 int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
                   const MessageSink &send)
@@ -149,93 +306,379 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
         record = fallback;
     }
 
-    // Hash only the record the engine will load, not every manifest model.
-    if (!registry->verifyFiles({record->id}, &error)) {
+    // Repair jobs need a resolved inpaint record; tracking-only jobs do not.
+    const AiModelRecord *inpaintRecord = nullptr;
+    if (!spec.trackingOnly) {
+        inpaintRecord = resolveInpaintRecord(*registry, spec);
+        if (!inpaintRecord || !inpaintRecord->isInpaint()) {
+            return modelUnavailable(
+                QStringLiteral("修复模型不可用：%1。").arg(spec.inpaintModelId));
+        }
+    }
+
+    // Hash only the records the engine will actually load.
+    QStringList verifyIds{record->id};
+    if (inpaintRecord)
+        verifyIds.append(inpaintRecord->id);
+    if (!registry->verifyFiles(verifyIds, &error)) {
         return modelUnavailable(
             QStringLiteral("模型文件校验失败：%1").arg(error));
     }
 
-    TrackingConfig config;
-    config.io = record->io;
-    config.allowDml = false;
-    config.allowCpu = true;
-    for (auto it = record->files.constBegin(); it != record->files.constEnd();
-         ++it) {
-        if (!it.value().path.endsWith(QLatin1String(".onnx"),
-                                      Qt::CaseInsensitive)) {
-            continue;
-        }
-        config.partPaths.insert(
-            it.key(), QDir(registry->rootDir()).filePath(it.value().path));
-    }
-    for (const QString &part :
-         {QStringLiteral("image_encoder"), QStringLiteral("prompt_encoder"),
-          QStringLiteral("mask_decoder")}) {
-        if (!config.partPaths.contains(part)) {
-            return modelUnavailable(
-                QStringLiteral("跟踪模型缺少组件：%1。").arg(part));
-        }
-    }
-
-    Sam2Tracker tracker;
-    if (!tracker.initialize(config, &error)) {
-        return modelUnavailable(
-            QStringLiteral("无法加载跟踪模型：%1").arg(error));
-    }
-
-    TrackingPipeline pipeline;
-    pipeline.setTracker(&tracker);
-
     CommandPoller poller(socket);
     bool paused = false;
-    TrackingRunCallbacks callbacks;
-    callbacks.event = [&send](const QJsonObject &message) { send(message); };
-    callbacks.cancel = [&]() -> bool {
-        if (poller.poll(paused))
-            return true;
-        while (paused) {
-            if (poller.poll(paused))
-                return true;
-            if (!paused)
-                break;
-            QThread::msleep(20);
-        }
-        return false;
-    };
 
-    const TrackingRunResult result = pipeline.run(spec, callbacks);
-    if (result.cancelled) {
+    // A redo job reuses masks written by an earlier tracking run. Tracking-only
+    // jobs always track, even when a redo range is present.
+    const bool redo = !spec.trackingOnly && spec.redoFirstFrame >= 0;
+    TrackingRunResult trackingResult;
+    if (!redo) {
+        TrackingConfig config;
+        config.io = record->io;
+        config.allowDml = false;
+        config.allowCpu = true;
+        for (auto it = record->files.constBegin();
+             it != record->files.constEnd(); ++it) {
+            if (!it.value().path.endsWith(QLatin1String(".onnx"),
+                                          Qt::CaseInsensitive)) {
+                continue;
+            }
+            config.partPaths.insert(
+                it.key(), QDir(registry->rootDir()).filePath(it.value().path));
+        }
+        for (const QString &part :
+             {QStringLiteral("image_encoder"),
+              QStringLiteral("prompt_encoder"),
+              QStringLiteral("mask_decoder")}) {
+            if (!config.partPaths.contains(part)) {
+                return modelUnavailable(
+                    QStringLiteral("跟踪模型缺少组件：%1。").arg(part));
+            }
+        }
+
+        Sam2Tracker tracker;
+        if (!tracker.initialize(config, &error)) {
+            return modelUnavailable(
+                QStringLiteral("无法加载跟踪模型：%1").arg(error));
+        }
+
+        TrackingPipeline trackingPipeline;
+        trackingPipeline.setTracker(&tracker);
+        TrackingRunCallbacks callbacks;
+        callbacks.event = [&send](QJsonObject message) {
+            if (message.value(QStringLiteral("event")).toString()
+                == QLatin1String("progress")) {
+                const double percent =
+                    message.value(QStringLiteral("percent")).toDouble();
+                message.insert(QStringLiteral("percent"),
+                               percent * double(kTrackingPercent) / 100.0);
+            }
+            send(message);
+        };
+        callbacks.cancel = [&]() { return pollCommands(poller, paused); };
+
+        trackingResult = trackingPipeline.run(spec, callbacks);
+        if (trackingResult.cancelled) {
+            send(QJsonObject{
+                {QStringLiteral("event"), QStringLiteral("cancelled")},
+                {QStringLiteral("completedFrames"),
+                 trackingResult.completedFrames},
+                {QStringLiteral("confidenceHash"),
+                 trackingResult.confidenceHash},
+                {QStringLiteral("trackingState"),
+                 removalTrackingStateToString(trackingResult.state)}});
+            return 0;
+        }
+        if (!trackingResult.ok) {
+            send(QJsonObject{
+                {QStringLiteral("event"), QStringLiteral("error")},
+                {QStringLiteral("code"), QStringLiteral("tracking_failed")},
+                {QStringLiteral("message"), trackingResult.error}});
+            return 4;
+        }
+    }
+
+    if (spec.trackingOnly) {
         send(QJsonObject{
-            {QStringLiteral("event"), QStringLiteral("cancelled")},
-            {QStringLiteral("completedFrames"), result.completedFrames},
-            {QStringLiteral("confidenceHash"), result.confidenceHash},
+            {QStringLiteral("event"), QStringLiteral("done")},
+            {QStringLiteral("cacheKey"), spec.cacheKey},
+            {QStringLiteral("confidenceHash"), trackingResult.confidenceHash},
             {QStringLiteral("trackingState"),
-             removalTrackingStateToString(result.state)}});
+             removalTrackingStateToString(trackingResult.state)},
+            {QStringLiteral("completedFrames"),
+             trackingResult.completedFrames}});
         return 0;
     }
-    if (!result.ok) {
+
+    const auto repairFailed = [&](const QString &message) {
         send(QJsonObject{
             {QStringLiteral("event"), QStringLiteral("error")},
-            {QStringLiteral("code"), QStringLiteral("tracking_failed")},
-            {QStringLiteral("message"), result.error}});
-        return 4;
-    }
-    if (!spec.trackingOnly) {
-        send(QJsonObject{
-            {QStringLiteral("event"), QStringLiteral("error")},
-            {QStringLiteral("code"), QStringLiteral("inpaint_unavailable")},
-            {QStringLiteral("message"),
-             QStringLiteral("修复流水线尚未实现。")}});
+            {QStringLiteral("code"), QStringLiteral("inpaint_failed")},
+            {QStringLiteral("message"), message}});
         return 5;
+    };
+
+    // spec.cacheDir is "<root>/<cacheKey>"; the engine writes chunks and the
+    // manifest through RemovalCache so hashes match the parent exactly.
+    const QString cleanCacheDir =
+        QDir::cleanPath(QDir(spec.cacheDir).absolutePath());
+    const QFileInfo cacheInfo(cleanCacheDir);
+    if (cacheInfo.fileName() != spec.cacheKey) {
+        return repairFailed(
+            QStringLiteral("修复缓存目录必须以缓存键命名：%1。")
+                .arg(spec.cacheDir));
+    }
+    RemovalCache cache(cacheInfo.absolutePath());
+
+    FrameReader reader;
+    if (!reader.open(spec.assetPath, spec.fps, spec.sourceInUs,
+                     spec.sourceOutUs, QSize(spec.width, spec.height),
+                     &error)) {
+        return repairFailed(
+            QStringLiteral("无法读取修复源帧：%1").arg(error));
+    }
+    const int64_t requestedFrames =
+        microsToFrames(spec.sourceOutUs - spec.sourceInUs, spec.fps);
+    int totalFrames =
+        int(std::min<int64_t>(requestedFrames, reader.frameCount()));
+    if (totalFrames <= 0)
+        return repairFailed(QStringLiteral("修复帧数为零。"));
+
+    std::unique_ptr<Inpainter> inpainter;
+    const QString inpaintPath = firstOnnxPath(*registry, *inpaintRecord);
+    if (inpaintPath.isEmpty())
+        return modelUnavailable(QStringLiteral("修复模型缺少 ONNX 文件。"));
+    if (isLamaRecord(*inpaintRecord)) {
+        inpainter = std::make_unique<LamaInpainter>(inpaintPath, 0);
+    } else {
+        inpainter = std::make_unique<MiGanInpainter>(
+            inpaintPath, 0, /*allowDml=*/true, /*allowCpu=*/true);
+    }
+    if (!inpainter->isReady()) {
+        return modelUnavailable(
+            QStringLiteral("无法加载修复模型：%1").arg(inpainter->lastError()));
+    }
+
+    InpaintPipeline pipeline;
+    pipeline.setInpainter(std::move(inpainter));
+
+    std::optional<RemovalCacheManifest> existing;
+    if (spec.resume || redo)
+        existing = cache.readManifest(spec.cacheKey, nullptr);
+
+    QMap<int, RemovalCacheChunk> manifestChunks;
+    if (existing) {
+        for (const RemovalCacheChunk &chunk : existing->chunks)
+            manifestChunks.insert(chunk.index, chunk);
+    }
+
+    const int chunkCount = (totalFrames + kRepairChunkFrames - 1)
+        / kRepairChunkFrames;
+    QSet<int> repairChunks;
+    if (redo) {
+        const int firstChunk =
+            std::clamp(spec.redoFirstFrame / kRepairChunkFrames, 0,
+                       chunkCount - 1);
+        const int lastChunk =
+            std::clamp(spec.redoLastFrame / kRepairChunkFrames, 0,
+                       chunkCount - 1);
+        for (int chunk = firstChunk; chunk <= lastChunk; ++chunk)
+            repairChunks.insert(chunk);
+    } else {
+        for (int chunk = 0; chunk < chunkCount; ++chunk)
+            repairChunks.insert(chunk);
+    }
+
+    QElapsedTimer repairClock;
+    repairClock.start();
+    int processedFrames = 0;
+    bool cancelled = false;
+
+    for (int chunk = 0; chunk < chunkCount; ++chunk) {
+        if (!repairChunks.contains(chunk))
+            continue;
+
+        const int firstFrame = chunk * kRepairChunkFrames;
+        const int framesInChunk =
+            std::min(kRepairChunkFrames, totalFrames - firstFrame);
+
+        if (pollCommands(poller, paused)) {
+            cancelled = true;
+            break;
+        }
+
+        // Resume skips chunks the manifest already records as complete and
+        // whose directory is still present. A redo range always rewrites.
+        const QString chunkIndexPath =
+            QDir(cache.cacheDir(spec.cacheKey))
+                .filePath(QStringLiteral("chunks/%1/index.json").arg(chunk));
+        if (spec.resume && !redo && manifestChunks.contains(chunk)
+            && QFileInfo::exists(chunkIndexPath)) {
+            processedFrames += framesInChunk;
+            sendRepairProgress(send, firstFrame + framesInChunk - 1,
+                               totalFrames, processedFrames, repairClock);
+            continue;
+        }
+
+        QList<QImage> frames;
+        QList<BinaryMask> masks;
+        frames.reserve(framesInChunk);
+        masks.reserve(framesInChunk);
+        for (int i = 0; i < framesInChunk; ++i) {
+            const int globalFrame = firstFrame + i;
+            QString frameError;
+            QImage frame = reader.readFrame(globalFrame, &frameError);
+            if (frame.isNull()) {
+                return repairFailed(frameError.isEmpty()
+                                        ? QStringLiteral("读取修复帧失败。")
+                                        : frameError);
+            }
+            auto mask = readFrameMask(spec, globalFrame, &frameError);
+            if (!mask) {
+                return repairFailed(frameError.isEmpty()
+                                        ? QStringLiteral("读取跟踪遮罩失败。")
+                                        : frameError);
+            }
+            frames.append(frame);
+            masks.append(*mask);
+        }
+
+        const int featherPx = featherForChunk(spec, firstFrame);
+        QString repairError;
+        auto patches = pipeline.repairChunk(
+            frames, masks, spec.parameters, featherPx,
+            [&](int index, const QString &) {
+                if (pollCommands(poller, paused))
+                    return false;
+                sendRepairProgress(send, firstFrame + index, totalFrames,
+                                   processedFrames + index, repairClock);
+                return true;
+            },
+            &repairError);
+        if (!patches) {
+            if (pipeline.wasCancelled()) {
+                cancelled = true;
+                break;
+            }
+            return repairFailed(repairError.isEmpty()
+                                    ? QStringLiteral("修复推理失败。")
+                                    : repairError);
+        }
+
+        // Only frames with a non-empty mask produce a cache entry. The rest
+        // are transparent patches returned by repairChunk and filtered here.
+        QList<int> patchFrames;
+        QList<int> patchIndices;
+        QList<QImage> patchImages;
+        QList<QRect> crops;
+        QList<QPoint> centroids;
+        for (int i = 0; i < framesInChunk; ++i) {
+            if (!maskHasPixels(masks.at(i)))
+                continue;
+            patchFrames.append(firstFrame + i);
+            patchIndices.append(i);
+            patchImages.append(patches->at(i).rgba);
+            crops.append(patches->at(i).crop);
+            centroids.append(MaskEditor::contentBounds(masks.at(i)).center());
+        }
+
+        if (!patchImages.isEmpty()) {
+            if (spec.parameters.temporalStabilization
+                && patchImages.size() > 1) {
+                TemporalStabilizer::stabilize(
+                    patchImages, crops, centroids,
+                    spec.parameters.stabilizationStrength);
+            }
+            // Second colour match after stabilization so the median blend
+            // cannot introduce a global tint.
+            for (int i = 0; i < patchImages.size(); ++i) {
+                const QImage sourceCrop =
+                    frames.at(patchIndices.at(i)).copy(crops.at(i));
+                const BinaryMask maskCrop =
+                    cropBinaryMask(masks.at(patchIndices.at(i)), crops.at(i));
+                InpaintPipeline::colorMatch(sourceCrop, &patchImages[i],
+                                            maskCrop);
+            }
+
+            RemovalChunkIndex written;
+            if (!cache.writeChunkFrames(spec.cacheKey, chunk, patchFrames,
+                                        patchImages, crops, &written, &error)) {
+                return repairFailed(error);
+            }
+            manifestChunks.insert(
+                chunk, RemovalCacheChunk{chunk, firstFrame, framesInChunk,
+                                         written.treeSha256});
+        } else {
+            manifestChunks.remove(chunk);
+            // A redo of a chunk that now has no holes must not leave the old
+            // patch directory behind.
+            QDir(QDir(cache.cacheDir(spec.cacheKey))
+                     .filePath(QStringLiteral("chunks/%1").arg(chunk)))
+                .removeRecursively();
+        }
+
+        processedFrames += framesInChunk;
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("chunkDone")},
+            {QStringLiteral("stage"), QStringLiteral("repair")},
+            {QStringLiteral("chunk"), chunk},
+            {QStringLiteral("frame"), firstFrame + framesInChunk - 1},
+            {QStringLiteral("completedFrames"), processedFrames}});
+        sendRepairProgress(send, firstFrame + framesInChunk - 1, totalFrames,
+                           processedFrames, repairClock);
+    }
+
+    RemovalCacheManifest manifest;
+    manifest.schema = QStringLiteral("m4.removal.cache.1");
+    manifest.cacheKey = spec.cacheKey;
+    manifest.clipId = spec.clipId;
+    manifest.sourceInUs = spec.sourceInUs;
+    manifest.sourceOutUs = spec.sourceOutUs;
+    manifest.width = spec.width;
+    manifest.height = spec.height;
+    manifest.fps = spec.fps;
+    manifest.trackingModelId = record->id;
+    manifest.inpaintModelId = inpaintRecord->id;
+    manifest.pipelineVersion = QStringLiteral("m4.0");
+    manifest.status = cancelled ? QStringLiteral("partial")
+                                : QStringLiteral("complete");
+    manifest.totalFrames = totalFrames;
+    manifest.createdAt =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    for (auto it = manifestChunks.constBegin();
+         it != manifestChunks.constEnd(); ++it) {
+        manifest.chunks.append(it.value());
+    }
+    if (!cache.writeManifest(manifest, &error)) {
+        return repairFailed(
+            QStringLiteral("无法写入修复缓存清单：%1").arg(error));
+    }
+
+    RemovalTrackingState state = trackingResult.state;
+    if (redo) {
+        state = (existing && existing->status == QLatin1String("partial"))
+            ? RemovalTrackingState::Partial
+            : RemovalTrackingState::Complete;
+    }
+
+    if (cancelled) {
+        send(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("cancelled")},
+            {QStringLiteral("completedFrames"), processedFrames},
+            {QStringLiteral("confidenceHash"),
+             trackingResult.confidenceHash},
+            {QStringLiteral("trackingState"),
+             removalTrackingStateToString(state)}});
+        return 0;
     }
 
     send(QJsonObject{
         {QStringLiteral("event"), QStringLiteral("done")},
         {QStringLiteral("cacheKey"), spec.cacheKey},
-        {QStringLiteral("confidenceHash"), result.confidenceHash},
+        {QStringLiteral("confidenceHash"), trackingResult.confidenceHash},
         {QStringLiteral("trackingState"),
-         removalTrackingStateToString(result.state)},
-        {QStringLiteral("completedFrames"), result.completedFrames}});
+         removalTrackingStateToString(state)},
+        {QStringLiteral("completedFrames"), totalFrames}});
     return 0;
 }
 

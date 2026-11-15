@@ -157,6 +157,9 @@ add_executable(ai_tests
   ai/FlowPropagatorTest.cpp
   ai/ModelRegistryTest.cpp
   ai/TrackingPipelineTest.cpp
+  ai/InpaintPipelineTest.cpp
+  ai/InpaintModelContractTest.cpp
+  ai/TemporalStabilizerTest.cpp
   TestGuiMain.cpp)
 target_include_directories(ai_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ai_tests PRIVATE

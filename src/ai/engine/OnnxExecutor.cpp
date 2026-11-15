@@ -384,6 +384,10 @@ bool OnnxExecutor::run(const QString &partName,
                     memoryInfo,
                     const_cast<int32_t *>(tensor.int32Data.data()),
                     tensor.int32Data.size(), shape.data(), shape.size()));
+            } else if (tensor.type == OnnxTensor::DataType::UInt8) {
+                inputValues.push_back(Ort::Value::CreateTensor<uint8_t>(
+                    memoryInfo, const_cast<uint8_t *>(tensor.uint8Data.data()),
+                    tensor.uint8Data.size(), shape.data(), shape.size()));
             } else {
                 inputValues.push_back(Ort::Value::CreateTensor<float>(
                     memoryInfo, const_cast<float *>(tensor.floatData.data()),
@@ -441,6 +445,11 @@ bool OnnxExecutor::run(const QString &partName,
                 const float *data = runOutputs[i].GetTensorData<float>();
                 const size_t count = info.GetElementCount();
                 output.floatData.assign(data, data + count);
+            } else if (elementType == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+                output.type = OnnxOutput::DataType::UInt8;
+                const uint8_t *data = runOutputs[i].GetTensorData<uint8_t>();
+                const size_t count = info.GetElementCount();
+                output.uint8Data.assign(data, data + count);
             } else {
                 if (error) {
                     *error = QStringLiteral("跟踪模型输出类型不符合预期。");

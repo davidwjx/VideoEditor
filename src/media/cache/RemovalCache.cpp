@@ -261,13 +261,38 @@ bool RemovalCache::writeChunk(const QString &cacheKey, int chunkIndex,
                               const QList<QRect> &crops,
                               RemovalChunkIndex *written, QString *error)
 {
-    if (patches.size() != crops.size()) {
+    if (firstFrame < 0) {
+        setError(error, QStringLiteral("修复缓存分块序号无效。"));
+        return false;
+    }
+    QList<int> frameIndices;
+    frameIndices.reserve(patches.size());
+    for (int i = 0; i < patches.size(); ++i)
+        frameIndices.append(firstFrame + i);
+    return writeChunkFrames(cacheKey, chunkIndex, frameIndices, patches, crops,
+                            written, error);
+}
+
+bool RemovalCache::writeChunkFrames(const QString &cacheKey, int chunkIndex,
+                                    const QList<int> &frameIndices,
+                                    const QList<QImage> &patches,
+                                    const QList<QRect> &crops,
+                                    RemovalChunkIndex *written, QString *error)
+{
+    if (patches.size() != crops.size()
+        || patches.size() != frameIndices.size()) {
         setError(error, QStringLiteral("修复缓存分块写入失败：帧与裁剪区域数量不一致。"));
         return false;
     }
-    if (chunkIndex < 0 || firstFrame < 0) {
+    if (chunkIndex < 0) {
         setError(error, QStringLiteral("修复缓存分块序号无效。"));
         return false;
+    }
+    for (int frameIndex : frameIndices) {
+        if (frameIndex < 0) {
+            setError(error, QStringLiteral("修复缓存分块帧序号无效。"));
+            return false;
+        }
     }
     if (!ensureDir(cacheKey, error))
         return false;
@@ -292,7 +317,8 @@ bool RemovalCache::writeChunk(const QString &cacheKey, int chunkIndex,
 
     RemovalChunkIndex index;
     index.index = chunkIndex;
-    index.firstFrame = firstFrame;
+    index.firstFrame =
+        frameIndices.isEmpty() ? chunkIndex * 30 : frameIndices.first();
 
     for (int i = 0; i < patches.size(); ++i) {
         // Patches carry feathered alpha; normalize before PNG so an
@@ -310,7 +336,7 @@ bool RemovalCache::writeChunk(const QString &cacheKey, int chunkIndex,
             return fail(QStringLiteral("修复缓存分块写入失败：无法保存第 %1 帧。").arg(i));
 
         RemovalChunkFrame frame;
-        frame.frame = firstFrame + i;
+        frame.frame = frameIndices.at(i);
         frame.crop = crops.at(i);
         frame.file = fileName;
         frame.sha256 = fileSha256(path);

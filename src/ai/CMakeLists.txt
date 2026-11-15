@@ -50,12 +50,15 @@ if(VIDEOEDITOR_ENABLE_AI)
      AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/lib/onnxruntime.lib"
      AND EXISTS "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/bin/onnxruntime.dll")
     set(VIDEOEDITOR_AI_HAVE_ORT ON)
-    # Only the Task 5 engine sources are compiled here; Tasks 6's inpainting
-    # and stabilization files do not exist yet.
+    # ORT-only engine sources: tracking, inpainting and temporal stabilization.
     target_sources(videoeditor_ai PRIVATE
       engine/OnnxExecutor.h engine/OnnxExecutor.cpp
       engine/Sam2Tracker.h engine/Sam2Tracker.cpp
-      engine/TrackingPipeline.h engine/TrackingPipeline.cpp)
+      engine/TrackingPipeline.h engine/TrackingPipeline.cpp
+      engine/InpaintPipeline.h engine/InpaintPipeline.cpp
+      engine/MiGanInpainter.h engine/MiGanInpainter.cpp
+      engine/LamaInpainter.h engine/LamaInpainter.cpp
+      engine/TemporalStabilizer.h engine/TemporalStabilizer.cpp)
     target_include_directories(videoeditor_ai PRIVATE
       "${VIDEOEDITOR_ONNXRUNTIME_ROOT}/include")
     target_link_libraries(videoeditor_ai PRIVATE

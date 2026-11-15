@@ -18,21 +18,23 @@ struct EpConfig {
 };
 
 struct OnnxTensor {
-    enum class DataType { Float32, Int32 };
+    enum class DataType { Float32, Int32, UInt8 };
 
     DataType type = DataType::Float32;
     std::vector<int64_t> shape;
     std::vector<float> floatData;
     std::vector<int32_t> int32Data;
+    std::vector<uint8_t> uint8Data;
 };
 
 struct OnnxOutput {
-    enum class DataType { Float32, Int32 };
+    enum class DataType { Float32, Int32, UInt8 };
 
     DataType type = DataType::Float32;
     std::vector<int64_t> shape;
     std::vector<float> floatData;
     std::vector<int32_t> int32Data;
+    std::vector<uint8_t> uint8Data;
 };
 
 // Thin CPU-first ONNX Runtime session wrapper. DirectML is optional and only

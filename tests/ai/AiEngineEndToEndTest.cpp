@@ -2,9 +2,12 @@
 
 #if defined(VIDEOEDITOR_HAVE_ORT) && VIDEOEDITOR_HAVE_ORT
 
+#include <QColor>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QImage>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
@@ -14,9 +17,12 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <iostream>
+
 #include "AiProtocol.h"
 #include "LocalAiTransport.h"
 #include "MaskCodec.h"
+#include "RemovalCache.h"
 
 using namespace VideoEditor;
 
@@ -322,6 +328,205 @@ TEST(AiEngineEndToEnd, PauseResumeThenCancelYieldsPartial)
     EXPECT_EQ(finishedArgs.at(0).toInt(), 0);
     EXPECT_EQ(finishedArgs.at(1).value<QProcess::ExitStatus>(),
               QProcess::NormalExit);
+}
+
+TEST(AiEngineEndToEnd, RepairJobWritesChunkAndManifest)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (!skipUnlessEngineAvailable())
+        GTEST_SKIP() << "VisionAiEngine.exe, h264.mp4 or "
+                        "VIDEOEDITOR_M4_MODELS is unavailable";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString cacheRoot = temp.filePath(QStringLiteral("cache"));
+    const QString cacheKey = QString(64, QLatin1Char('a'));
+    const QString cacheDir = QDir(cacheRoot).filePath(cacheKey);
+    const QString maskHash =
+        writeMaskSidecar(sidecarRoot, centeredMask(640, 360));
+    ASSERT_EQ(maskHash.size(), 64);
+
+    // Four frames keeps the MI-GAN run short; the full suite must not depend
+    // on long inference.
+    AiJobSpec spec = makeEngineSpec(fixturePath(), modelsDir, sidecarRoot,
+                                    cacheDir, 4, maskHash);
+    spec.trackingOnly = false;
+    spec.inpaintModelId = QStringLiteral("migan-512");
+    spec.parameters.mode = RepairMode::Fast;
+    spec.parameters.temporalStabilization = true;
+    EngineEnvironmentGuard guard;
+
+    LocalAiTransport transport;
+    QSignalSpy messages(&transport, &AiTransport::message);
+    QSignalSpy finished(&transport, &AiTransport::finished);
+    QString error;
+    QElapsedTimer clock;
+    clock.start();
+    ASSERT_TRUE(transport.start(spec, &error)) << error.toStdString();
+
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 90000);
+    std::cout << "Engine repair E2E (4 frames, MI-GAN): " << clock.elapsed()
+              << " ms" << std::endl;
+    QJsonObject done;
+    ASSERT_TRUE(sawEvent(messages, QStringLiteral("done"), &done));
+    EXPECT_EQ(done.value(QStringLiteral("cacheKey")).toString(),
+              spec.cacheKey);
+    EXPECT_EQ(done.value(QStringLiteral("completedFrames")).toInt(), 4);
+
+    const QList<QVariant> finishedArgs = finished.at(0);
+    EXPECT_EQ(finishedArgs.at(0).toInt(), 0);
+    EXPECT_EQ(finishedArgs.at(1).value<QProcess::ExitStatus>(),
+              QProcess::NormalExit);
+
+    RemovalCache cache(cacheRoot);
+    QString cacheError;
+    const auto manifest = cache.readManifest(cacheKey, &cacheError);
+    ASSERT_TRUE(manifest.has_value()) << cacheError.toStdString();
+    EXPECT_EQ(manifest->status, QStringLiteral("complete"));
+    EXPECT_EQ(manifest->totalFrames, 4);
+    EXPECT_EQ(manifest->inpaintModelId, QStringLiteral("migan-512"));
+    ASSERT_FALSE(manifest->chunks.isEmpty());
+    EXPECT_EQ(manifest->chunks.first().index, 0);
+    EXPECT_EQ(manifest->chunks.first().frameCount, 4);
+    EXPECT_TRUE(cache.verify(cacheKey, &cacheError))
+        << cacheError.toStdString();
+
+    const auto index =
+        cache.readChunkIndex(cacheKey, manifest->chunks.first().index,
+                             &cacheError);
+    ASSERT_TRUE(index.has_value()) << cacheError.toStdString();
+    ASSERT_FALSE(index->frames.isEmpty());
+    const QImage patch = cache.readFrameImage(cacheKey, index->frames.first(),
+                                              &cacheError);
+    ASSERT_FALSE(patch.isNull()) << cacheError.toStdString();
+    bool alphaPresent = false;
+    for (int y = 0; y < patch.height() && !alphaPresent; ++y)
+        for (int x = 0; x < patch.width() && !alphaPresent; ++x)
+            alphaPresent = qAlpha(patch.pixel(x, y)) > 0;
+    EXPECT_TRUE(alphaPresent);
+}
+
+TEST(AiEngineEndToEnd, ResumeSkipsChunksAlreadyInManifest)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (!skipUnlessEngineAvailable())
+        GTEST_SKIP() << "VisionAiEngine.exe, h264.mp4 or "
+                        "VIDEOEDITOR_M4_MODELS is unavailable";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString cacheRoot = temp.filePath(QStringLiteral("cache"));
+    const QString cacheKey = QString(64, QLatin1Char('a'));
+    const QString cacheDir = QDir(cacheRoot).filePath(cacheKey);
+    const QString maskHash =
+        writeMaskSidecar(sidecarRoot, centeredMask(640, 360));
+    ASSERT_EQ(maskHash.size(), 64);
+
+    AiJobSpec spec = makeEngineSpec(fixturePath(), modelsDir, sidecarRoot,
+                                    cacheDir, 2, maskHash);
+    spec.trackingOnly = false;
+    spec.inpaintModelId = QStringLiteral("migan-512");
+    EngineEnvironmentGuard guard;
+
+    {
+        LocalAiTransport transport;
+        QSignalSpy messages(&transport, &AiTransport::message);
+        QSignalSpy finished(&transport, &AiTransport::finished);
+        QString error;
+        ASSERT_TRUE(transport.start(spec, &error)) << error.toStdString();
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 90000);
+        EXPECT_TRUE(sawEvent(messages, QStringLiteral("done")));
+    }
+
+    // Remove the tracking masks. A resumed job that skipped the completed
+    // chunk never needs them again; re-running the chunk would fail here.
+    ASSERT_TRUE(QDir(QDir(cacheDir).filePath(QStringLiteral("tracking/masks")))
+                    .removeRecursively());
+
+    AiJobSpec resumed = spec;
+    resumed.resume = true;
+    LocalAiTransport transport;
+    QSignalSpy messages(&transport, &AiTransport::message);
+    QSignalSpy finished(&transport, &AiTransport::finished);
+    QString error;
+    ASSERT_TRUE(transport.start(resumed, &error)) << error.toStdString();
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 30000);
+    QJsonObject done;
+    ASSERT_TRUE(sawEvent(messages, QStringLiteral("done"), &done));
+    EXPECT_EQ(done.value(QStringLiteral("completedFrames")).toInt(), 2);
+
+    RemovalCache cache(cacheRoot);
+    const auto manifest = cache.readManifest(cacheKey, &error);
+    ASSERT_TRUE(manifest.has_value()) << error.toStdString();
+    EXPECT_EQ(manifest->status, QStringLiteral("complete"));
+    EXPECT_FALSE(manifest->chunks.isEmpty());
+    EXPECT_TRUE(cache.verify(cacheKey, &error)) << error.toStdString();
+}
+
+TEST(AiEngineEndToEnd, CancelDuringRepairWritesPartialManifest)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (!skipUnlessEngineAvailable())
+        GTEST_SKIP() << "VisionAiEngine.exe, h264.mp4 or "
+                        "VIDEOEDITOR_M4_MODELS is unavailable";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString cacheRoot = temp.filePath(QStringLiteral("cache"));
+    const QString cacheKey = QString(64, QLatin1Char('b'));
+    const QString cacheDir = QDir(cacheRoot).filePath(cacheKey);
+    const QString maskHash =
+        writeMaskSidecar(sidecarRoot, centeredMask(640, 360));
+    ASSERT_EQ(maskHash.size(), 64);
+
+    AiJobSpec spec = makeEngineSpec(fixturePath(), modelsDir, sidecarRoot,
+                                    cacheDir, 2, maskHash);
+    spec.trackingOnly = false;
+    spec.inpaintModelId = QStringLiteral("migan-512");
+    spec.cacheKey = cacheKey;
+    EngineEnvironmentGuard guard;
+
+    LocalAiTransport transport;
+    QSignalSpy messages(&transport, &AiTransport::message);
+    QSignalSpy finished(&transport, &AiTransport::finished);
+    QString error;
+    ASSERT_TRUE(transport.start(spec, &error)) << error.toStdString();
+
+    // Wait until the repair stage starts (tracking is done), then cancel.
+    QTRY_VERIFY_WITH_TIMEOUT(
+        [&messages]() {
+            for (const QList<QVariant> &arguments : messages) {
+                const QJsonObject message = arguments.at(0).toJsonObject();
+                if (message.value(QStringLiteral("event")).toString()
+                        == QLatin1String("progress")
+                    && message.value(QStringLiteral("stage")).toString()
+                        == QLatin1String("repair")) {
+                    return true;
+                }
+            }
+            return false;
+        }(),
+        90000);
+    transport.cancel();
+
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 30000);
+    QJsonObject cancelled;
+    ASSERT_TRUE(
+        sawEvent(messages, QStringLiteral("cancelled"), &cancelled));
+    const QString cancelledState =
+        cancelled.value(QStringLiteral("trackingState")).toString();
+    EXPECT_TRUE(cancelledState == QLatin1String("complete")
+                || cancelledState == QLatin1String("lowConfidence"))
+        << cancelledState.toStdString();
+
+    RemovalCache cache(cacheRoot);
+    const auto manifest = cache.readManifest(cacheKey, &error);
+    ASSERT_TRUE(manifest.has_value()) << error.toStdString();
+    EXPECT_EQ(manifest->status, QStringLiteral("partial"));
+    EXPECT_LE(manifest->chunks.size(), 1);
 }
 
 #endif // VIDEOEDITOR_HAVE_ORT

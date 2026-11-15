@@ -69,6 +69,14 @@ public:
     bool writeChunk(const QString &cacheKey, int chunkIndex, int firstFrame,
                     const QList<QImage> &patches, const QList<QRect> &crops,
                     RemovalChunkIndex *written, QString *error = nullptr);
+    // Sparse variant: explicit global frame indices per patch. Used by the
+    // engine because only frames with a non-empty mask produce a patch.
+    bool writeChunkFrames(const QString &cacheKey, int chunkIndex,
+                          const QList<int> &frameIndices,
+                          const QList<QImage> &patches,
+                          const QList<QRect> &crops,
+                          RemovalChunkIndex *written,
+                          QString *error = nullptr);
     bool writeManifest(const RemovalCacheManifest &manifest,
                        QString *error = nullptr);
     std::optional<RemovalCacheManifest> readManifest(
