@@ -11,7 +11,9 @@
 #include "AppInfo.h"
 #include "AudioEngine.h"
 #include "ExportController.h"
+#include "MaskImageProvider.h"
 #include "PreviewController.h"
+#include "RemovalController.h"
 #include "TimelineController.h"
 #include "VideoPreviewItem.h"
 #include "WaveformImageProvider.h"
@@ -66,11 +68,18 @@ int main(int argc, char *argv[])
     engine.addImageProvider(
         QStringLiteral("waveform"),
         new VideoEditor::WaveformImageProvider(controller.waveforms()));
+    // The engine owns the provider; the controller keeps a non-owning pointer
+    // so every mask edit can replace the overlay image.
+    auto *maskProvider = new VideoEditor::MaskImageProvider();
+    controller.removal()->setMaskImageProvider(maskProvider);
+    engine.addImageProvider(QStringLiteral("mask"), maskProvider);
     engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
     engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
                                              controller.preview());
     engine.rootContext()->setContextProperty(QStringLiteral("Timeline"),
                                              controller.timeline());
+    engine.rootContext()->setContextProperty(QStringLiteral("Removal"),
+                                             controller.removal());
     engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
                                              controller.audioEngine());
     engine.rootContext()->setContextProperty(QStringLiteral("Export"),

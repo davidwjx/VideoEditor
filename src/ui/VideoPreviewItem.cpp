@@ -32,12 +32,16 @@ void VideoPreviewItem::resetBridge()
     // shared resources before the first frame of the new media arrives.
     m_handles = {};
     m_pendingSize = QSize{};
+    const bool hadFrameSize = !m_frameSize.isEmpty();
+    m_frameSize = QSize{};
     m_pendingSlot = -1;
     m_pendingPts = 0;
     m_rotation = 0;
     m_abandoned = {};
     m_bridgeErrorReported = false;
     m_resetRequested.store(true);
+    if (hadFrameSize)
+        emit contentRectChanged();
     update();
 }
 
@@ -60,10 +64,21 @@ void VideoPreviewItem::submitFrame(int slot, const QSize &size,
     }
     m_pendingSlot = slot;
     m_pendingSize = size;
+    const bool frameSizeChanged = size != m_frameSize;
+    m_frameSize = size;
     m_rotation = rotationDegrees;
     m_pendingPts = ptsUs;
     m_hasPending = true;
+    if (frameSizeChanged)
+        emit contentRectChanged();
     update();
+}
+
+QRectF VideoPreviewItem::contentRect() const
+{
+    if (m_frameSize.isEmpty())
+        return boundingRect();
+    return aspectFitRect(QSizeF(m_frameSize));
 }
 
 QRectF VideoPreviewItem::aspectFitRect(const QSizeF &frameSize) const
@@ -81,8 +96,11 @@ void VideoPreviewItem::geometryChange(const QRectF &newGeometry,
                                       const QRectF &oldGeometry)
 {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
-    if (newGeometry.size() != oldGeometry.size())
+    if (newGeometry.size() != oldGeometry.size()) {
+        if (!m_frameSize.isEmpty())
+            emit contentRectChanged();
         update();
+    }
 }
 
 QSGNode *VideoPreviewItem::updatePaintNode(QSGNode *oldNode,

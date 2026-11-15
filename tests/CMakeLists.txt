@@ -64,6 +64,7 @@ gtest_discover_tests(media_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV
 add_executable(ui_tests
   ui/TimelineModelTest.cpp
   ui/TimelineControllerTest.cpp
+  ui/RemovalControllerTest.cpp
   ui/WaveformImageProviderTest.cpp
   ui/ExportControllerTest.cpp
   TestGuiMain.cpp)

@@ -29,6 +29,21 @@ Rectangle {
     property bool dragging: false
     property bool trimming: false
 
+    // Mask keyframes are read lazily from the removal controller; the document
+    // signal refreshes them after strokes, undo/redo and layer deletion.
+    property var removal: (typeof Removal !== "undefined") ? Removal : null
+    property var maskKeyframes: removal !== null
+                                ? removal.maskKeyframesForClip(itemId) : []
+
+    Connections {
+        target: clipItem.removal
+        function onLayerChanged() {
+            clipItem.maskKeyframes = clipItem.removal !== null
+                    ? clipItem.removal.maskKeyframesForClip(clipItem.itemId)
+                    : []
+        }
+    }
+
     x: startUs / 1e6 * timeline.pixelsPerSecond
     width: Math.max(8, durationUs / 1e6 * timeline.pixelsPerSecond)
     function restoreGeometry() {
@@ -221,6 +236,46 @@ Rectangle {
                 clipItem.restoreGeometry()
             }
             onCanceled: clipItem.restoreGeometry()
+        }
+    }
+
+    // Mask keyframe diamonds: one per keyframe of the clip's removal layer,
+    // positioned by source time inside the trimmed range. A click seeks there.
+    Repeater {
+        model: clipItem.maskKeyframes
+        delegate: Rectangle {
+            required property int index
+            required property var modelData
+
+            objectName: "mask-keyframe-" + clipItem.itemId + "-" + index
+            width: 6
+            height: 6
+            radius: 0
+            rotation: 45
+            color: "#ffb347"
+            border.color: "#2a1a00"
+            border.width: 1
+            y: clipItem.height - height - 3
+            x: {
+                const span = Math.max(1, clipItem.sourceOutUs
+                                      - clipItem.sourceInUs)
+                const fraction = (modelData.timeUs - clipItem.sourceInUs) / span
+                return Math.max(0, Math.min(clipItem.width - width,
+                                            fraction * clipItem.width))
+            }
+            z: 3
+
+            MouseArea {
+                anchors.fill: parent
+                anchors.margins: -3
+                onClicked: {
+                    const speed = Math.max(0.001, clipItem.speedMilli / 1000)
+                    App.seekTimeline(Math.round(
+                        clipItem.startUs
+                        + (modelData.timeUs - clipItem.sourceInUs) / speed))
+                    Timeline.selectClip(clipItem.itemId)
+                }
+            }
         }
     }
 }

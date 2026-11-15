@@ -21,6 +21,8 @@ qt_add_qml_module(VideoEditor
     TrackHeaderDelegate.qml
     InspectorPanel.qml
     SubtitlePanel.qml
+    RemovalPanel.qml
+    MaskEditorOverlay.qml
     ExportDialog.qml
 )
 target_link_libraries(VideoEditor PRIVATE Qt6::Quick Qt6::QuickControls2 videoeditor_app)

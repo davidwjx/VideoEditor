@@ -11,12 +11,14 @@
 #include "MediaListModel.h"
 #include "ProjectDocument.h"
 #include "ProjectStore.h"
+#include "RemovalController.h"
 #include "TimelineController.h"
 #include "WaveformService.h"
 
 namespace VideoEditor {
 
 class ExportController;
+class MaskSidecarStore;
 class PreviewController;
 class ProxyService;
 
@@ -28,6 +30,7 @@ class AppController : public QObject {
     Q_PROPERTY(VideoEditor::WaveformService *waveforms READ waveforms CONSTANT)
     Q_PROPERTY(VideoEditor::ExportController *exportController READ exportController
                    CONSTANT)
+    Q_PROPERTY(VideoEditor::RemovalController *removal READ removal CONSTANT)
     Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY undoStateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoStateChanged)
@@ -49,6 +52,7 @@ public:
     AudioEngine *audioEngine() const { return m_audio.get(); }
     WaveformService *waveforms() const { return m_waveforms; }
     ExportController *exportController() const { return m_export.get(); }
+    RemovalController *removal() const { return m_removal; }
     QString lastError() const { return m_lastError; }
     bool canUndo() const;
     bool canRedo() const;
@@ -131,6 +135,9 @@ private:
     std::unique_ptr<ExportController> m_export;
     std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<ProjectStore> m_store;
+    std::unique_ptr<MaskSidecarStore> m_maskSidecars;
+    RemovalController *m_removal = nullptr;
+    QString m_sidecarFallback;
     QTimer m_autosaveTimer;
     // Coalesces rapid edits into one preview/audio snapshot update so a drag
     // release or command burst does not queue a recomposition per command.

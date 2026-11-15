@@ -242,6 +242,12 @@ ColumnLayout {
         }
     }
 
+    // AI removal lives with the picture controls; audio clips have no mask.
+    RemovalPanel {
+        Layout.fillWidth: true
+        visible: inspector.hasClip() && !inspector.isAudioClip()
+    }
+
     // Audio first screen: volume, fades and mute are the three things a BGM
     // edit needs. Pan and keyframes stay under 高级.
     Label {

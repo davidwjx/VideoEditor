@@ -22,6 +22,7 @@
 #include "ExportController.h"
 #include "ExportEncoderCatalog.h"
 #include "ExportPipeline.h"
+#include "MaskSidecarStore.h"
 #include "MediaListModel.h"
 #include "MediaProbe.h"
 #include "PreviewController.h"
@@ -124,6 +125,28 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         m_syncingPlayhead = true;
         m_timeline->seekUs(m_preview->positionMs() * 1000);
         m_syncingPlayhead = false;
+    });
+
+    // Mask sidecars live next to the .veproj. Unsaved projects use a stable
+    // fallback so an in-progress mask edit survives until the first save.
+    // MaskSidecarStore appends "removal-sidecars/unsaved" to this base, which
+    // yields <AppDataLocation>/removal-sidecars/unsaved.
+    m_sidecarFallback =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    m_maskSidecars = std::make_unique<MaskSidecarStore>();
+    m_maskSidecars->setProjectPath(m_document->filePath(), m_sidecarFallback);
+    m_removal = new RemovalController(*m_document, *m_maskSidecars, this);
+    // Timeline position is authoritative for mask authoring; the preview clock
+    // mirrors it in timeline mode. The fallback keeps the controller useful
+    // when only the timeline controller exists (asset-mode preview).
+    m_removal->setPlayheadProvider([this]() -> qint64 {
+        if (m_preview && m_preview->timelineMode())
+            return m_preview->positionMs() * 1000;
+        return m_timeline ? m_timeline->positionUs() : 0;
+    });
+    connect(m_document, &ProjectDocument::projectReplaced, this, [this] {
+        m_maskSidecars->setProjectPath(m_document->filePath(),
+                                       m_sidecarFallback);
     });
 
     m_waveforms = new WaveformService(
@@ -496,6 +519,14 @@ void AppController::saveProject(const QUrl &url)
     if (!m_document->save(path, &error)) {
         setLastError(error);
         return;
+    }
+    // Masks authored before the first save live under the fallback root; move
+    // them next to the project so the saved file stays self-contained.
+    QString sidecarError;
+    if (!m_maskSidecars->relocateTo(path, &sidecarError)) {
+        if (!sidecarError.isEmpty())
+            setLastError(sidecarError);
+        m_maskSidecars->setProjectPath(path, m_sidecarFallback);
     }
     // The project on disk now supersedes any autosaved snapshot; keeping the
     // recovery file would let the next launch roll back edits saved after the

@@ -315,6 +315,13 @@ ApplicationWindow {
                     id: previewItem
                     anchors.fill: parent
                 }
+                // Preview-only mask editing surface. It maps brush/box
+                // coordinates through the video content rect and is never
+                // passed to the timeline compositor or export pipeline.
+                MaskEditorOverlay {
+                    anchors.fill: parent
+                    previewItem: previewItem
+                }
                 Label {
                     anchors.centerIn: parent
                     visible: !Preview.mediaName

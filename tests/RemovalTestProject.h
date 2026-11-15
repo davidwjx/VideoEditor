@@ -11,6 +11,8 @@ inline Project projectWithClip()
     info.width = 1920;
     info.height = 1080;
     info.supported = true;
+    info.hasVideo = true;
+    info.kind = MediaKind::Video;
     Project p;
     p.assets.append(Asset{QStringLiteral("asset-1"), info.path, info, {}});
     Track track;

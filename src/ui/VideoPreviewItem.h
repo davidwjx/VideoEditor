@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <QQuickItem>
+#include <QRectF>
 #include <QSize>
 
 #include "FrameBridge.h"
@@ -11,6 +12,10 @@ namespace VideoEditor {
 
 class VideoPreviewItem : public QQuickItem {
     Q_OBJECT
+    // Aspect-fit destination of the presented video inside this item. The mask
+    // editor maps pointer coordinates through this rectangle, never the whole
+    // item (letterbox bars are not part of the picture).
+    Q_PROPERTY(QRectF contentRect READ contentRect NOTIFY contentRectChanged)
 
 public:
     explicit VideoPreviewItem(QQuickItem *parent = nullptr);
@@ -24,9 +29,12 @@ public:
     void discardFrame(int slot);
     void resetBridge();
 
+    QRectF contentRect() const;
+
 signals:
     void framePresented(qint64 ptsUs);
     void errorOccurred(QString message);
+    void contentRectChanged();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode,
@@ -41,6 +49,7 @@ private:
     std::array<quintptr, 3> m_handles{};
     std::array<bool, 3> m_abandoned{};
     QSize m_pendingSize;
+    QSize m_frameSize;
     qint64 m_pendingPts = 0;
     int m_pendingSlot = -1;
     int m_rotation = 0;

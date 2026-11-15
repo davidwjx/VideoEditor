@@ -17,6 +17,10 @@ add_library(videoeditor_ui STATIC
   PreviewController.cpp
   WaveformImageProvider.h
   WaveformImageProvider.cpp
+  MaskImageProvider.h
+  MaskImageProvider.cpp
+  RemovalController.h
+  RemovalController.cpp
   ExportController.h
   ExportController.cpp
 )
