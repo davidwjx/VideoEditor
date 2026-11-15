@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QPointF>
 #include <QTemporaryDir>
 #include <QUrl>
 
@@ -15,6 +16,8 @@
 #include "MediaListModel.h"
 #include "PreviewController.h"
 #include "ProjectStore.h"
+#include "RemovalController.h"
+#include "RemovalTestProject.h"
 
 using namespace VideoEditor;
 
@@ -409,6 +412,71 @@ TEST(AppController, CorruptRecoveryKeepsPromptAndReportsError)
     EXPECT_TRUE(controller.lastError().contains(QStringLiteral("工程文件")));
     EXPECT_TRUE(QFileInfo::exists(recovery));
     EXPECT_TRUE(controller.recoveryAvailable());
+}
+
+TEST(AppController, SaveAbortsWhenSidecarRelocationFails)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    AppController controller(
+        nullptr, dir.filePath(QStringLiteral("recovery.json")),
+        nullSinkFactory(), dir.filePath(QStringLiteral("sidecars")));
+    controller.document()->setProject(projectWithClip());
+
+    controller.removal()->beginMask(QStringLiteral("clip-1"));
+    controller.removal()->beginStroke(10, false);
+    controller.removal()->continueStroke(QPointF(0.4, 0.4),
+                                         QPointF(0.6, 0.6));
+    controller.removal()->endStroke();
+    ASSERT_EQ(controller.document()->project().removalLayers.size(), 1);
+
+    // A file where the sidecar directory must be created makes the copy fail.
+    const QString target = dir.filePath(QStringLiteral("blocked.veproj"));
+    QFile blocker(target + QStringLiteral(".assets"));
+    ASSERT_TRUE(blocker.open(QIODevice::WriteOnly));
+    blocker.write("not a directory");
+    blocker.close();
+
+    controller.saveProject(QUrl::fromLocalFile(target));
+    EXPECT_FALSE(controller.lastError().isEmpty());
+    EXPECT_FALSE(QFileInfo::exists(target))
+        << "a failed sidecar relocation must abort the project save";
+}
+
+TEST(AppController, SelectionChangeAwayFromMaskedClipExitsMaskMode)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    AppController controller(
+        nullptr, dir.filePath(QStringLiteral("recovery.json")),
+        nullSinkFactory(), dir.filePath(QStringLiteral("sidecars")));
+
+    Project project = projectWithClip();
+    MediaInfo audioInfo;
+    audioInfo.path = QStringLiteral("C:/media/audio.mp3");
+    audioInfo.durationUs = 10'000'000;
+    audioInfo.supported = true;
+    audioInfo.hasAudio = true;
+    audioInfo.kind = MediaKind::Audio;
+    project.assets.append(
+        Asset{QStringLiteral("asset-audio"), audioInfo.path, audioInfo, {}});
+    Track audioTrack;
+    audioTrack.id = QStringLiteral("track-audio");
+    audioTrack.type = TrackType::Audio;
+    Clip audioClip;
+    audioClip.id = QStringLiteral("clip-audio");
+    audioClip.assetId = QStringLiteral("asset-audio");
+    audioClip.sourceOutUs = 10'000'000;
+    audioTrack.clips.append(audioClip);
+    project.tracks.append(audioTrack);
+    controller.document()->setProject(project);
+
+    controller.removal()->beginMask(QStringLiteral("clip-1"));
+    ASSERT_TRUE(controller.removal()->maskMode());
+
+    controller.timeline()->selectClip(QStringLiteral("clip-audio"));
+    EXPECT_FALSE(controller.removal()->maskMode());
+    EXPECT_TRUE(controller.removal()->activeClipId().isEmpty());
 }
 
 TEST(MediaListModel, ExposesRolesForImportedFixture)

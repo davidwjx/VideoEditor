@@ -42,9 +42,12 @@ class AppController : public QObject {
 
 public:
     // The optional sink factory lets tests replace the WASAPI device before
-    // the audio engine starts; production callers keep the default.
+    // the audio engine starts; production callers keep the default. The
+    // optional sidecar root override keeps mask sidecars out of the real user
+    // AppData directory in tests.
     explicit AppController(QObject *parent = nullptr, QString recoveryPath = {},
-                           AudioEngine::SinkFactory audioSinkFactory = {});
+                           AudioEngine::SinkFactory audioSinkFactory = {},
+                           QString sidecarFallback = {});
     ~AppController() override;
 
     MediaListModel *mediaModel() const { return m_mediaModel; }
@@ -52,7 +55,7 @@ public:
     AudioEngine *audioEngine() const { return m_audio.get(); }
     WaveformService *waveforms() const { return m_waveforms; }
     ExportController *exportController() const { return m_export.get(); }
-    RemovalController *removal() const { return m_removal; }
+    RemovalController *removal() const { return m_removal.get(); }
     QString lastError() const { return m_lastError; }
     bool canUndo() const;
     bool canRedo() const;
@@ -136,7 +139,8 @@ private:
     std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<ProjectStore> m_store;
     std::unique_ptr<MaskSidecarStore> m_maskSidecars;
-    RemovalController *m_removal = nullptr;
+    // Declared after the store it references so it is destroyed first.
+    std::unique_ptr<RemovalController> m_removal;
     QString m_sidecarFallback;
     QTimer m_autosaveTimer;
     // Coalesces rapid edits into one preview/audio snapshot update so a drag

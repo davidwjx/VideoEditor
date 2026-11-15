@@ -288,3 +288,30 @@ TEST(ProjectStore, SavesAndLoadsRecovery)
     store.discardRecovery();
     EXPECT_FALSE(store.loadRecovery(&error).has_value());
 }
+
+TEST(ProjectStore, RecoveryRoundTripsDocumentPathMetadata)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString documentPath = dir.filePath(QStringLiteral("A.veproj"));
+    ProjectStore store(dir.filePath(QStringLiteral("recovery/with-path.json")));
+
+    QString error;
+    ASSERT_TRUE(store.saveRecovery(sampleProject(), &error, documentPath))
+        << error.toStdString();
+    QString restoredPath = QStringLiteral("sentinel");
+    const auto restored = store.loadRecovery(&error, &restoredPath);
+    ASSERT_TRUE(restored.has_value()) << error.toStdString();
+    EXPECT_EQ(restoredPath, documentPath);
+
+    // Unsaved projects omit the metadata; loading must yield an empty path so
+    // AppController falls back to the unsaved sidecar root.
+    ProjectStore unsavedStore(
+        dir.filePath(QStringLiteral("recovery/no-path.json")));
+    ASSERT_TRUE(unsavedStore.saveRecovery(sampleProject(), &error))
+        << error.toStdString();
+    restoredPath = QStringLiteral("sentinel");
+    const auto unsaved = unsavedStore.loadRecovery(&error, &restoredPath);
+    ASSERT_TRUE(unsaved.has_value()) << error.toStdString();
+    EXPECT_TRUE(restoredPath.isEmpty());
+}

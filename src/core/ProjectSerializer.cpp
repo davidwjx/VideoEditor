@@ -572,8 +572,15 @@ QJsonObject ProjectSerializer::toJson(const Project &project)
 }
 
 std::optional<Project> ProjectSerializer::fromJson(const QJsonObject &json,
-                                                   QString *error)
+                                                   QString *error,
+                                                   QString *documentPath)
 {
+    if (documentPath) {
+        *documentPath = json.value(QStringLiteral("metadata"))
+                            .toObject()
+                            .value(QStringLiteral("documentPath"))
+                            .toString();
+    }
     const int version = json.value(QStringLiteral("schemaVersion")).toInt(0);
     if (version <= 0) {
         setError(error, QStringLiteral("无效的工程文件：缺少 schemaVersion。"));
@@ -649,7 +656,7 @@ std::optional<Project> ProjectSerializer::fromJson(const QJsonObject &json,
 }
 
 bool ProjectSerializer::save(const Project &project, const QString &path,
-                             QString *error)
+                             QString *error, const QString &documentPath)
 {
     const QFileInfo info(path);
     if (!QDir().mkpath(info.absolutePath())) {
@@ -662,7 +669,12 @@ bool ProjectSerializer::save(const Project &project, const QString &path,
         setError(error, QStringLiteral("无法写入工程文件：%1").arg(file.errorString()));
         return false;
     }
-    file.write(QJsonDocument(toJson(project)).toJson(QJsonDocument::Indented));
+    QJsonObject json = toJson(project);
+    if (!documentPath.isEmpty()) {
+        json.insert(QStringLiteral("metadata"),
+                    QJsonObject{{QStringLiteral("documentPath"), documentPath}});
+    }
+    file.write(QJsonDocument(json).toJson(QJsonDocument::Indented));
     if (!file.commit()) {
         setError(error, QStringLiteral("保存工程失败：%1").arg(file.errorString()));
         return false;
@@ -670,7 +682,9 @@ bool ProjectSerializer::save(const Project &project, const QString &path,
     return true;
 }
 
-std::optional<Project> ProjectSerializer::load(const QString &path, QString *error)
+std::optional<Project> ProjectSerializer::load(const QString &path,
+                                               QString *error,
+                                               QString *documentPath)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
@@ -686,7 +700,7 @@ std::optional<Project> ProjectSerializer::load(const QString &path, QString *err
         return std::nullopt;
     }
 
-    return fromJson(document.object(), error);
+    return fromJson(document.object(), error, documentPath);
 }
 
 } // namespace VideoEditor

@@ -18,7 +18,8 @@ Item {
     readonly property rect content: (previewItem !== null
                                      && previewItem !== undefined
                                      && previewItem.contentRect !== undefined)
-                                    ? previewItem.contentRect
+                                    ? previewItem.mapRectToItem(overlay,
+                                                                previewItem.contentRect)
                                     : Qt.rect(0, 0, width, height)
 
     property point boxStart: Qt.point(0, 0)

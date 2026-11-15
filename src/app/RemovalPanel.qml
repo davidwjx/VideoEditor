@@ -122,11 +122,24 @@ ColumnLayout {
             to: 64
             stepSize: 1
             property int pendingValue: 0
-            onMoved: pendingValue = Math.round(value)
-            onPressedChanged: {
+            // Mirror the inspector's slider pattern: seed on press so a tap
+            // without a drag commits the current value (a controller no-op)
+            // instead of resetting feather to 0.
+            onMoved: {
+                pendingValue = Math.round(value)
                 if (!pressed && root.removal !== null)
                     root.removal.setFeatherPx(pendingValue)
             }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = Math.round(value)
+                } else if (root.removal !== null) {
+                    root.removal.setFeatherPx(pendingValue)
+                }
+            }
+            // Keyboard arrows also emit moved(); the !pressed branch commits
+            // that gesture immediately. Same-value commits are controller
+            // no-ops, so a tap without a drag cannot create an undo step.
             Binding {
                 target: featherSlider
                 property: "value"
@@ -163,7 +176,7 @@ ColumnLayout {
             id: keyframeList
             objectName: "removal-keyframe-list"
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(96, contentHeight)
+            Layout.preferredHeight: Math.max(24, Math.min(96, contentHeight))
             clip: true
             model: root.removal !== null ? root.removal.maskKeyframes : []
             spacing: 2

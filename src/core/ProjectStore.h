@@ -15,8 +15,12 @@ public:
               QString *error = nullptr) const;
     std::optional<Project> load(const QString &file,
                                 QString *error = nullptr) const;
-    bool saveRecovery(const Project &project, QString *error = nullptr) const;
-    std::optional<Project> loadRecovery(QString *error = nullptr) const;
+    // documentPath is stored as optional metadata so recovery restores the
+    // sidecar location of an already-saved project. Empty means unsaved.
+    bool saveRecovery(const Project &project, QString *error = nullptr,
+                      const QString &documentPath = {}) const;
+    std::optional<Project> loadRecovery(QString *error = nullptr,
+                                        QString *documentPath = nullptr) const;
     void discardRecovery() const;
     QString recoveryFilePath() const;
 

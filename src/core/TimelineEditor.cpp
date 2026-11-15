@@ -9,6 +9,7 @@
 
 #include "ProjectDocument.h"
 #include "Srt.h"
+#include "commands/RemovalLayerCommand.h"
 #include "commands/TimelineEditCommand.h"
 #include "commands/TrackListCommand.h"
 
@@ -146,12 +147,77 @@ bool TimelineEditor::groupSpeed(const QList<ClipLocator> &group,
     return true;
 }
 
-void TimelineEditor::pushEdits(const QString &text, QList<TrackEdit> edits)
+void TimelineEditor::pushEdits(const QString &text, QList<TrackEdit> edits,
+                               const QList<RemovalLayer> &addedLayers,
+                               const QList<RemovalLayer> &removedLayers)
 {
-    if (edits.isEmpty())
+    if (edits.isEmpty() && addedLayers.isEmpty() && removedLayers.isEmpty())
         return;
-    m_document.undoStack()->push(
-        new TimelineEditCommand(&m_document, text, std::move(edits)));
+
+    QUndoStack *stack = m_document.undoStack();
+    if (addedLayers.isEmpty() && removedLayers.isEmpty()) {
+        stack->push(new TimelineEditCommand(&m_document, text, std::move(edits)));
+        return;
+    }
+
+    stack->beginMacro(text);
+    if (!edits.isEmpty()) {
+        stack->push(new TimelineEditCommand(&m_document, text,
+                                            std::move(edits)));
+    }
+    for (const RemovalLayer &layer : removedLayers) {
+        RemovalLayerEdit edit;
+        edit.clipId = layer.clipId;
+        edit.before = layer;
+        edit.after = std::nullopt;
+        stack->push(new RemovalLayerCommand(&m_document, text, edit));
+    }
+    for (const RemovalLayer &layer : addedLayers) {
+        RemovalLayerEdit edit;
+        edit.clipId = layer.clipId;
+        edit.after = layer;
+        stack->push(new RemovalLayerCommand(&m_document, text, edit));
+    }
+    stack->endMacro();
+}
+
+QList<RemovalLayer> TimelineEditor::removalLayersForClips(
+    const QList<ClipLocator> &locators) const
+{
+    QList<RemovalLayer> layers;
+    QSet<QString> seen;
+    for (const ClipLocator &locator : locators) {
+        const Clip *clip = findClip(locator.trackId, locator.clipId);
+        if (!clip || clip->removalLayerId.isEmpty()
+            || seen.contains(clip->removalLayerId)) {
+            continue;
+        }
+        if (const RemovalLayer *layer =
+                m_document.removalLayerById(clip->removalLayerId)) {
+            seen.insert(layer->id);
+            layers.append(*layer);
+        }
+    }
+    return layers;
+}
+
+QList<RemovalLayer> TimelineEditor::removalLayersForTrack(
+    const Track &track) const
+{
+    QList<RemovalLayer> layers;
+    QSet<QString> seen;
+    for (const Clip &clip : track.clips) {
+        if (clip.removalLayerId.isEmpty()
+            || seen.contains(clip.removalLayerId)) {
+            continue;
+        }
+        if (const RemovalLayer *layer =
+                m_document.removalLayerById(clip.removalLayerId)) {
+            seen.insert(layer->id);
+            layers.append(*layer);
+        }
+    }
+    return layers;
 }
 
 QList<TrackEdit> TimelineEditor::editsForClips(
@@ -428,6 +494,7 @@ void TimelineEditor::splitClip(const QString &trackId, const QString &clipId,
 
     QList<TrackEdit> edits;
     QHash<QString, int> editIndexByTrack;
+    QList<RemovalLayer> addedLayers;
     for (const ClipLocator &locator : group) {
         const Track *track = m_document.trackById(locator.trackId);
         if (!track)
@@ -448,12 +515,30 @@ void TimelineEditor::splitClip(const QString &trackId, const QString &clipId,
             right.timelineStartUs = timelineUs;
             if (!right.linkId.isEmpty())
                 right.linkId = rightLinkId;
+            // Two clips must never share one removal layer. Give the right
+            // half its own copy; the left half keeps the original.
+            if (!left.removalLayerId.isEmpty()) {
+                if (const RemovalLayer *source =
+                        m_document.removalLayerById(left.removalLayerId)) {
+                    RemovalLayer clone = *source;
+                    clone.id = QUuid::createUuid().toString(
+                        QUuid::WithoutBraces);
+                    clone.id.prepend(QStringLiteral("rl-"));
+                    clone.clipId = right.id;
+                    clone.sourceInUs = right.sourceInUs;
+                    clone.sourceOutUs = right.sourceOutUs;
+                    right.removalLayerId = clone.id;
+                    addedLayers.append(clone);
+                } else {
+                    right.removalLayerId.clear();
+                }
+            }
             left.sourceOutUs = sourceAtCut;
             target.afterClips.insert(i + 1, right);
             break;
         }
     }
-    pushEdits(QStringLiteral("分割片段"), edits);
+    pushEdits(QStringLiteral("分割片段"), edits, addedLayers, {});
 }
 
 void TimelineEditor::deleteClip(const QString &trackId, const QString &clipId,
@@ -462,6 +547,11 @@ void TimelineEditor::deleteClip(const QString &trackId, const QString &clipId,
     const QList<ClipLocator> group = linkGroup(trackId, clipId);
     if (group.isEmpty() || groupLocked(group))
         return;
+
+    // A deleted clip's removal layer must go in the same undo macro, or a
+    // save would contain a layer that references a missing video clip and the
+    // next load/recovery would reject the file.
+    const QList<RemovalLayer> removedLayers = removalLayersForClips(group);
 
     if (!ripple) {
         QList<TrackEdit> edits;
@@ -487,7 +577,7 @@ void TimelineEditor::deleteClip(const QString &trackId, const QString &clipId,
         edits.removeIf([](const TrackEdit &edit) {
             return edit.beforeClips == edit.afterClips;
         });
-        pushEdits(QStringLiteral("删除片段"), edits);
+        pushEdits(QStringLiteral("删除片段"), edits, {}, removedLayers);
         return;
     }
 
@@ -534,7 +624,7 @@ void TimelineEditor::deleteClip(const QString &trackId, const QString &clipId,
         if (edit.afterClips != edit.beforeClips)
             edits.append(edit);
     }
-    pushEdits(QStringLiteral("波纹删除"), edits);
+    pushEdits(QStringLiteral("波纹删除"), edits, {}, removedLayers);
 }
 
 void TimelineEditor::setClipSpeed(const QString &trackId, const QString &clipId,
@@ -684,6 +774,7 @@ void TimelineEditor::paste(int64_t timelineUs, const QString &targetTrackId)
 
     QHash<QString, QList<Clip>> addedByTrack;
     QHash<QString, QString> linkMap;
+    QList<RemovalLayer> addedLayers;
     for (int i = 0; i < m_clipboard.size(); ++i) {
         const ClipboardEntry &entry = m_clipboard.at(i);
         const QString &destinationId = destinationIds.at(i);
@@ -697,6 +788,25 @@ void TimelineEditor::paste(int64_t timelineUs, const QString &targetTrackId)
                                QUuid::createUuid().toString(QUuid::WithoutBraces));
             copy.linkId = linkMap.value(copy.linkId);
         }
+        // Each pasted clip gets its own layer copy. A stale clipboard entry
+        // (source clip/layer deleted after copy) is repaired by clearing the
+        // dangling link instead of pasting an invalid reference.
+        if (!copy.removalLayerId.isEmpty()) {
+            if (const RemovalLayer *source =
+                    m_document.removalLayerById(copy.removalLayerId)) {
+                RemovalLayer clone = *source;
+                clone.id = QUuid::createUuid().toString(
+                    QUuid::WithoutBraces);
+                clone.id.prepend(QStringLiteral("rl-"));
+                clone.clipId = copy.id;
+                clone.sourceInUs = copy.sourceInUs;
+                clone.sourceOutUs = copy.sourceOutUs;
+                copy.removalLayerId = clone.id;
+                addedLayers.append(clone);
+            } else {
+                copy.removalLayerId.clear();
+            }
+        }
         addedByTrack[destinationId].append(copy);
     }
 
@@ -709,7 +819,7 @@ void TimelineEditor::paste(int64_t timelineUs, const QString &targetTrackId)
         edit.afterClips.append(it.value());
         edits.append(edit);
     }
-    pushEdits(QStringLiteral("粘贴片段"), edits);
+    pushEdits(QStringLiteral("粘贴片段"), edits, addedLayers, {});
 }
 
 void TimelineEditor::addTrack(const Track &track)
@@ -733,6 +843,7 @@ void TimelineEditor::removeTrack(const QString &trackId)
     const Track *track = m_document.trackById(trackId);
     if (!track || track->locked)
         return;
+    const QList<RemovalLayer> removedLayers = removalLayersForTrack(*track);
     QList<Track> before = m_document.project().tracks;
     QList<Track> after;
     for (const Track &existing : before) {
@@ -741,8 +852,23 @@ void TimelineEditor::removeTrack(const QString &trackId)
     }
     if (after.size() == before.size())
         return;
-    m_document.undoStack()->push(new TrackListCommand(
-        &m_document, QStringLiteral("删除轨道"), before, after));
+
+    QUndoStack *stack = m_document.undoStack();
+    const QString text = QStringLiteral("删除轨道");
+    if (removedLayers.isEmpty()) {
+        stack->push(new TrackListCommand(&m_document, text, before, after));
+        return;
+    }
+    stack->beginMacro(text);
+    stack->push(new TrackListCommand(&m_document, text, before, after));
+    for (const RemovalLayer &layer : removedLayers) {
+        RemovalLayerEdit edit;
+        edit.clipId = layer.clipId;
+        edit.before = layer;
+        edit.after = std::nullopt;
+        stack->push(new RemovalLayerCommand(&m_document, text, edit));
+    }
+    stack->endMacro();
 }
 
 void TimelineEditor::moveTrack(int fromIndex, int toIndex)

@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <QTemporaryDir>
+
 #include "ProjectDocument.h"
+#include "ProjectSerializer.h"
 #include "TimelineEditor.h"
 
 using namespace VideoEditor;
@@ -91,6 +94,47 @@ void setTrackLocked(ProjectDocument &document, const QString &trackId, bool lock
             track.locked = locked;
     }
     document.setProject(project);
+}
+
+// Attaches a valid removal layer to one clip. setProject() clears undo, so
+// tests call this after building the clip and before the edit under test.
+void attachRemovalLayer(Fixture &fixture, const QString &clipId,
+                        const QString &layerId, int revision = 1)
+{
+    Project project = fixture.document.project();
+    RemovalLayer layer;
+    layer.id = layerId;
+    layer.clipId = clipId;
+    for (Track &track : project.tracks) {
+        for (Clip &clip : track.clips) {
+            if (clip.id != clipId)
+                continue;
+            clip.removalLayerId = layerId;
+            layer.sourceInUs = clip.sourceInUs;
+            layer.sourceOutUs = clip.sourceOutUs;
+        }
+    }
+    layer.revision = revision;
+    MaskKeyframe keyframe;
+    keyframe.id = QStringLiteral("mk-1");
+    keyframe.sourceTimeUs = layer.sourceInUs;
+    keyframe.maskHash = QString(64, QLatin1Char('a'));
+    keyframe.featherPx = 4;
+    keyframe.revision = 1;
+    layer.maskKeyframes.append(keyframe);
+    project.removalLayers.append(layer);
+    fixture.document.setProject(project);
+}
+
+const RemovalLayer *layerForClip(const Project &project, const QString &clipId)
+{
+    for (const Track &track : project.tracks) {
+        for (const Clip &clip : track.clips) {
+            if (clip.id == clipId)
+                return project.removalLayerById(clip.removalLayerId);
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -896,5 +940,224 @@ TEST(TimelineEditor, TrimStartBeyondOneFrameMinimumIsNoOp)
 
     EXPECT_EQ(fixture.document.undoStack()->index(), index);
     EXPECT_EQ(fixture.videoTrack().clips.first(), before);
+}
+
+TEST(TimelineEditor, DeleteMaskedClipRemovesLayerAndReloads)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
+                            0, 0, 8'000'000));
+    attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"));
+
+    const int index = fixture.document.undoStack()->index();
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"), false);
+    EXPECT_EQ(fixture.document.undoStack()->index(), index + 1);
+    EXPECT_TRUE(fixture.videoTrack().clips.isEmpty());
+    EXPECT_TRUE(fixture.document.project().removalLayers.isEmpty());
+
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("delete.veproj"));
+    QString error;
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    const auto loaded = ProjectSerializer::load(path, &error);
+    ASSERT_TRUE(loaded.has_value()) << error.toStdString();
+    EXPECT_TRUE(loaded->removalLayers.isEmpty());
+
+    fixture.document.undo();
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.videoTrack().clips.first().removalLayerId,
+              QStringLiteral("rl-v"));
+    ASSERT_EQ(fixture.document.project().removalLayers.size(), 1);
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
+}
+
+TEST(TimelineEditor, RippleDeleteMaskedClipRemovesLayerAndReloads)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c1"), QStringLiteral("asset-v"),
+                            0, 0, 2'000'000));
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("c2"), QStringLiteral("asset-v"),
+                            2'000'000, 0, 2'000'000));
+    attachRemovalLayer(fixture, QStringLiteral("c1"), QStringLiteral("rl-c1"));
+
+    const int index = fixture.document.undoStack()->index();
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("c1"), true);
+    EXPECT_EQ(fixture.document.undoStack()->index(), index + 1);
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.videoTrack().clips.first().id, QStringLiteral("c2"));
+    EXPECT_TRUE(fixture.document.project().removalLayers.isEmpty());
+
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("ripple.veproj"));
+    QString error;
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
+
+    fixture.document.undo();
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 2);
+    EXPECT_EQ(fixture.videoTrack().clips.first().removalLayerId,
+              QStringLiteral("rl-c1"));
+    EXPECT_EQ(fixture.document.project().removalLayers.size(), 1);
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
+}
+
+TEST(TimelineEditor, RemoveTrackRemovesMaskedClipLayersAndReloads)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
+                            0, 0, 8'000'000));
+    attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"));
+
+    const int index = fixture.document.undoStack()->index();
+    editor.removeTrack(QStringLiteral("track-v1"));
+    EXPECT_EQ(fixture.document.undoStack()->index(), index + 1);
+    EXPECT_EQ(fixture.document.trackById(QStringLiteral("track-v1")), nullptr);
+    EXPECT_TRUE(fixture.document.project().removalLayers.isEmpty());
+
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("track.veproj"));
+    QString error;
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
+
+    fixture.document.undo();
+    ASSERT_NE(fixture.document.trackById(QStringLiteral("track-v1")), nullptr);
+    ASSERT_EQ(fixture.document.trackById(QStringLiteral("track-v1"))->clips.size(),
+              1);
+    EXPECT_EQ(fixture.document.trackById(QStringLiteral("track-v1"))
+                  ->clips.first()
+                  .removalLayerId,
+              QStringLiteral("rl-v"));
+    EXPECT_EQ(fixture.document.project().removalLayers.size(), 1);
+}
+
+TEST(TimelineEditor, SplitClonesRemovalLayerForRightHalfAndReloads)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
+                            0, 0, 10'000'000));
+    attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"),
+                       7);
+
+    const int index = fixture.document.undoStack()->index();
+    editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"),
+                     2'000'000);
+    EXPECT_EQ(fixture.document.undoStack()->index(), index + 1);
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 2);
+    const Clip &left = fixture.videoTrack().clips.at(0);
+    const Clip &right = fixture.videoTrack().clips.at(1);
+    EXPECT_EQ(left.removalLayerId, QStringLiteral("rl-v"));
+    EXPECT_FALSE(right.removalLayerId.isEmpty());
+    EXPECT_NE(right.removalLayerId, QStringLiteral("rl-v"));
+
+    const RemovalLayer *clone =
+        fixture.document.removalLayerById(right.removalLayerId);
+    ASSERT_NE(clone, nullptr);
+    EXPECT_EQ(clone->clipId, right.id);
+    EXPECT_EQ(clone->sourceInUs, right.sourceInUs);
+    EXPECT_EQ(clone->sourceOutUs, right.sourceOutUs);
+    EXPECT_EQ(clone->revision, 7);
+    ASSERT_EQ(clone->maskKeyframes.size(), 1);
+    EXPECT_EQ(clone->maskKeyframes.first().maskHash, QString(64, QLatin1Char('a')));
+
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("split.veproj"));
+    QString error;
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
+
+    fixture.document.undo();
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.videoTrack().clips.first().removalLayerId,
+              QStringLiteral("rl-v"));
+    EXPECT_EQ(fixture.document.project().removalLayers.size(), 1);
+}
+
+TEST(TimelineEditor, PasteDuplicatesRemovalLayerAndReloads)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
+                            0, 0, 8'000'000));
+    attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"),
+                       7);
+    editor.copy({ClipLocator{QStringLiteral("track-v1"),
+                             QStringLiteral("clip-v")}});
+
+    const int index = fixture.document.undoStack()->index();
+    editor.paste(5'000'000, QStringLiteral("track-v1"));
+    EXPECT_EQ(fixture.document.undoStack()->index(), index + 1);
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 2);
+    const Clip &pasted = fixture.videoTrack().clips.at(1);
+    EXPECT_NE(pasted.id, QStringLiteral("clip-v"));
+    EXPECT_FALSE(pasted.removalLayerId.isEmpty());
+    EXPECT_NE(pasted.removalLayerId, QStringLiteral("rl-v"));
+    const RemovalLayer *clone =
+        fixture.document.removalLayerById(pasted.removalLayerId);
+    ASSERT_NE(clone, nullptr);
+    EXPECT_EQ(clone->clipId, pasted.id);
+    EXPECT_EQ(clone->revision, 7);
+    const RemovalLayer *original =
+        layerForClip(fixture.document.project(), QStringLiteral("clip-v"));
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(original->id, QStringLiteral("rl-v"));
+    EXPECT_EQ(fixture.document.project().removalLayers.size(), 2);
+
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("paste.veproj"));
+    QString error;
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
+
+    fixture.document.undo();
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.document.project().removalLayers.size(), 1);
+}
+
+TEST(TimelineEditor, PasteAfterCopyOfDeletedLayerClearsStaleLink)
+{
+    Fixture fixture;
+    TimelineEditor editor(fixture.document);
+    editor.addClip(QStringLiteral("track-v1"),
+                   makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
+                            0, 0, 8'000'000));
+    attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"));
+    editor.copy({ClipLocator{QStringLiteral("track-v1"),
+                             QStringLiteral("clip-v")}});
+    // Deleting the source also deletes its layer, so the clipboard entry is
+    // now stale. Paste must repair it instead of writing a dangling link.
+    editor.deleteClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"),
+                      false);
+    editor.paste(5'000'000, QStringLiteral("track-v1"));
+
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_TRUE(fixture.videoTrack().clips.first().removalLayerId.isEmpty());
+    EXPECT_TRUE(fixture.document.project().removalLayers.isEmpty());
+
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("stale.veproj"));
+    QString error;
+    ASSERT_TRUE(ProjectSerializer::save(fixture.document.project(), path, &error))
+        << error.toStdString();
+    EXPECT_TRUE(ProjectSerializer::load(path, &error).has_value());
 }
 

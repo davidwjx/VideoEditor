@@ -8,6 +8,7 @@
 #include <QString>
 #include <QStringList>
 
+#include "Removal.h"
 #include "Timeline.h"
 #include "commands/TimelineEditCommand.h" // TrackEdit is part of this API
 
@@ -87,7 +88,14 @@ private:
     const Clip *findClip(const QString &trackId, const QString &clipId) const;
     bool groupLocked(const QList<ClipLocator> &group) const;
     bool groupSpeed(const QList<ClipLocator> &group, int *speedMilli) const;
-    void pushEdits(const QString &text, QList<TrackEdit> edits);
+    QList<RemovalLayer> removalLayersForClips(
+        const QList<ClipLocator> &locators) const;
+    QList<RemovalLayer> removalLayersForTrack(const Track &track) const;
+    // One undo macro: optional track snapshot edits followed by removal-layer
+    // adds/removes. Keeps clip/layer references one-to-one across undo.
+    void pushEdits(const QString &text, QList<TrackEdit> edits,
+                   const QList<RemovalLayer> &addedLayers = {},
+                   const QList<RemovalLayer> &removedLayers = {});
     QList<TrackEdit> editsForClips(const QList<ClipLocator> &locators,
                                    const std::function<void(Clip &)> &mutate) const;
     QList<TrackEdit> editsForCues(

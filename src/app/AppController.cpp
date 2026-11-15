@@ -57,7 +57,8 @@ QString resolveFfmpegPath()
 } // namespace
 
 AppController::AppController(QObject *parent, QString recoveryPath,
-                             AudioEngine::SinkFactory audioSinkFactory)
+                             AudioEngine::SinkFactory audioSinkFactory,
+                             QString sidecarFallback)
     : QObject(parent)
     , m_document(new ProjectDocument(this))
     , m_mediaModel(new MediaListModel(this))
@@ -132,10 +133,13 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     // MaskSidecarStore appends "removal-sidecars/unsaved" to this base, which
     // yields <AppDataLocation>/removal-sidecars/unsaved.
     m_sidecarFallback =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        sidecarFallback.isEmpty()
+            ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+            : sidecarFallback;
     m_maskSidecars = std::make_unique<MaskSidecarStore>();
     m_maskSidecars->setProjectPath(m_document->filePath(), m_sidecarFallback);
-    m_removal = new RemovalController(*m_document, *m_maskSidecars, this);
+    m_removal = std::make_unique<RemovalController>(*m_document,
+                                                     *m_maskSidecars);
     // Timeline position is authoritative for mask authoring; the preview clock
     // mirrors it in timeline mode. The fallback keeps the controller useful
     // when only the timeline controller exists (asset-mode preview).
@@ -147,6 +151,16 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     connect(m_document, &ProjectDocument::projectReplaced, this, [this] {
         m_maskSidecars->setProjectPath(m_document->filePath(),
                                        m_sidecarFallback);
+    });
+    // The inspector hides RemovalPanel when the selection changes away from
+    // the masked clip. Leaving mask mode active would let the transparent
+    // overlay keep swallowing preview clicks with no visible exit control.
+    connect(m_timeline, &TimelineController::selectionChanged, this, [this] {
+        if (!m_removal->maskMode())
+            return;
+        const QString selected = m_timeline->selectedClipId();
+        if (selected.isEmpty() || selected != m_removal->activeClipId())
+            m_removal->endMask();
     });
 
     m_waveforms = new WaveformService(
@@ -483,12 +497,15 @@ void AppController::clearError()
 void AppController::restoreRecovery()
 {
     QString error;
-    auto project = m_store->loadRecovery(&error);
+    QString savedPath;
+    auto project = m_store->loadRecovery(&error, &savedPath);
     if (!project) {
         setLastError(error);
         return;
     }
-    m_document->setProject(std::move(*project));
+    // Restoring the original file path keeps mask sidecars next to the saved
+    // project instead of rebinding them to the unsaved fallback root.
+    m_document->setProject(std::move(*project), savedPath);
     m_currentAssetId.clear();
     // The restored document replaces whatever was previewed; stop and clear
     // the old preview so its clip does not keep playing behind the new project.
@@ -515,18 +532,24 @@ void AppController::saveProject(const QUrl &url)
     if (QFileInfo(path).suffix().isEmpty())
         path += QStringLiteral(".veproj");
 
-    QString error;
-    if (!m_document->save(path, &error)) {
-        setLastError(error);
-        return;
-    }
     // Masks authored before the first save live under the fallback root; move
-    // them next to the project so the saved file stays self-contained.
+    // them next to the project BEFORE writing the .veproj. A failed copy must
+    // abort the save: writing a project whose sidecars stayed behind would
+    // make the file unopenable, and pointing the store at an unpopulated root
+    // would silently lose later masks.
+    const QString previousSidecarPath = m_maskSidecars->projectFilePath();
     QString sidecarError;
     if (!m_maskSidecars->relocateTo(path, &sidecarError)) {
-        if (!sidecarError.isEmpty())
-            setLastError(sidecarError);
-        m_maskSidecars->setProjectPath(path, m_sidecarFallback);
+        setLastError(sidecarError.isEmpty()
+                         ? QStringLiteral("无法迁移遮罩旁车文件。")
+                         : sidecarError);
+        return;
+    }
+    QString error;
+    if (!m_document->save(path, &error)) {
+        m_maskSidecars->setProjectPath(previousSidecarPath, m_sidecarFallback);
+        setLastError(error);
+        return;
     }
     // The project on disk now supersedes any autosaved snapshot; keeping the
     // recovery file would let the next launch roll back edits saved after the
@@ -935,7 +958,8 @@ void AppController::autosave()
     if (!m_document->isDirty())
         return;
     QString error;
-    if (!m_store->saveRecovery(m_document->project(), &error))
+    if (!m_store->saveRecovery(m_document->project(), &error,
+                               m_document->filePath()))
         setLastError(error);
 }
 

@@ -48,6 +48,11 @@ RemovalController::RemovalController(ProjectDocument &document,
             &RemovalController::refreshFromDocument);
     connect(&m_document, &ProjectDocument::projectReplaced, this,
             &RemovalController::endMask);
+    // Timeline keyframe diamonds subscribe to layerChanged. Removal edits also
+    // change the document while mask mode is off (undo/redo), so they must
+    // notify independently of refreshFromDocument's editor-state early return.
+    connect(&m_document, &ProjectDocument::removalLayersChanged, this,
+            &RemovalController::layerChanged);
 }
 
 void RemovalController::setPlayheadProvider(std::function<qint64()> provider)
@@ -280,15 +285,20 @@ void RemovalController::beginMask(const QString &clipId)
 void RemovalController::endMask()
 {
     const bool wasActive = m_maskMode;
+    const bool toolsChanged = m_boxMode || m_eraseMode;
     resetWorkingState();
     m_maskMode = false;
     m_activeClipId.clear();
     m_hasLayer = false;
     m_layerEnabled = true;
+    m_boxMode = false;
+    m_eraseMode = false;
 
     ++m_maskRevision;
     if (m_provider)
         m_provider->setMask(QImage());
+    if (toolsChanged)
+        emit toolChanged();
     if (wasActive) {
         emit maskModeChanged();
         emit activeClipChanged();
@@ -700,7 +710,15 @@ void RemovalController::updateOverlay()
 
 void RemovalController::refreshFromDocument()
 {
-    if (!m_maskMode || m_working.layerId.isEmpty())
+    if (!m_maskMode)
+        return;
+    // The masked clip can disappear through delete/split/ripple edits. Leaving
+    // mask mode on would keep a full-preview click blocker with no panel.
+    if (!activeClip()) {
+        endMask();
+        return;
+    }
+    if (m_working.layerId.isEmpty())
         return;
 
     const RemovalLayer *layer = currentLayer();

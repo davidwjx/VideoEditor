@@ -24,19 +24,24 @@ std::optional<Project> ProjectStore::load(const QString &file, QString *error) c
     return ProjectSerializer::load(file, error);
 }
 
-bool ProjectStore::saveRecovery(const Project &project, QString *error) const
+bool ProjectStore::saveRecovery(const Project &project, QString *error,
+                                const QString &documentPath) const
 {
-    return ProjectSerializer::save(project, m_recoveryFilePath, error);
+    return ProjectSerializer::save(project, m_recoveryFilePath, error,
+                                   documentPath);
 }
 
-std::optional<Project> ProjectStore::loadRecovery(QString *error) const
+std::optional<Project> ProjectStore::loadRecovery(QString *error,
+                                                  QString *documentPath) const
 {
     if (!QFileInfo::exists(m_recoveryFilePath)) {
         if (error)
             *error = QStringLiteral("没有可恢复的工程。");
+        if (documentPath)
+            documentPath->clear();
         return std::nullopt;
     }
-    return ProjectSerializer::load(m_recoveryFilePath, error);
+    return ProjectSerializer::load(m_recoveryFilePath, error, documentPath);
 }
 
 void ProjectStore::discardRecovery() const

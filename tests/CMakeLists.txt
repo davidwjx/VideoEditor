@@ -122,6 +122,7 @@ add_executable(app_tests
   app/TimelineUiTest.cpp
   app/TimelineIntegrationTest.cpp
   TestMain.cpp)
+target_include_directories(app_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(app_tests PRIVATE videoeditor_app GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(app_tests PRIVATE
   VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
