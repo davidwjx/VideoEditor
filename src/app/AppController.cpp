@@ -12,6 +12,7 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QUuid>
 #include <QVariantList>
 #include <QVariantMap>
@@ -714,14 +715,18 @@ void AppController::selftestExport()
     project.timeline.height = 360;
     project.timeline.fps = Rational{30, 1};
 
-    const QString root = QDir(QDir::tempPath())
-                             .filePath(QStringLiteral("videoeditor-export-selftest"));
-    QDir(root).removeRecursively();
-    if (!QDir().mkpath(root)) {
-        qCritical("EXPORT_SELFTEST_FAIL cannot create %s", qPrintable(root));
+    // One unique directory per run, removed by QTemporaryDir on every exit
+    // path (success, validation failure, missing encoder, timeout unwind).
+    QTemporaryDir runDir(
+        QDir(QDir::tempPath())
+            .filePath(QStringLiteral("videoeditor-export-selftest-XXXXXX")));
+    if (!runDir.isValid()) {
+        qCritical("EXPORT_SELFTEST_FAIL cannot create %s",
+                  qPrintable(runDir.path()));
         QCoreApplication::exit(5);
         return;
     }
+    const QString root = runDir.path();
     // Encoder probing and Media Foundation need an MTA apartment. The Qt GUI
     // thread is STA (OLE), where h264_mf refuses to open and leaves the
     // process in a state that crashes the qwindows plugin at shutdown. Run

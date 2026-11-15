@@ -289,9 +289,10 @@ ExportResult ExportPipeline::run(const Project &project,
                     break;
                 }
             }
-            // Hardware encoders may publish different SPS/PPS when reopened.
-            // Such parts can never be joined by the assembler, so detect it
-            // now and restart instead of failing every retry.
+            // A reopened encoder may publish different SPS/PPS (hardware
+            // encoders in particular). Such parts can never be joined by the
+            // assembler, so detect it now and restart instead of failing
+            // every retry.
             if (startSegment > 0) {
                 std::vector<uint8_t> partExtradata;
                 std::vector<uint8_t> encoderExtradata;
@@ -322,7 +323,7 @@ ExportResult ExportPipeline::run(const Project &project,
     if (encoderParametersChanged) {
         appendWarning(
             &result,
-            QStringLiteral("硬件编码器重新打开后参数集（SPS/PPS）发生变化，"
+            QStringLiteral("编码器重新打开后参数集（SPS/PPS）发生变化，"
                            "已从头重新导出。"));
     }
     if (!QDir().mkpath(partsDir)) {
