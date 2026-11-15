@@ -35,6 +35,7 @@ void ProjectDocument::setProject(Project project, const QString &filePath)
     emit assetsChanged();
     emit tracksChanged();
     emit timelineChanged();
+    emit removalLayersChanged();
     emit projectReplaced();
     emit undoStateChanged();
     emit dirtyChanged();

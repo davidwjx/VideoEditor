@@ -191,11 +191,20 @@ QJsonObject removalParametersToJson(const RemovalParameters &parameters)
             {QStringLiteral("processingHeight"), parameters.processingHeight}};
 }
 
-RemovalParameters removalParametersFromJson(const QJsonObject &json)
+RemovalParameters removalParametersFromJson(const QJsonObject &json, bool *ok)
 {
     RemovalParameters parameters;
-    parameters.mode = repairModeFromString(
-        json.value(QStringLiteral("mode")).toString(QStringLiteral("fast")));
+    if (ok)
+        *ok = true;
+    if (json.contains(QStringLiteral("mode"))) {
+        bool modeOk = false;
+        parameters.mode = repairModeFromString(
+            json.value(QStringLiteral("mode")).toString(), &modeOk);
+        if (!modeOk && ok)
+            *ok = false;
+    } else {
+        parameters.mode = RepairMode::Fast;
+    }
     parameters.temporalStabilization = json.value(QStringLiteral("temporalStabilization"))
                                            .toBool(true);
     parameters.stabilizationStrength = json.value(QStringLiteral("stabilizationStrength"))
@@ -225,7 +234,7 @@ QJsonObject removalLayerToJson(const RemovalLayer &layer)
             {QStringLiteral("enabled"), layer.enabled}};
 }
 
-RemovalLayer removalLayerFromJson(const QJsonObject &json)
+RemovalLayer removalLayerFromJson(const QJsonObject &json, bool *ok)
 {
     RemovalLayer layer;
     layer.id = json.value(QStringLiteral("id")).toString();
@@ -240,12 +249,15 @@ RemovalLayer removalLayerFromJson(const QJsonObject &json)
         json.value(QStringLiteral("trackingState")).toString());
     layer.trackingConfidenceHash = json.value(QStringLiteral("trackingConfidenceHash"))
                                        .toString();
+    bool parametersOk = true;
     layer.parameters = removalParametersFromJson(
-        json.value(QStringLiteral("parameters")).toObject());
+        json.value(QStringLiteral("parameters")).toObject(), &parametersOk);
     layer.cacheKey = json.value(QStringLiteral("cacheKey")).toString();
     layer.cachePath = json.value(QStringLiteral("cachePath")).toString();
     layer.revision = json.value(QStringLiteral("revision")).toInt(1);
     layer.enabled = json.value(QStringLiteral("enabled")).toBool(true);
+    if (ok)
+        *ok = parametersOk;
     return layer;
 }
 
@@ -445,12 +457,15 @@ QString validateProject(const Project &project)
     }
 
     QSet<QString> layerIds;
-    QSet<QString> attachedClips;
+    // Duplicate ids are detected before any per-layer field checks so a
+    // malformed duplicate always reports the id problem first.
     for (const RemovalLayer &layer : project.removalLayers) {
         if (layer.id.isEmpty() || layerIds.contains(layer.id))
             return QStringLiteral("AI 消除层包含无效或重复的 id。");
         layerIds.insert(layer.id);
-
+    }
+    QSet<QString> attachedClips;
+    for (const RemovalLayer &layer : project.removalLayers) {
         const Clip *clip = nullptr;
         for (const Track &track : project.tracks) {
             if (track.type != TrackType::Video)
@@ -496,11 +511,16 @@ QString validateProject(const Project &project)
             && (!layer.cachePath.startsWith(QStringLiteral("removal/"))
                 || layer.cachePath.contains(QStringLiteral(".."))))
             return QStringLiteral("AI 消除层“%1”的缓存路径无效。").arg(layer.id);
-        if (!clip->removalLayerId.isEmpty()) {
-            if (attachedClips.contains(clip->id) || clip->removalLayerId != layer.id)
-                return QStringLiteral("片段“%1”关联了多个 AI 消除层。").arg(clip->id);
-            attachedClips.insert(clip->id);
-        }
+        // Enforce a one-to-one attachment: the layer's clip must point back at
+        // this exact layer, and no two layers may target the same clip. This
+        // check runs last so the more specific interval/mask/parameter errors
+        // above still win for malformed layers.
+        if (attachedClips.contains(clip->id))
+            return QStringLiteral("片段“%1”关联了多个 AI 消除层。").arg(clip->id);
+        if (clip->removalLayerId != layer.id)
+            return QStringLiteral("片段“%1”未关联 AI 消除层“%2”。")
+                .arg(clip->id, layer.id);
+        attachedClips.insert(clip->id);
     }
     // Reverse check: a clip may not reference a layer that does not exist
     // (hand-edited project or a stale reference from an older version).
@@ -599,12 +619,19 @@ std::optional<Project> ProjectSerializer::fromJson(const QJsonObject &json,
     }
     for (const QJsonValue &value : json.value(QStringLiteral("subtitleStyles")).toArray())
         project.subtitleStyles.append(styleFromJson(value.toObject()));
-    if (version < 3) {
-        // v1/v2 have no removalLayers; the field stays empty.
-        project.removalLayers.clear();
+    // v1/v2 have no removalLayers; only v3+ carries the field.
+    if (version >= 3) {
+        for (const QJsonValue &value : json.value(QStringLiteral("removalLayers")).toArray()) {
+            bool layerOk = true;
+            const RemovalLayer layer = removalLayerFromJson(value.toObject(), &layerOk);
+            if (!layerOk) {
+                setError(error, QStringLiteral("AI 消除层“%1”的修复模式无效。")
+                                    .arg(layer.id));
+                return std::nullopt;
+            }
+            project.removalLayers.append(layer);
+        }
     }
-    for (const QJsonValue &value : json.value(QStringLiteral("removalLayers")).toArray())
-        project.removalLayers.append(removalLayerFromJson(value.toObject()));
     // Presets are application data, not user data: merge them on load so a v2
     // project saved before boxed/bold-outline existed can still render them.
     project.ensureSubtitleStyles();
