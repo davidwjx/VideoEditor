@@ -27,6 +27,17 @@ Asset videoAsset(int64_t durationUs)
     return Asset{QStringLiteral("asset-v"), info.path, info, {}};
 }
 
+int rowForItem(const TimelineModel *model, const QString &itemId)
+{
+    for (int i = 0; i < model->rowCount(); ++i) {
+        if (model->data(model->index(i, 0), TimelineModel::ItemIdRole).toString()
+            == itemId) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 } // namespace
 
 TEST(TimelineController, AddsVideoAndLinkedAudioAtPlayhead)
@@ -137,6 +148,194 @@ TEST(TimelineController, SnapUsIgnoresOriginAndPlayheadOnOwnEdge)
     controller.seekUs(2'000'000);
     EXPECT_EQ(controller.snapUs(40'000), 40'000);
     EXPECT_EQ(controller.snapUs(2'040'000), 2'000'000);
+}
+
+TEST(TimelineController, UnlinkAndRelinkSelectedCounterpart)
+{
+    ProjectDocument document;
+    document.addAsset(videoAsset(5'000'000));
+    TimelineController controller(document);
+    const QString videoClipId = controller.addAssetToTimeline(
+        QStringLiteral("asset-v"), QStringLiteral("track-v1"), 0);
+    ASSERT_FALSE(videoClipId.isEmpty());
+    ASSERT_EQ(document.project().tracks.at(0).clips.size(), 1);
+    ASSERT_EQ(document.project().tracks.at(1).clips.size(), 1);
+    const QString audioClipId = document.project().tracks.at(1).clips.first().id;
+    const QString originalLink = document.project().tracks.at(0).clips.first().linkId;
+
+    controller.selectClip(videoClipId);
+    controller.unlinkSelectedClip();
+    EXPECT_TRUE(document.project().tracks.at(0).clips.first().linkId.isEmpty());
+    // Only the selected half is unlinked, matching TimelineEditor semantics.
+    EXPECT_EQ(document.project().tracks.at(1).clips.first().linkId, originalLink);
+
+    const int undoIndex = document.undoStack()->index();
+    EXPECT_TRUE(controller.linkSelectedClip());
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+    const QString relinked = document.project().tracks.at(0).clips.first().linkId;
+    EXPECT_FALSE(relinked.isEmpty());
+    EXPECT_EQ(document.project().tracks.at(1).clips.first().linkId, relinked);
+    EXPECT_EQ(document.project().tracks.at(0).clips.first().timelineStartUs,
+              document.project().tracks.at(1).clips.first().timelineStartUs);
+
+    // Moving the video half moves the audio half again after relinking.
+    controller.moveClip(videoClipId, 2'000'000);
+    EXPECT_EQ(document.project().tracks.at(1).clips.first().timelineStartUs,
+              2'000'000);
+
+    document.undo(); // move
+    document.undo(); // link
+    EXPECT_TRUE(document.project().tracks.at(0).clips.first().linkId.isEmpty());
+    EXPECT_EQ(audioClipId,
+              document.project().tracks.at(1).clips.first().id);
+
+    // With no counterpart left there is nothing to relink to.
+    controller.selectClip(audioClipId);
+    controller.unlinkSelectedClip();
+    controller.deleteSelected(false);
+    controller.selectClip(videoClipId);
+    EXPECT_FALSE(controller.linkSelectedClip())
+        << "no counterpart after the audio half was removed";
+}
+
+TEST(TimelineController, CueTimingUpdatesModelAndUndo)
+{
+    ProjectDocument document;
+    TimelineController controller(document);
+    const QString cueId = controller.addCueAtPlayhead();
+    ASSERT_FALSE(cueId.isEmpty());
+    controller.setCueText(cueId, QStringLiteral("时间"));
+    controller.applySubtitleStyle(QStringLiteral("boxed"), cueId);
+    controller.selectCue(cueId);
+    const SubtitleCue before = document.project().tracks.at(2).cues.first();
+    const int undoIndex = document.undoStack()->index();
+
+    EXPECT_TRUE(controller.setCueTiming(cueId, 1'000'000, 3'500'000));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+    const SubtitleCue after = document.project().tracks.at(2).cues.first();
+    EXPECT_EQ(after.startUs, 1'000'000);
+    EXPECT_EQ(after.endUs, 3'500'000);
+    EXPECT_EQ(after.text, before.text);
+    EXPECT_EQ(after.styleId, before.styleId);
+    EXPECT_EQ(after.positionXPermille, before.positionXPermille);
+
+    const QVariantMap selected = controller.selectedCue();
+    EXPECT_EQ(selected.value(QStringLiteral("startUs")).toLongLong(),
+              1'000'000);
+    EXPECT_EQ(selected.value(QStringLiteral("endUs")).toLongLong(), 3'500'000);
+
+    const int row = rowForItem(controller.timelineModel(), cueId);
+    ASSERT_GE(row, 0);
+    EXPECT_EQ(controller.timelineModel()
+                  ->data(controller.timelineModel()->index(row, 0),
+                         TimelineModel::StartUsRole)
+                  .toLongLong(),
+              1'000'000);
+    EXPECT_EQ(controller.timelineModel()
+                  ->data(controller.timelineModel()->index(row, 0),
+                         TimelineModel::DurationUsRole)
+                  .toLongLong(),
+              2'500'000);
+
+    EXPECT_FALSE(controller.setCueTiming(cueId, 5'000'000, 4'000'000));
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+    document.undo();
+    EXPECT_EQ(document.project().tracks.at(2).cues.first().startUs, before.startUs);
+    EXPECT_EQ(document.project().tracks.at(2).cues.first().endUs, before.endUs);
+}
+
+TEST(TimelineController, FrameQuantizeAndTimecodeSeek)
+{
+    ProjectDocument document;
+    TimelineController controller(document);
+    // Default project is 30 fps.
+    EXPECT_EQ(controller.frameQuantizeUs(0), 0);
+    EXPECT_EQ(controller.frameQuantizeUs(40'000), 33'333);
+    EXPECT_EQ(controller.frameQuantizeUs(1'040'000), 1'033'333);
+
+    EXPECT_TRUE(controller.seekTimecode(QStringLiteral("00:00:01:15")));
+    EXPECT_EQ(controller.positionUs(), 1'500'000);
+    EXPECT_TRUE(controller.seekTimecode(QStringLiteral("2.5")));
+    EXPECT_EQ(controller.positionUs(), 2'500'000);
+    EXPECT_TRUE(controller.seekTimecode(QStringLiteral("01:02.250")));
+    EXPECT_EQ(controller.positionUs(), 62'250'000);
+    EXPECT_FALSE(controller.seekTimecode(QStringLiteral("not a time")));
+    EXPECT_EQ(controller.positionUs(), 62'250'000);
+}
+
+TEST(TimelineController, TargetTrackAndOrdinalAudioPairing)
+{
+    ProjectDocument document;
+    document.addAsset(videoAsset(5'000'000));
+    TimelineController controller(document);
+    const QString video2 = controller.addTrack(0);
+    const QString audio2 = controller.addTrack(1);
+    ASSERT_FALSE(video2.isEmpty());
+    ASSERT_FALSE(audio2.isEmpty());
+    EXPECT_EQ(controller.targetTrackId(), audio2);
+
+    controller.setTargetTrackId(video2);
+    EXPECT_EQ(controller.targetTrackId(), video2);
+
+    const QString clipId = controller.addAssetToTimeline(
+        QStringLiteral("asset-v"), video2, 0);
+    ASSERT_FALSE(clipId.isEmpty());
+    const Project &project = document.project();
+    const Track *v2 = document.trackById(video2);
+    const Track *a2 = document.trackById(audio2);
+    ASSERT_NE(v2, nullptr);
+    ASSERT_NE(a2, nullptr);
+    ASSERT_EQ(v2->clips.size(), 1);
+    ASSERT_EQ(a2->clips.size(), 1);
+    EXPECT_EQ(v2->clips.first().linkId, a2->clips.first().linkId);
+    EXPECT_EQ(document.trackById(QStringLiteral("track-a1"))->clips.size(), 0);
+
+    // A removed target is cleared instead of leaving a dangling selection.
+    controller.removeTrack(video2);
+    EXPECT_TRUE(controller.targetTrackId().isEmpty());
+    EXPECT_EQ(document.project().tracks.size(), 4);
+    Q_UNUSED(project);
+}
+
+TEST(TimelineController, ClipboardIsClearedWhenProjectIsReplaced)
+{
+    ProjectDocument document;
+    document.addAsset(videoAsset(5'000'000));
+    TimelineController controller(document);
+    const QString clipId = controller.addAssetToTimeline(
+        QStringLiteral("asset-v"), QStringLiteral("track-v1"), 0);
+    ASSERT_FALSE(clipId.isEmpty());
+    controller.selectClip(clipId);
+    controller.copySelected();
+
+    // Loading/replacing the document invalidates the clipboard's source track
+    // ids; a later paste must be a no-op instead of resurrecting old clips.
+    document.setProject(Project{});
+    controller.pasteAtPlayhead();
+    EXPECT_TRUE(document.project().tracks.at(0).clips.isEmpty());
+    EXPECT_TRUE(document.project().tracks.at(1).clips.isEmpty());
+    EXPECT_EQ(document.undoStack()->index(), 0);
+}
+
+TEST(TimelineController, MuteAndSoloAreIndependentPerAudioTrack)
+{
+    ProjectDocument document;
+    document.addAsset(videoAsset(5'000'000));
+    TimelineController controller(document);
+    const QString trackA1 = QStringLiteral("track-a1");
+    const QString audio2 = controller.addTrack(1);
+    ASSERT_FALSE(audio2.isEmpty());
+
+    controller.setTrackMuted(trackA1, true);
+    controller.setTrackSolo(audio2, true);
+    const Track *a1 = document.trackById(trackA1);
+    const Track *a2 = document.trackById(audio2);
+    ASSERT_NE(a1, nullptr);
+    ASSERT_NE(a2, nullptr);
+    EXPECT_TRUE(a1->muted);
+    EXPECT_FALSE(a1->solo);
+    EXPECT_TRUE(a2->solo);
+    EXPECT_FALSE(a2->muted);
 }
 
 TEST(TimelineController, EditsCueTextAndSpeedThroughCommands)

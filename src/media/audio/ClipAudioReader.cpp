@@ -78,6 +78,8 @@ void ClipAudioReader::reset()
     m_olaPadRemaining = 0;
     m_sourceScratch.clear();
     m_olaScratch.clear();
+    m_olaCarry.clear();
+    m_olaCarryOffset = 0;
 }
 
 void ClipAudioReader::render(const Clip &clip, int64_t blockLocalUs, int frames,
@@ -140,12 +142,33 @@ void ClipAudioReader::render(const Clip &clip, int64_t blockLocalUs, int frames,
         return;
     }
 
-    // Pitch-preserving OLA path.
-    const int outputHops = frames / OlaTimeStretcher::kHopFrames;
-    if (outputHops <= 0) {
+    // Pitch-preserving OLA path. First drain output carried from the previous
+    // block (the stretcher emits whole 10 ms hops, while a device block can be
+    // any length).
+    const int framesPerSample = m_channels;
+    int written = 0;
+    if (m_olaCarryOffset < int(m_olaCarry.size())) {
+        const int carriedFrames =
+            int(m_olaCarry.size()) / framesPerSample - m_olaCarryOffset;
+        const int take = std::min(frames, carriedFrames);
+        std::copy_n(m_olaCarry.data()
+                        + size_t(m_olaCarryOffset) * size_t(framesPerSample),
+                    size_t(take) * size_t(framesPerSample), out);
+        written = take;
+        m_olaCarryOffset += take;
+        if (m_olaCarryOffset >= int(m_olaCarry.size()) / framesPerSample) {
+            m_olaCarry.clear();
+            m_olaCarryOffset = 0;
+        }
+    }
+    if (written >= frames) {
         applyMonoTrim(out, frames);
         return;
     }
+
+    const int remaining = frames - written;
+    const int outputHops = (remaining + OlaTimeStretcher::kHopFrames - 1)
+                           / OlaTimeStretcher::kHopFrames;
     const int analysisHop = std::max(
         1, int(std::lround(double(OlaTimeStretcher::kHopFrames) * speed)));
 
@@ -210,10 +233,22 @@ void ClipAudioReader::render(const Clip &clip, int64_t blockLocalUs, int frames,
     const int discard = priming
         ? preRollHops * OlaTimeStretcher::kHopFrames
         : 0;
-    const int copyFrames = std::clamp(produced - discard, 0, frames);
+    const int available = std::max(0, produced - discard);
+    const int copyFrames = std::min(available, remaining);
     if (copyFrames > 0) {
         std::copy_n(m_olaScratch.data() + size_t(discard) * size_t(m_channels),
-                    size_t(copyFrames) * size_t(m_channels), out);
+                    size_t(copyFrames) * size_t(m_channels),
+                    out + size_t(written) * size_t(m_channels));
+    }
+    m_olaCarry.clear();
+    m_olaCarryOffset = 0;
+    if (available > copyFrames) {
+        const int leftover = available - copyFrames;
+        m_olaCarry.resize(size_t(leftover) * size_t(m_channels));
+        std::copy_n(
+            m_olaScratch.data()
+                + size_t(discard + copyFrames) * size_t(m_channels),
+            size_t(leftover) * size_t(m_channels), m_olaCarry.data());
     }
     applyMonoTrim(out, frames);
 }

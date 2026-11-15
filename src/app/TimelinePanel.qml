@@ -13,9 +13,35 @@ Item {
     property real pixelsPerSecond: Timeline.pixelsPerSecond
     property real contentWidth: Math.max(width - headerWidth,
                                          Timeline.durationUs / 1e6 * pixelsPerSecond + 400)
+    // Adaptive ruler: keep at least ~64 px between ticks instead of creating
+    // one Repeater item per second (a long timeline at low zoom would create
+    // thousands of items).
+    property real rulerStepSeconds: {
+        const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800]
+        for (let i = 0; i < steps.length; ++i) {
+            if (steps[i] * pixelsPerSecond >= 64)
+                return steps[i]
+        }
+        return 3600
+    }
+    property int rulerTickCount: Math.ceil(contentWidth
+                                           / Math.max(1, pixelsPerSecond)
+                                           / rulerStepSeconds) + 1
 
     function seekTo(timeUs) {
         App.seekTimeline(Math.max(0, Math.round(timeUs)))
+    }
+
+    function rulerLabel(seconds) {
+        if (seconds < 60)
+            return seconds + "s"
+        const total = Math.round(seconds)
+        const h = Math.floor(total / 3600)
+        const m = Math.floor((total % 3600) / 60)
+        const s = total % 60
+        return h > 0 ? h + ":" + String(m).padStart(2, "0") + ":"
+                       + String(s).padStart(2, "0")
+                     : m + ":" + String(s).padStart(2, "0")
     }
 
     RowLayout {
@@ -44,6 +70,7 @@ Item {
                         trackId: model.trackId
                         name: model.name
                         typeLabel: model.typeLabel
+                        trackType: model.type
                         muted: model.muted
                         solo: model.solo
                         locked: model.locked
@@ -92,10 +119,11 @@ Item {
                     color: "#202020"
 
                     Repeater {
-                        model: Math.ceil(width / Math.max(1, root.pixelsPerSecond))
+                        objectName: "ruler-ticks"
+                        model: root.rulerTickCount
                         Item {
-                            x: index * root.pixelsPerSecond
-                            width: root.pixelsPerSecond
+                            x: index * root.rulerStepSeconds * root.pixelsPerSecond
+                            width: root.rulerStepSeconds * root.pixelsPerSecond
                             height: ruler.height
                             Rectangle {
                                 width: 1
@@ -105,7 +133,7 @@ Item {
                             Text {
                                 x: 3
                                 y: 8
-                                text: index + "s"
+                                text: root.rulerLabel(index * root.rulerStepSeconds)
                                 color: "#8a8a8a"
                                 font.pixelSize: 10
                             }
@@ -132,6 +160,8 @@ Item {
                         name: model.name
                         startUs: model.startUs
                         durationUs: model.durationUs
+                        sourceInUs: model.sourceInUs
+                        sourceOutUs: model.sourceOutUs
                         speedMilli: model.speedMilli
                         linked: model.linked
                         trackType: model.trackType

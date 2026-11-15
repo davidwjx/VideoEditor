@@ -175,6 +175,34 @@ TEST(TimelineEvaluator, ExcludesDisabledAudioContent)
     EXPECT_TRUE(clipEvaluator.audioRange(0, 1'000'000).isEmpty());
 }
 
+TEST(TimelineEvaluator, ResolvesBuiltinPresetWhenProjectOnlyHasDefault)
+{
+    Project project = projectWithTracks();
+    project.subtitleStyles = {SubtitleStyle{}}; // v2 file written before presets
+    project.tracks[3].cues[0].styleId = QStringLiteral("boxed");
+    const FrameComposition frame =
+        TimelineEvaluator(project).frameAt(1'000'000);
+    ASSERT_EQ(frame.subtitles.size(), 1);
+    EXPECT_EQ(frame.subtitles.first().style.id, QStringLiteral("boxed"));
+    EXPECT_EQ(frame.subtitles.first().style.backgroundArgb, 0xB0000000u);
+    EXPECT_EQ(frame.subtitles.first().style.outlineWidth, 1);
+}
+
+TEST(TimelineEvaluator, AnySoloIsProjectWideAcrossGaps)
+{
+    Project project = projectWithTracks();
+    project.tracks[2].solo = true; // solo track's clip spans 0..2s
+    EXPECT_TRUE(TimelineEvaluator(project).anySolo());
+
+    // Past the solo clip's end the block has no solo layer, but solo state
+    // must still mute the other tracks.
+    EXPECT_TRUE(TimelineEvaluator(project).audioRange(2'500'000, 2'600'000)
+                    .isEmpty());
+
+    project.tracks[2].enabled = false;
+    EXPECT_FALSE(TimelineEvaluator(project).anySolo());
+}
+
 TEST(TimelineEvaluator, ExcludesDisabledSubtitleCue)
 {
     Project project = projectWithTracks();

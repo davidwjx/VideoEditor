@@ -331,7 +331,8 @@ void PreviewController::seekFrame(qint64 frame)
     requestTimelineFrame(target);
 }
 
-void PreviewController::openTimeline(const Project &project, qint64 durationUs)
+void PreviewController::openTimeline(const Project &project, qint64 durationUs,
+                                     bool useProxy)
 {
     pause();
     if (m_item)
@@ -339,6 +340,7 @@ void PreviewController::openTimeline(const Project &project, qint64 durationUs)
 
     const quint64 generation = ++m_generation;
     m_mode = Mode::Timeline;
+    m_useProxy = useProxy;
     m_timelineProject = project;
     m_timelineFps = project.timeline.fps.isValid() ? project.timeline.fps
                                                      : Rational{30, 1};
@@ -372,7 +374,8 @@ void PreviewController::openTimeline(const Project &project, qint64 durationUs)
                                   Qt::QueuedConnection,
                                   Q_ARG(VideoEditor::Project, m_timelineProject),
                                   Q_ARG(QString, QString()),
-                                  Q_ARG(quint64, generation));
+                                  Q_ARG(quint64, generation),
+                                  Q_ARG(bool, m_useProxy));
     }
     requestTimelineFrame(0);
 }
@@ -403,7 +406,8 @@ void PreviewController::updateTimelineProject(const Project &project)
                                   Qt::QueuedConnection,
                                   Q_ARG(VideoEditor::Project, project),
                                   Q_ARG(QString, QString()),
-                                  Q_ARG(quint64, m_generation));
+                                  Q_ARG(quint64, m_generation),
+                                  Q_ARG(bool, m_useProxy));
     }
     if (m_audioEngine) {
         QMetaObject::invokeMethod(m_audioEngine, "setProject",
@@ -413,6 +417,30 @@ void PreviewController::updateTimelineProject(const Project &project)
 
     // Recompose the current instant so a paused edit is visible immediately;
     // while playing the presentation timer picks up the new last frame too.
+    m_lastTimelineFrame = -1;
+    m_lastTimelineSubmittedUs = -1;
+    requestTimelineFrame(m_positionUs);
+}
+
+void PreviewController::setUseProxy(bool enabled)
+{
+    if (m_useProxy == enabled)
+        return;
+    m_useProxy = enabled;
+    emit useProxyChanged();
+    if (m_mode != Mode::Timeline)
+        return;
+
+    // Re-send the snapshot: setProject() drops every clip decoder so the next
+    // frame opens the newly selected file. Recompose the paused instant.
+    if (m_timelineWorker) {
+        QMetaObject::invokeMethod(m_timelineWorker, "setProject",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(VideoEditor::Project, m_timelineProject),
+                                  Q_ARG(QString, QString()),
+                                  Q_ARG(quint64, m_generation),
+                                  Q_ARG(bool, m_useProxy));
+    }
     m_lastTimelineFrame = -1;
     m_lastTimelineSubmittedUs = -1;
     requestTimelineFrame(m_positionUs);

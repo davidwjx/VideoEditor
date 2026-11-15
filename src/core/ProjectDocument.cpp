@@ -26,6 +26,7 @@ void ProjectDocument::setProject(Project project, const QString &filePath)
 {
     m_project = std::move(project);
     m_project.ensureDefaultTracks();
+    m_project.ensureSubtitleStyles();
     m_filePath = filePath;
     m_undoStack.clear();
     m_undoStack.setClean();
@@ -33,6 +34,7 @@ void ProjectDocument::setProject(Project project, const QString &filePath)
     emit assetsChanged();
     emit tracksChanged();
     emit timelineChanged();
+    emit projectReplaced();
     emit undoStateChanged();
     emit dirtyChanged();
 }

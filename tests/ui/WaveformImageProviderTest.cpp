@@ -43,6 +43,46 @@ TEST(WaveformImageProvider, DrawsRequestedSize)
     EXPECT_TRUE(hasInk);
 }
 
+TEST(WaveformImageProvider, HonoursTrimmedSourceRange)
+{
+    // Music rather than the constant-amplitude tone: sliced ranges must have
+    // visibly different envelopes for the comparison to mean anything.
+    const QString music = QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR))
+                              .filePath(QStringLiteral("bgm.mp3"));
+    if (!QFileInfo::exists(music))
+        GTEST_SKIP() << "missing bgm.mp3";
+
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    WaveformService service(dir.path());
+    QSignalSpy ready(&service, &WaveformService::ready);
+    service.request(QStringLiteral("asset-a"), music);
+    if (!ready.wait(8000))
+        GTEST_SKIP() << "waveform worker did not finish";
+
+    WaveformImageProvider provider(&service);
+    QSize size;
+    const QImage full = provider.requestImage(
+        QStringLiteral("asset-a/300"), &size, QSize(300, 56));
+    const QImage firstHalf = provider.requestImage(
+        QStringLiteral("asset-a/300/0/500000"), &size, QSize(300, 56));
+    const QImage secondHalf = provider.requestImage(
+        QStringLiteral("asset-a/300/500000/1000000"), &size, QSize(300, 56));
+
+    int firstDiff = 0;
+    int secondDiff = 0;
+    for (int y = 0; y < full.height(); ++y) {
+        for (int x = 0; x < full.width(); ++x) {
+            if (full.pixel(x, y) != firstHalf.pixel(x, y))
+                ++firstDiff;
+            if (firstHalf.pixel(x, y) != secondHalf.pixel(x, y))
+                ++secondDiff;
+        }
+    }
+    EXPECT_GT(firstDiff, 0) << "a trimmed range must not draw the whole file";
+    EXPECT_GT(secondDiff, 0) << "different trim ranges must differ";
+}
+
 TEST(WaveformImageProvider, UnknownAssetIsTransparent)
 {
     QTemporaryDir dir;

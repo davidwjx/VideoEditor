@@ -10,6 +10,18 @@ ScrollView {
     id: inspector
 
     readonly property var clip: Timeline.selectedClip
+    readonly property var speedValues: [250, 500, 1000, 1500, 2000, 4000]
+    readonly property var presetSpeedLabels: ["0.25x", "0.5x", "1x", "1.5x",
+                                              "2x", "4x"]
+    // A custom speed gets its own row so the combo never displays a wrong
+    // preset (previously any non-preset value showed as 1x).
+    readonly property var speedModel: {
+        const labels = presetSpeedLabels.slice()
+        const actual = clipField("speedMilli", 1000)
+        if (speedIndexFor(actual) < 0)
+            labels.push("自定义 " + formatSpeed(actual))
+        return labels
+    }
 
     function hasClip() {
         return Timeline.selectedClipId !== ""
@@ -23,13 +35,22 @@ ScrollView {
 
     function speedIndexFor(milli) {
         const speeds = [250, 500, 1000, 1500, 2000, 4000]
-        const index = speeds.indexOf(milli)
-        return index < 0 ? 2 : index
+        return speeds.indexOf(milli) // -1 keeps a custom speed visible
+    }
+
+    function formatSpeed(milli) {
+        const value = milli / 1000
+        return (Math.round(value * 100) / 100) + "x"
     }
 
     function currentSpeedMilli() {
-        return [250, 500, 1000, 1500, 2000, 4000][
-                    speedIndexFor(clipField("speedMilli", 1000))]
+        // Use the clip's actual speed so toggling preserve-pitch does not
+        // silently reset a custom value to 1x.
+        return clipField("speedMilli", 1000)
+    }
+
+    function isAudioClip() {
+        return clipField("hasAudioControls", false) === true
     }
 
     function commitFadeIn(seconds) {
@@ -82,20 +103,42 @@ ScrollView {
             Label { text: "变速"; color: "#cccccc" }
             ComboBox {
                 id: speedBox
+                objectName: "inspector-speed"
                 Layout.fillWidth: true
-                model: ["0.25x", "0.5x", "1x", "1.5x", "2x", "4x"]
+                editable: true
+                model: inspector.speedModel
                 enabled: inspector.hasClip()
                 onActivated: {
-                    const speeds = [250, 500, 1000, 1500, 2000, 4000]
-                    Timeline.setClipSpeed(Timeline.selectedClipId, speeds[index],
-                                          preservePitch.checked)
+                    if (index < inspector.speedValues.length) {
+                        Timeline.setClipSpeed(Timeline.selectedClipId,
+                                              inspector.speedValues[index],
+                                              preservePitch.checked)
+                    }
+                }
+                // Free-form entry keeps non-preset speeds editable instead of
+                // displaying 1x for them.
+                onAccepted: {
+                    const parsed = parseFloat(text)
+                    if (inspector.hasClip() && isFinite(parsed)
+                        && parsed >= 0.25 && parsed <= 4) {
+                        Timeline.setClipSpeed(Timeline.selectedClipId,
+                                              Math.round(parsed * 1000),
+                                              preservePitch.checked)
+                    } else {
+                        editText = inspector.formatSpeed(
+                                       inspector.clipField("speedMilli", 1000))
+                    }
                 }
             }
             Binding {
                 target: speedBox
                 property: "currentIndex"
-                value: inspector.speedIndexFor(inspector.clipField("speedMilli", 1000))
-                when: !speedBox.pressed
+                value: {
+                    const index = inspector.speedIndexFor(
+                                      inspector.clipField("speedMilli", 1000))
+                    return index < 0 ? speedBox.model.length - 1 : index
+                }
+                when: !speedBox.pressed && !speedBox.activeFocus
             }
         }
         CheckBox {
@@ -114,6 +157,14 @@ ScrollView {
             }
         }
 
+        Label {
+            visible: inspector.hasClip() && !inspector.isAudioClip()
+            text: "音频参数请选择链接的音频片段（A 轨）"
+            color: "#b08a5a"
+            font.pixelSize: 10
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
         Label { text: "音量"; color: "#cccccc" }
         Slider {
             id: volume
@@ -121,7 +172,7 @@ ScrollView {
             Layout.fillWidth: true
             from: 0
             to: 200
-            enabled: inspector.hasClip()
+            enabled: inspector.hasClip() && inspector.isAudioClip()
             property real pendingValue: 100
             onMoved: {
                 if (pressed) {
@@ -188,7 +239,7 @@ ScrollView {
             Button {
                 objectName: "inspector-add-keyframe"
                 text: "添加关键帧"
-                enabled: inspector.hasClip()
+                enabled: inspector.hasClip() && inspector.isAudioClip()
                 onClicked: inspector.addKeyframeAtPlayhead()
             }
             Label {
@@ -205,7 +256,7 @@ ScrollView {
             Layout.fillWidth: true
             from: -100
             to: 100
-            enabled: inspector.hasClip()
+            enabled: inspector.hasClip() && inspector.isAudioClip()
             property real pendingValue: 0
             onMoved: {
                 if (pressed) {
@@ -238,7 +289,7 @@ ScrollView {
             Layout.fillWidth: true
             from: 0
             to: 5
-            enabled: inspector.hasClip()
+            enabled: inspector.hasClip() && inspector.isAudioClip()
             property real pendingValue: 0
             onMoved: {
                 if (pressed) {
@@ -269,7 +320,7 @@ ScrollView {
             Layout.fillWidth: true
             from: 0
             to: 5
-            enabled: inspector.hasClip()
+            enabled: inspector.hasClip() && inspector.isAudioClip()
             property real pendingValue: 0
             onMoved: {
                 if (pressed) {

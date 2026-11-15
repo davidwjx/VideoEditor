@@ -12,13 +12,21 @@
 #include <QString>
 
 #include "IVideoDecoder.h"
+#include "Project.h"
 
 namespace VideoEditor {
 
 class D3D11Context;
 class Nv12Converter;
 class RgbaConverter;
-struct Asset;
+
+// Chooses the file a timeline preview should decode. Toggling "use proxy" off
+// must hand an empty path to ClipVideoSource so the original source is used
+// even when a proxy file exists on disk.
+inline QString activeProxyPath(const Asset &asset, bool useProxy)
+{
+    return useProxy ? asset.proxyPath : QString();
+}
 
 // One NV12->RGBA and one software-RGBA converter, compiled once and shared by
 // all ClipVideoSource instances of a TimelineRenderWorker.

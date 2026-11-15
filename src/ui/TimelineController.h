@@ -29,6 +29,11 @@ class TimelineController : public QObject {
                    NOTIFY selectedClipChanged)
     Q_PROPERTY(QVariantMap selectedCue READ selectedCue
                    NOTIFY selectedCueChanged)
+    // Track that receives newly added media and track operations. Empty means
+    // "first track of the matching type". Kept out of the document on purpose:
+    // it is transient UI state and must not create undo steps.
+    Q_PROPERTY(QString targetTrackId READ targetTrackId WRITE setTargetTrackId
+                   NOTIFY targetTrackChanged)
 
 public:
     explicit TimelineController(ProjectDocument &document, QObject *parent = nullptr);
@@ -46,10 +51,17 @@ public:
     QString selectedCueId() const { return m_selectedCueId; }
     QVariantMap selectedClip() const;
     QVariantMap selectedCue() const;
+    QString targetTrackId() const { return m_targetTrackId; }
+    void setTargetTrackId(const QString &trackId);
 
     Q_INVOKABLE void seekUs(qint64 positionUs);
     Q_INVOKABLE void stepFrames(int delta);
     Q_INVOKABLE qint64 snapUs(qint64 timeUs) const;
+    // Snaps a time to the project frame grid (no-op for an invalid fps).
+    Q_INVOKABLE qint64 frameQuantizeUs(qint64 timeUs) const;
+    // Accepts "HH:MM:SS:FF", "HH:MM:SS;FF", "MM:SS.mmm" or plain seconds and
+    // moves the playhead. Returns false when the text cannot be parsed.
+    Q_INVOKABLE bool seekTimecode(const QString &text);
     Q_INVOKABLE QString addAssetToTimeline(const QString &assetId,
                                           const QString &trackId,
                                           qint64 atUs);
@@ -91,12 +103,20 @@ public:
     Q_INVOKABLE bool setCuePosition(const QString &trackId,
                                     const QString &cueId, int xPermille,
                                     int yPermille);
+    // Whole-cue timing update: text, style, position and enabled state survive.
+    Q_INVOKABLE bool setCueTiming(const QString &cueId, qint64 startUs,
+                                  qint64 endUs);
     Q_INVOKABLE void deleteSelectedCue();
+    // Re-links the selected clip with a same-time A/V counterpart, or breaks
+    // the selected clip's link. Both are single undo steps.
+    Q_INVOKABLE bool linkSelectedClip();
+    Q_INVOKABLE void unlinkSelectedClip();
     Q_INVOKABLE void applySubtitleStyle(const QString &styleId,
                                         const QString &cueId = {});
     Q_INVOKABLE QString importSrtFile(const QString &path);
     Q_INVOKABLE bool exportSrtFile(const QString &path);
-    Q_INVOKABLE void addTrack(int type);
+    // Returns the new track id (empty on failure) and makes it the target.
+    Q_INVOKABLE QString addTrack(int type);
     Q_INVOKABLE void removeTrack(const QString &trackId);
     Q_INVOKABLE void moveTrackUp(const QString &trackId);
     Q_INVOKABLE void moveTrackDown(const QString &trackId);
@@ -116,6 +136,7 @@ signals:
     void selectionChanged();
     void selectedClipChanged();
     void selectedCueChanged();
+    void targetTrackChanged();
     void editFailed(QString message);
 
 private:
@@ -139,6 +160,7 @@ private:
     bool m_snapEnabled = true;
     QString m_selectedClipId;
     QString m_selectedCueId;
+    QString m_targetTrackId;
     qint64 m_lastDurationUs = -1;
 };
 

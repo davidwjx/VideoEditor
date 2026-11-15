@@ -58,6 +58,10 @@ public:
 
     FrameComposition frameAt(int64_t timelineUs) const;
     QList<AudioLayer> audioRange(int64_t startUs, int64_t endUs) const;
+    // True when any enabled audio track is soloed. Solo is a project-wide
+    // state: a solo track that has a gap must still mute every other track in
+    // that gap, so this is intentionally independent of the current block.
+    bool anySolo() const;
     int64_t durationUs() const;
 
 private:

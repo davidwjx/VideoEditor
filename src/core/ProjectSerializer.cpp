@@ -435,6 +435,9 @@ std::optional<Project> ProjectSerializer::fromJson(const QJsonObject &json,
     }
     for (const QJsonValue &value : json.value(QStringLiteral("subtitleStyles")).toArray())
         project.subtitleStyles.append(styleFromJson(value.toObject()));
+    // Presets are application data, not user data: merge them on load so a v2
+    // project saved before boxed/bold-outline existed can still render them.
+    project.ensureSubtitleStyles();
     // Do not inject default tracks for a v2 file that explicitly has none: an
     // empty timeline is valid, and round-tripping must preserve it exactly.
     // New projects get defaults from ProjectDocument's constructor; v1 files

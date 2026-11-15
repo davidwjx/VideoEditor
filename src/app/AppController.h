@@ -51,7 +51,10 @@ public:
 
     Q_INVOKABLE void importUrls(const QList<QUrl> &urls);
     Q_INVOKABLE void openAsset(const QString &id);
-    Q_INVOKABLE void addAssetToTimeline(const QString &assetId);
+    // targetTrackId selects where the new clip lands (V2/A2...). An empty or
+    // incompatible id falls back to the first track of the asset's type.
+    Q_INVOKABLE void addAssetToTimeline(const QString &assetId,
+                                        const QString &targetTrackId = QString());
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE void clearError();
@@ -100,6 +103,7 @@ private:
     void setRecoveryAvailable(bool available);
     void autosave();
     void requestWaveforms();
+    void requestMissingProxies();
     void buildTimelineSelftestProject();
 
     ProjectDocument *m_document = nullptr;

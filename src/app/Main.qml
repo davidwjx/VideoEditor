@@ -34,6 +34,63 @@ ApplicationWindow {
             Button { text: "波纹删除"; onClicked: Timeline.deleteSelected(true) }
             Button { text: "复制"; onClicked: Timeline.copySelected() }
             Button { text: "粘贴"; onClicked: Timeline.pasteAtPlayhead() }
+            Button {
+                text: "链接"
+                enabled: Timeline.selectedClipId !== ""
+                onClicked: Timeline.linkSelectedClip()
+            }
+            Button {
+                text: "解链"
+                enabled: Timeline.selectedClipId !== ""
+                onClicked: Timeline.unlinkSelectedClip()
+            }
+
+            ToolButton {
+                id: trackMenuButton
+                objectName: "track-menu-button"
+                text: "轨道"
+                onClicked: trackMenu.open()
+
+                // Add/reorder/remove lanes. New tracks become the target so
+                // the next double-clicked media item lands there.
+                Menu {
+                    id: trackMenu
+                    MenuItem {
+                        objectName: "track-add-video"
+                        text: "添加视频轨"
+                        onClicked: Timeline.addTrack(0)
+                    }
+                    MenuItem {
+                        objectName: "track-add-audio"
+                        text: "添加音频轨"
+                        onClicked: Timeline.addTrack(1)
+                    }
+                    MenuItem {
+                        objectName: "track-add-subtitle"
+                        text: "添加字幕轨"
+                        onClicked: Timeline.addTrack(2)
+                    }
+                    MenuSeparator {}
+                    MenuItem {
+                        objectName: "track-move-up"
+                        text: "上移当前目标轨"
+                        enabled: Timeline.targetTrackId !== ""
+                        onClicked: Timeline.moveTrackUp(Timeline.targetTrackId)
+                    }
+                    MenuItem {
+                        objectName: "track-move-down"
+                        text: "下移当前目标轨"
+                        enabled: Timeline.targetTrackId !== ""
+                        onClicked: Timeline.moveTrackDown(Timeline.targetTrackId)
+                    }
+                    MenuItem {
+                        objectName: "track-remove"
+                        text: "删除当前目标轨"
+                        enabled: Timeline.targetTrackId !== ""
+                        onClicked: Timeline.removeTrack(Timeline.targetTrackId)
+                    }
+                }
+            }
 
             ToolSeparator {}
             CheckBox {
@@ -72,6 +129,24 @@ ApplicationWindow {
             text: Preview.timelineMode ? Timeline.timecode : Preview.timecode
             color: "white"
             font.family: "Consolas"
+        }
+        TextField {
+            id: timecodeJump
+            objectName: "timecode-jump"
+            implicitWidth: 120
+            placeholderText: "00:00:00:00"
+            font.family: "Consolas"
+            onEditingFinished: {
+                if (!Timeline.seekTimecode(text))
+                    text = Timeline.timecode
+                focus = false
+            }
+            Binding {
+                target: timecodeJump
+                property: "text"
+                value: Preview.timelineMode ? Timeline.timecode : Preview.timecode
+                when: !timecodeJump.activeFocus
+            }
         }
         Slider {
             id: transport
@@ -119,7 +194,10 @@ ApplicationWindow {
                     text: model.name + "\n" + model.codec + " · " + model.resolution
                           + " · " + model.duration
                     onClicked: App.openAsset(model.id)
-                    onDoubleClicked: App.addAssetToTimeline(model.id)
+                    // Add to the lane selected in the track headers (or the
+                    // default matching lane when none is selected).
+                    onDoubleClicked: App.addAssetToTimeline(
+                                         model.id, Timeline.targetTrackId)
                 }
 
                 Label {

@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 
+#include <QSet>
 #include <QString>
 
 #include "Project.h"
@@ -42,16 +43,42 @@ public:
 
     void render(float *interleaved, int frames, MixStats *stats = nullptr);
 
+    // Number of decoder readers kept open. Test/inspection hook used to prove
+    // parameter-only edits do not reopen everything and long timelines stay
+    // bounded.
+    int cachedReaderCountForTest() const { return int(m_readers.size()); }
+    // Number of successful decoder opens since construction. A parameter-only
+    // edit must not increase this counter.
+    int readerOpenCountForTest() const { return m_readerOpenCount; }
+    static constexpr int kMaxCachedReaders = 8;
+
 private:
+    struct ReaderEntry {
+        std::unique_ptr<ClipAudioReader> reader;
+        QString sourceKey;
+        // Source-affecting fields of the clip the reader cursor belongs to.
+        int64_t sourceInUs = 0;
+        int64_t sourceOutUs = 0;
+        int64_t timelineStartUs = 0;
+        int speedMilli = 1000;
+        bool preservePitch = false;
+        quint64 lastUsedRender = 0;
+    };
+
     ClipAudioReader *readerFor(const Clip &clip);
     int64_t positionForFrameCount(int64_t frames) const;
+    static QString sourceKeyFor(const Asset &asset);
+    void dropStaleReaders();
+    void evictUnusedReaders(const QSet<QString> &used);
 
     Project m_project;
     int m_sampleRate = 48000;
     int m_channels = 2;
     int64_t m_startPositionUs = 0;
     int64_t m_framesRendered = 0;
-    std::map<QString, std::unique_ptr<ClipAudioReader>> m_readers;
+    quint64 m_renderSerial = 0;
+    int m_readerOpenCount = 0;
+    std::map<QString, ReaderEntry> m_readers;
 };
 
 } // namespace VideoEditor

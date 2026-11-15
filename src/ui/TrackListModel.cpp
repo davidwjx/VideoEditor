@@ -37,7 +37,13 @@ int TrackListModel::indexOfTrack(const QString &trackId) const
 
 void TrackListModel::setProject(const Project &project)
 {
-    const QList<Track> &next = project.tracks;
+    // Group lanes by type for display. The row index is what TimelineModel's
+    // TrackIndexRole and the QML lanes consume, so both models share this order.
+    QList<Track> next;
+    const QList<int> order = displayTrackOrder(project.tracks);
+    next.reserve(order.size());
+    for (const int projectIndex : order)
+        next.append(project.tracks.at(projectIndex));
 
     // Keys that must survive this reconciliation.
     QSet<QString> nextIds;

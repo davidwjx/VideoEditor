@@ -36,8 +36,10 @@ public:
     ~TimelineRenderWorker() override;
 
 public slots:
+    // useProxy selects the asset's proxy file when one exists; false forces the
+    // original source even if a proxy is cached.
     void setProject(VideoEditor::Project project, QString projectPath,
-                    quint64 generation);
+                    quint64 generation, bool useProxy);
     void renderFrame(qint64 timelineUs, quint64 generation);
     void close();
 
@@ -80,6 +82,7 @@ private:
     QImage m_subtitleImage;
     int m_width = 1920;
     int m_height = 1080;
+    bool m_useProxy = true;
     bool m_valid = false;
 };
 

@@ -220,17 +220,27 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
     EXPECT_NEAR(volume->property("value").toDouble(), 150.0, 0.001);
     EXPECT_NEAR(scale->property("value").toDouble(), 150.0, 0.001);
     EXPECT_NEAR(opacity->property("value").toDouble(), 50.0, 0.001);
+    // Audio controls on a video clip are inaudible; the inspector disables
+    // them and shows a hint instead of silently writing dead parameters.
+    EXPECT_FALSE(volume->property("enabled").toBool());
 
     // Dragging one fade slider must preserve the other fade, even after
     // switching selection between clips with different fade values.
     const QString clip2Id = controller.timeline()->addAssetToTimeline(
         assetId, QStringLiteral("track-v1"), 5'000'000);
     ASSERT_FALSE(clip2Id.isEmpty());
-    controller.timeline()->setClipFades(clipId, 300'000, 400'000);
-    controller.timeline()->setClipFades(clip2Id, 100'000, 900'000);
-    controller.timeline()->selectClip(clip2Id);
+    // Fades are audio parameters and the inspector intentionally disables them
+    // for a video clip; select the linked A-track halves for this gesture.
+    ASSERT_GE(controller.document()->project().tracks.at(1).clips.size(), 2);
+    const QString audioClipId =
+        controller.document()->project().tracks.at(1).clips.at(0).id;
+    const QString audioClip2Id =
+        controller.document()->project().tracks.at(1).clips.at(1).id;
+    controller.timeline()->setClipFades(audioClipId, 300'000, 400'000);
+    controller.timeline()->setClipFades(audioClip2Id, 100'000, 900'000);
+    controller.timeline()->selectClip(audioClip2Id);
     QTest::qWait(80);
-    controller.timeline()->selectClip(clipId);
+    controller.timeline()->selectClip(audioClipId);
     QTest::qWait(80);
 
     QQuickItem *fadeIn = findItem(window, QStringLiteral("inspector-fadeIn"));
@@ -250,7 +260,7 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
 
     dragSlider(fadeIn, 0.5, 0.8);
     const Clip *afterFadeIn =
-        findClip(controller.document()->project(), clipId);
+        findClip(controller.document()->project(), audioClipId);
     ASSERT_NE(afterFadeIn, nullptr);
     const qint64 fadeInAfterDrag = afterFadeIn->audio.fadeInUs;
     EXPECT_NE(fadeInAfterDrag, 300'000);
@@ -259,7 +269,7 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
 
     dragSlider(fadeOut, 0.8, 0.3);
     const Clip *afterFadeOut =
-        findClip(controller.document()->project(), clipId);
+        findClip(controller.document()->project(), audioClipId);
     ASSERT_NE(afterFadeOut, nullptr);
     EXPECT_EQ(afterFadeOut->audio.fadeInUs, fadeInAfterDrag)
         << "dragging fade-out must preserve the sibling fade-in";
@@ -296,6 +306,144 @@ TEST(TimelineQml, LoadsAndCommitsDragAndTrim)
         << "right trim must not move the clip start";
     EXPECT_LT(trimmed->timelineDurationUs(), durationAfterDrag)
         << "clip trim was stolen or not committed";
+}
+
+TEST(TimelineQml, TrackHeadersSelectTargetAndToggleAudioMuteSolo)
+{
+    const QString videoPath = fixture(QStringLiteral("h264.mp4"));
+    const QString musicPath = fixture(QStringLiteral("bgm.mp3"));
+    if (!QFileInfo::exists(videoPath) || !QFileInfo::exists(musicPath))
+        GTEST_SKIP() << "missing fixtures";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(videoPath),
+                           QUrl::fromLocalFile(musicPath)});
+    ASSERT_EQ(controller.mediaModel()->rowCount(), 2);
+    const QString videoId = controller.document()->project().assets.at(0).id;
+    const QString musicId = controller.document()->project().assets.at(1).id;
+
+    // Build V2/A2 through the same controller commands the track menu uses.
+    const QString video2 = controller.timeline()->addTrack(0);
+    const QString audio2 = controller.timeline()->addTrack(1);
+    ASSERT_FALSE(video2.isEmpty());
+    ASSERT_FALSE(audio2.isEmpty());
+    const QString videoClip = controller.timeline()->addAssetToTimeline(
+        videoId, video2, 0);
+    ASSERT_FALSE(videoClip.isEmpty());
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(musicId, QStringLiteral("track-a1"), 0)
+                     .isEmpty());
+    // Original audio paired with V2 lands on A2; BGM is on A1.
+    ASSERT_EQ(controller.document()->trackById(video2)->clips.size(), 1);
+    ASSERT_EQ(controller.document()->trackById(audio2)->clips.size(), 1);
+    ASSERT_EQ(controller.document()
+                  ->trackById(QStringLiteral("track-a1"))
+                  ->clips.first()
+                  .assetId,
+              musicId);
+
+    // A long project at low zoom exercises the adaptive ruler: one item per
+    // second would create 600 delegate items.
+    const QString longCue = controller.timeline()->addCueAtPlayhead();
+    ASSERT_FALSE(longCue.isEmpty());
+    ASSERT_TRUE(controller.timeline()->setCueTiming(longCue, 500'000'000,
+                                                    600'000'000));
+    controller.timeline()->setPixelsPerSecond(20.0);
+
+    QQmlEngine engine;
+    engine.addImageProvider(QStringLiteral("waveform"),
+                            new WaveformImageProvider(controller.waveforms()));
+    engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
+                                             controller.preview());
+    engine.rootContext()->setContextProperty(QStringLiteral("Timeline"),
+                                             controller.timeline());
+    engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
+                                             controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
+                                             QStringLiteral("test"));
+
+    QQmlComponent component(
+        &engine,
+        QUrl::fromLocalFile(QStringLiteral(VIDEOEDITOR_SOURCE_DIR
+                                           "/src/app/Main.qml")));
+    QScopedPointer<QObject> root(component.create());
+    ASSERT_FALSE(component.isError()) << component.errorString().toStdString();
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    ASSERT_NE(window, nullptr);
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for click delivery";
+    window->show();
+    if (!QTest::qWaitForWindowExposed(window, 5000))
+        GTEST_SKIP() << "window was not exposed (no desktop/D3D session)";
+    QTest::qWait(300);
+
+    // The track add/reorder menu and header controls are reachable from QML.
+    EXPECT_NE(findItem(window, QStringLiteral("track-menu-button")), nullptr);
+    EXPECT_NE(findItem(window, QStringLiteral("track-header-track-a1")),
+              nullptr);
+
+    // M/S are audio controls; video/subtitle headers must not show dead ones.
+    QQuickItem *videoMute =
+        findItem(window, QStringLiteral("track-mute-") + video2);
+    QQuickItem *audioMute =
+        findItem(window, QStringLiteral("track-mute-") + audio2);
+    ASSERT_NE(videoMute, nullptr);
+    ASSERT_NE(audioMute, nullptr);
+    EXPECT_FALSE(videoMute->isVisible());
+    EXPECT_TRUE(audioMute->isVisible());
+
+    QObject *rulerTicks =
+        window->findChild<QObject *>(QStringLiteral("ruler-ticks"));
+    ASSERT_NE(rulerTicks, nullptr);
+    const int tickCount = rulerTicks->property("count").toInt();
+    EXPECT_GT(tickCount, 0);
+    EXPECT_LT(tickCount, 200) << "ruler must virtualize ticks for long projects";
+
+    QQuickItem *a1Header =
+        findItem(window, QStringLiteral("track-header-track-a1"));
+    ASSERT_NE(a1Header, nullptr);
+    // Click the header's name area (not a button) to make A1 the target.
+    const QPointF headerPoint =
+        a1Header->mapToScene(QPointF(10.0, 8.0));
+    sendMouse(window, QEvent::MouseButtonPress, headerPoint, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(window, QEvent::MouseButtonRelease, headerPoint, Qt::LeftButton,
+              Qt::NoButton);
+    QTest::qWait(100);
+    EXPECT_EQ(controller.timeline()->targetTrackId(),
+              QStringLiteral("track-a1"));
+
+    QQuickItem *a1Mute =
+        findItem(window, QStringLiteral("track-mute-track-a1"));
+    ASSERT_NE(a1Mute, nullptr);
+    EXPECT_TRUE(a1Mute->isVisible());
+    clickItem(window, a1Mute);
+    ASSERT_TRUE(controller.document()->trackById(QStringLiteral("track-a1"))
+                    ->muted);
+    EXPECT_FALSE(controller.document()->trackById(audio2)->muted);
+
+    QQuickItem *a2Solo = findItem(
+        window, QStringLiteral("track-solo-") + audio2);
+    ASSERT_NE(a2Solo, nullptr);
+    clickItem(window, a2Solo);
+    EXPECT_TRUE(controller.document()->trackById(audio2)->solo);
+    EXPECT_FALSE(controller.document()->trackById(QStringLiteral("track-a1"))
+                     ->solo);
+
+    // Lanes are grouped/stacked: the V2 clip is above the A1 BGM clip.
+    QQuickItem *videoItem = findItem(window, QStringLiteral("clip-")
+                                                 + videoClip);
+    ASSERT_NE(videoItem, nullptr);
+    const QString bgmClipId =
+        controller.document()->trackById(QStringLiteral("track-a1"))
+            ->clips.first().id;
+    QQuickItem *bgmItem =
+        findItem(window, QStringLiteral("clip-") + bgmClipId);
+    ASSERT_NE(bgmItem, nullptr);
+    EXPECT_NE(videoItem->y(), bgmItem->y());
 }
 
 TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
@@ -382,6 +530,15 @@ TEST(TimelineQml, AuthorsKeyframesAndCuePosition)
     ASSERT_NE(audioClip, nullptr);
     ASSERT_EQ(audioClip->audio.keyframes.size(), 1);
     EXPECT_EQ(audioClip->audio.keyframes.first().timeUs, 1'500'000);
+
+    // A non-preset speed stays visible in the editable combo instead of being
+    // displayed as 1x.
+    controller.timeline()->setClipSpeed(audioClipId, 1250, false);
+    QTest::qWait(100);
+    QQuickItem *speedBox = findItem(window, QStringLiteral("inspector-speed"));
+    ASSERT_NE(speedBox, nullptr);
+    EXPECT_EQ(speedBox->property("editText").toString(),
+              QStringLiteral("自定义 1.25x"));
 
     // Position sliders bind to the selected cue and commit once on release.
     controller.timeline()->selectCue(cueId);

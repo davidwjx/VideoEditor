@@ -208,7 +208,72 @@ TEST(TimelineUi, AppAddsAssetSeeksAndExposesSubtitleStyles)
     EXPECT_TRUE(controller.preview()->timelineMode());
     controller.setUseProxy(false);
     EXPECT_FALSE(controller.useProxy());
+    // The flag must reach the compositor worker, not just the asset preview;
+    // toggling must not leave timeline mode.
+    EXPECT_FALSE(controller.preview()->useProxy());
     EXPECT_TRUE(controller.preview()->timelineMode());
+    controller.setUseProxy(true);
+    EXPECT_TRUE(controller.preview()->useProxy());
+    EXPECT_TRUE(controller.preview()->timelineMode());
+}
+
+TEST(TimelineUi, AddingAssetKeepsPlayheadAndTargetTrack)
+{
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+
+    controller.addAssetToTimeline(assetId);
+    ASSERT_TRUE(controller.preview()->timelineMode());
+    controller.seekTimeline(1'500'000);
+
+    // Adding another clip must not reset the playhead to zero.
+    controller.addAssetToTimeline(assetId, QStringLiteral("track-v1"));
+    EXPECT_TRUE(controller.preview()->timelineMode());
+    EXPECT_EQ(controller.timeline()->positionUs(), 1'500'000);
+    EXPECT_EQ(controller.preview()->positionMs(), 1500);
+    EXPECT_FALSE(controller.preview()->playing());
+}
+
+TEST(TimelineUi, AudioAssetGoesToTargetTrackAndVideoAudioPairsByOrdinal)
+{
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    const QString video = fixture(QStringLiteral("h264.mp4"));
+    const QString music = fixture(QStringLiteral("bgm.mp3"));
+    if (!QFileInfo::exists(video) || !QFileInfo::exists(music))
+        GTEST_SKIP() << "missing fixtures";
+    controller.importUrls({QUrl::fromLocalFile(video),
+                           QUrl::fromLocalFile(music)});
+    ASSERT_EQ(controller.document()->project().assets.size(), 2);
+    const QString videoId = controller.document()->project().assets.at(0).id;
+    const QString musicId = controller.document()->project().assets.at(1).id;
+
+    const QString video2 = controller.timeline()->addTrack(0);
+    const QString audio2 = controller.timeline()->addTrack(1);
+    ASSERT_FALSE(video2.isEmpty());
+    ASSERT_FALSE(audio2.isEmpty());
+
+    // Original audio follows the chosen video lane (V2 -> A2).
+    controller.addAssetToTimeline(videoId, video2);
+    ASSERT_EQ(controller.document()->trackById(video2)->clips.size(), 1);
+    ASSERT_EQ(controller.document()->trackById(audio2)->clips.size(), 1);
+    EXPECT_TRUE(controller.document()
+                    ->trackById(QStringLiteral("track-a1"))
+                    ->clips.isEmpty());
+
+    // BGM is an audio-only asset: the target track wins.
+    controller.addAssetToTimeline(musicId, QStringLiteral("track-a1"));
+    ASSERT_EQ(controller.document()->trackById(QStringLiteral("track-a1"))
+                  ->clips.size(),
+              1);
+    EXPECT_EQ(controller.document()->trackById(QStringLiteral("track-a1"))
+                  ->clips.first().assetId,
+              musicId);
+    EXPECT_EQ(controller.document()->trackById(audio2)->clips.first().assetId,
+              videoId);
 }
 
 TEST(TimelineUi, SingleFieldSettersPreserveSiblingProperties)

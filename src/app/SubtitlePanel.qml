@@ -15,6 +15,24 @@ ColumnLayout {
         return value === undefined ? fallback : value
     }
 
+    function resetTimingFields() {
+        startField.text = (panel.cueField("startUs", 0) / 1e6).toFixed(3)
+        endField.text = (panel.cueField("endUs", 0) / 1e6).toFixed(3)
+    }
+
+    function commitCueTiming() {
+        if (Timeline.selectedCueId === "")
+            return
+        const start = parseFloat(startField.text) * 1e6
+        const end = parseFloat(endField.text) * 1e6
+        if (!isFinite(start) || !isFinite(end) || start < 0 || end <= start) {
+            resetTimingFields()
+            return
+        }
+        Timeline.setCueTiming(Timeline.selectedCueId, Math.round(start),
+                              Math.round(end))
+    }
+
     function commitPositionX(permille) {
         if (Timeline.selectedCueId !== "")
             Timeline.setCuePosition(panel.cueField("trackId", ""),
@@ -67,6 +85,47 @@ ColumnLayout {
         textRole: "name"
         valueRole: "id"
         onActivated: Timeline.applySubtitleStyle(currentValue)
+    }
+
+    // Timing fields edit the selected cue in seconds and preserve its text,
+    // style and position (the controller copies the whole cue).
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        Label { text: "开始（秒）"; color: "#cccccc"; font.pixelSize: 11 }
+        TextField {
+            id: startField
+            objectName: "subtitle-start"
+            Layout.fillWidth: true
+            enabled: Timeline.selectedCueId !== ""
+            font.pixelSize: 11
+            onEditingFinished: panel.commitCueTiming()
+            Binding {
+                target: startField
+                property: "text"
+                value: (panel.cueField("startUs", 0) / 1e6).toFixed(3)
+                when: !startField.activeFocus
+            }
+        }
+    }
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        Label { text: "结束（秒）"; color: "#cccccc"; font.pixelSize: 11 }
+        TextField {
+            id: endField
+            objectName: "subtitle-end"
+            Layout.fillWidth: true
+            enabled: Timeline.selectedCueId !== ""
+            font.pixelSize: 11
+            onEditingFinished: panel.commitCueTiming()
+            Binding {
+                target: endField
+                property: "text"
+                value: (panel.cueField("endUs", 0) / 1e6).toFixed(3)
+                when: !endField.activeFocus
+            }
+        }
     }
 
     Label { text: "位置 X（‰）"; color: "#cccccc" }

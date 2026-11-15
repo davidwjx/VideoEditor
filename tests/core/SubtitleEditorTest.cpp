@@ -124,6 +124,59 @@ TEST(SubtitleEditor, UpdateMovesCueAndKeepsTrackSorted)
     EXPECT_EQ(cues.at(1).id, QStringLiteral("cue-a"));
 }
 
+TEST(SubtitleEditor, SetCueTimingPreservesTextStyleAndPosition)
+{
+    ProjectDocument document;
+    TimelineEditor editor(document);
+
+    SubtitleCue cue;
+    cue.id = QStringLiteral("cue-t");
+    cue.startUs = 0;
+    cue.endUs = 1'000'000;
+    cue.text = QStringLiteral("保留文本");
+    cue.styleId = QStringLiteral("boxed");
+    cue.positionXPermille = 250;
+    cue.positionYPermille = 700;
+    ASSERT_EQ(editor.addSubtitleCue(subtitleTrackId(), cue),
+              QStringLiteral("cue-t"));
+
+    // Move it after a sibling so sorted order must be restored.
+    SubtitleCue later;
+    later.id = QStringLiteral("cue-later");
+    later.startUs = 3'000'000;
+    later.endUs = 4'000'000;
+    later.text = QStringLiteral("后");
+    ASSERT_FALSE(editor.addSubtitleCue(subtitleTrackId(), later).isEmpty());
+
+    const int undoIndex = document.undoStack()->index();
+    editor.setCueTiming(subtitleTrackId(), cue.id, 2'000'000, 2'800'000);
+    EXPECT_EQ(document.undoStack()->index(), undoIndex + 1);
+
+    const Track &track = document.project().tracks.at(2);
+    ASSERT_EQ(track.cues.size(), 2);
+    EXPECT_EQ(track.cues.at(0).id, QStringLiteral("cue-t"));
+    EXPECT_EQ(track.cues.at(0).startUs, 2'000'000);
+    EXPECT_EQ(track.cues.at(0).endUs, 2'800'000);
+    EXPECT_EQ(track.cues.at(0).text, QStringLiteral("保留文本"));
+    EXPECT_EQ(track.cues.at(0).styleId, QStringLiteral("boxed"));
+    EXPECT_EQ(track.cues.at(0).positionXPermille, 250);
+    EXPECT_EQ(track.cues.at(0).positionYPermille, 700);
+
+    document.undo();
+    EXPECT_EQ(document.project().tracks.at(2).cues.at(0).id,
+              QStringLiteral("cue-t"));
+    EXPECT_EQ(document.project().tracks.at(2).cues.at(0).startUs, 0);
+    EXPECT_EQ(document.project().tracks.at(2).cues.at(0).endUs, 1'000'000);
+
+    // Invalid ranges are rejected without an undo step.
+    const int indexBeforeInvalid = document.undoStack()->index();
+    editor.setCueTiming(subtitleTrackId(), cue.id, 5'000'000, 4'000'000);
+    editor.setCueTiming(subtitleTrackId(), cue.id, -1, 1'000'000);
+    editor.setCueTiming(subtitleTrackId(), QStringLiteral("missing"),
+                        0, 1'000'000);
+    EXPECT_EQ(document.undoStack()->index(), indexBeforeInvalid);
+}
+
 TEST(SubtitleEditor, RejectsDuplicateCueIds)
 {
     ProjectDocument document;

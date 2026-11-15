@@ -157,6 +157,20 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     connect(m_proxyService, &ProxyService::ready, this,
             [this](const QString &assetId, const QString &proxyPath) {
                 m_document->setAssetProxyPath(assetId, proxyPath);
+                // Proxy completion does not emit timelineChanged; push the new
+                // asset metadata to the compositor so the next frame uses it.
+                if (m_preview->timelineMode())
+                    m_preview->updateTimelineProject(m_document->project());
+                if (!m_currentAssetId.isEmpty() && m_currentAssetId == assetId
+                    && !m_preview->timelineMode() && m_useProxy) {
+                    openAsset(assetId);
+                }
+            });
+    connect(m_waveforms, &WaveformService::failed, this,
+            [this](const QString &, const QString &message) {
+                setLastError(message.isEmpty()
+                                 ? QStringLiteral("波形生成失败。")
+                                 : QStringLiteral("波形生成失败：%1").arg(message));
             });
     connect(m_proxyService, &ProxyService::failed, this,
             [this](const QString &, const QString &message) {
@@ -226,7 +240,8 @@ void AppController::importUrls(const QList<QUrl> &urls)
         setLastError(failures.join(QLatin1Char('\n')));
 }
 
-void AppController::addAssetToTimeline(const QString &assetId)
+void AppController::addAssetToTimeline(const QString &assetId,
+                                       const QString &targetTrackId)
 {
     const Asset *asset = m_document->project().assetById(assetId);
     if (!asset) {
@@ -238,11 +253,18 @@ void AppController::addAssetToTimeline(const QString &assetId)
         asset->info.hasVideo || asset->info.kind == MediaKind::Video;
     const TrackType wanted = wantsVideo ? TrackType::Video : TrackType::Audio;
 
-    QString trackId;
-    for (const Track &track : m_document->project().tracks) {
-        if (track.type == wanted) {
-            trackId = track.id;
-            break;
+    // Prefer the user-chosen lane; the controller pairs original audio with
+    // the same-ordinal A-track (V2 -> A2). Fall back to the first track of the
+    // wanted type when the target is missing or of the wrong type.
+    QString trackId = targetTrackId;
+    const Track *target = m_document->trackById(trackId);
+    if (!target || target->type == TrackType::Subtitle) {
+        trackId.clear();
+        for (const Track &track : m_document->project().tracks) {
+            if (track.type == wanted) {
+                trackId = track.id;
+                break;
+            }
         }
     }
     if (trackId.isEmpty()) {
@@ -250,12 +272,22 @@ void AppController::addAssetToTimeline(const QString &assetId)
         return;
     }
 
-    const QString clipId = m_timeline->addAssetToTimeline(
-        assetId, trackId, m_timeline->positionUs());
+    const qint64 positionUs = m_timeline->positionUs();
+    const QString clipId =
+        m_timeline->addAssetToTimeline(assetId, trackId, positionUs);
     if (clipId.isEmpty())
         return; // TimelineController already reported the failure.
     clearError();
-    refreshTimelinePreview();
+
+    const Project &project = m_document->project();
+    const int64_t duration = TimelineEvaluator(project).durationUs();
+    if (m_preview->timelineMode()) {
+        // An edit must not jump the playhead back to the start or pause.
+        m_preview->updateTimelineProject(project);
+    } else if (duration > 0) {
+        m_preview->openTimeline(project, duration, m_useProxy);
+        seekTimeline(positionUs);
+    }
 }
 
 void AppController::seekTimeline(qint64 positionUs)
@@ -273,14 +305,22 @@ void AppController::seekTimeline(qint64 positionUs)
 
 QVariantList AppController::subtitleStyles() const
 {
-    QVariantList styles;
-    for (const SubtitleStyle &style : builtinSubtitleStyles()) {
+    // Expose the project's merged style table (builtins plus any overrides),
+    // which is exactly what the compositor resolves by id. Falling back to the
+    // builtin list keeps the ComboBox usable before a document exists.
+    const QList<SubtitleStyle> &projectStyles = m_document->project().subtitleStyles;
+    const QList<SubtitleStyle> fallback = builtinSubtitleStyles();
+    const QList<SubtitleStyle> &styles =
+        projectStyles.isEmpty() ? fallback : projectStyles;
+
+    QVariantList entries;
+    for (const SubtitleStyle &style : styles) {
         QVariantMap entry;
         entry.insert(QStringLiteral("id"), style.id);
         entry.insert(QStringLiteral("name"), style.name);
-        styles.append(entry);
+        entries.append(entry);
     }
-    return styles;
+    return entries;
 }
 
 void AppController::refreshTimelinePreview()
@@ -292,7 +332,7 @@ void AppController::refreshTimelinePreview()
     // after opening a project that only contains imported assets).
     if (duration <= 0)
         return;
-    m_preview->openTimeline(project, duration);
+    m_preview->openTimeline(project, duration, m_useProxy);
 }
 
 void AppController::openAsset(const QString &id)
@@ -320,12 +360,14 @@ void AppController::setUseProxy(bool enabled)
         return;
     m_useProxy = enabled;
     emit useProxyChanged();
-    // Re-opening the current asset is what actually switches the preview
-    // between the proxy and the source; changing the flag alone does nothing.
-    // In timeline mode, re-opening the last asset would jump out of the
-    // timeline (e.g. right after double-clicking a media item to add it).
-    if (!m_currentAssetId.isEmpty() && !m_preview->timelineMode())
+    // Re-opening the preview is what actually switches between proxy and
+    // source. In timeline mode the render worker must drop its decoders; in
+    // asset mode the current file is reopened.
+    if (m_preview->timelineMode()) {
+        m_preview->setUseProxy(enabled);
+    } else if (!m_currentAssetId.isEmpty()) {
         openAsset(m_currentAssetId);
+    }
 }
 
 void AppController::undo()
@@ -362,6 +404,7 @@ void AppController::restoreRecovery()
     m_store->discardRecovery();
     setRecoveryAvailable(false);
     requestWaveforms();
+    requestMissingProxies();
     refreshTimelinePreview();
     clearError();
 }
@@ -405,6 +448,9 @@ void AppController::openProject(const QUrl &url)
     // asset's preview must stop instead of playing on behind it.
     m_preview->closeMedia();
     requestWaveforms();
+    // A project saved before proxy generation finished (or whose cache was
+    // cleared) must regenerate proxies; ready() then refreshes the timeline.
+    requestMissingProxies();
     refreshTimelinePreview();
     clearError();
 }
@@ -430,6 +476,16 @@ void AppController::requestWaveforms()
     for (const Asset &asset : m_document->project().assets) {
         if (asset.info.hasAudio)
             m_waveforms->request(asset.id, asset.path);
+    }
+}
+
+void AppController::requestMissingProxies()
+{
+    for (const Asset &asset : m_document->project().assets) {
+        if (needsProxyGeneration(asset.info, asset.proxyPath)) {
+            m_proxyService->request(asset.id, asset.path,
+                                    planProxy(asset.info).height);
+        }
     }
 }
 

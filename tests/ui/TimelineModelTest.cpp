@@ -103,6 +103,42 @@ TEST(TimelineModel, ExposesClipsAndCuesWithTrackIndex)
               QStringLiteral("字幕"));
 }
 
+TEST(TimelineModel, GroupsLanesByTypeAndMatchesCompositionOrder)
+{
+    ProjectDocument document;
+    TimelineEditor editor(document);
+    Track video2;
+    video2.id = QStringLiteral("track-v2");
+    video2.type = TrackType::Video;
+    video2.name = QStringLiteral("V2");
+    editor.addTrack(video2);
+    editor.addClip(QStringLiteral("track-v1"), clip(QStringLiteral("v1-c"), 0));
+    editor.addClip(QStringLiteral("track-v2"), clip(QStringLiteral("v2-c"), 0));
+    Clip audio = clip(QStringLiteral("a1-c"), 0);
+    audio.assetId = QStringLiteral("asset-a");
+    editor.addClip(QStringLiteral("track-a1"), audio);
+
+    TimelineModel model;
+    model.setProject(document.project());
+    const auto trackIndexFor = [&model](const QString &id) {
+        for (int i = 0; i < model.rowCount(); ++i) {
+            if (model.data(model.index(i, 0), TimelineModel::ItemIdRole)
+                    .toString()
+                == id) {
+                return model.data(model.index(i, 0),
+                                  TimelineModel::TrackIndexRole)
+                    .toInt();
+            }
+        }
+        return -1;
+    };
+    // Display lanes: V2 (top composited layer), V1, A1, S1. TrackIndex is the
+    // display row, so QML lanes and headers line up.
+    EXPECT_EQ(trackIndexFor(QStringLiteral("v2-c")), 0);
+    EXPECT_EQ(trackIndexFor(QStringLiteral("v1-c")), 1);
+    EXPECT_EQ(trackIndexFor(QStringLiteral("a1-c")), 2);
+}
+
 TEST(TrackListModel, ReconcilesTrackReorder)
 {
     ProjectDocument document;
@@ -120,11 +156,19 @@ TEST(TrackListModel, ReconcilesTrackReorder)
     editor.addTrack(extra);
     model.setProject(document.project());
     ASSERT_EQ(model.rowCount(), 4);
-    EXPECT_EQ(model.data(model.index(3, 0), TrackListModel::TrackIdRole).toString(),
+    // Lanes are grouped by type with video stacked top-down in composition
+    // order: V2 (highest layer) before V1, then audio, then subtitles.
+    EXPECT_EQ(model.data(model.index(0, 0), TrackListModel::TrackIdRole).toString(),
               QStringLiteral("track-v2"));
+    EXPECT_EQ(model.data(model.index(1, 0), TrackListModel::TrackIdRole).toString(),
+              QStringLiteral("track-v1"));
 
     editor.moveTrack(3, 0);
     model.setProject(document.project());
+    // Project order is now V2, V1, A1, S1; display order reverses the video
+    // group, so V1 is again the bottom composited lane.
     EXPECT_EQ(model.data(model.index(0, 0), TrackListModel::TrackIdRole).toString(),
+              QStringLiteral("track-v1"));
+    EXPECT_EQ(model.data(model.index(1, 0), TrackListModel::TrackIdRole).toString(),
               QStringLiteral("track-v2"));
 }

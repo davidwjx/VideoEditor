@@ -30,6 +30,7 @@ class PreviewController : public QObject {
     Q_PROPERTY(QString mediaName READ mediaName NOTIFY mediaChanged)
     Q_PROPERTY(bool timelineMode READ timelineMode NOTIFY mediaChanged)
     Q_PROPERTY(qint64 durationUs READ durationUs NOTIFY durationChanged)
+    Q_PROPERTY(bool useProxy READ useProxy NOTIFY useProxyChanged)
 
 public:
     enum class Mode { Asset, Timeline };
@@ -48,6 +49,7 @@ public:
     QString timecode() const;
     QString decodeMode() const { return m_decodeMode; }
     QString mediaName() const { return m_mediaName; }
+    bool useProxy() const { return m_useProxy; }
 
     Mode mode() const { return m_mode; }
     bool timelineMode() const { return m_mode == Mode::Timeline; }
@@ -64,11 +66,16 @@ public:
     Q_INVOKABLE void seekFrame(qint64 frame);
 
     // Timeline mode entry point. Takes ownership of its own rendering thread;
-    // the caller keeps using play()/pause()/seekFrame() as usual.
-    void openTimeline(const Project &project, qint64 durationUs);
+    // the caller keeps using play()/pause()/seekFrame() as usual. useProxy is
+    // forwarded to the render worker for every decoder it opens.
+    void openTimeline(const Project &project, qint64 durationUs,
+                      bool useProxy = true);
     // Pushes an edited project snapshot to the compositor and audio mixer
     // without resetting the playhead or interrupting playback.
     void updateTimelineProject(const Project &project);
+    // Re-opens timeline sources with/without proxies. Only affects timeline
+    // mode; asset mode is handled by AppController::openAsset().
+    void setUseProxy(bool enabled);
     const Project &timelineProject() const { return m_timelineProject; }
     // AudioEngine lives on its own thread; PreviewController only forwards
     // queued calls and reads the lock-free master clock.
@@ -81,6 +88,7 @@ signals:
     void durationChanged();
     void decodeModeChanged();
     void mediaChanged();
+    void useProxyChanged();
     void framePresented(qint64 ptsUs);
     // Emitted after a timeline-composited frame has been presented by the
     // scene graph, for self-tests and performance gates.
@@ -139,6 +147,7 @@ private:
     FrameRequestCoalescer m_timelineRequests;
     Rational m_timelineFps{30, 1};
     int64_t m_playStartUs = 0;
+    bool m_useProxy = true;
     int64_t m_lastTimelineFrame = -1;
     qint64 m_lastTimelineSubmittedUs = -1;
     int m_lastTimelineLayerCount = 0;

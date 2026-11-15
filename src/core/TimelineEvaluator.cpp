@@ -21,7 +21,20 @@ const SubtitleStyle &TimelineEvaluator::styleFor(const QString &styleId) const
         if (style.id == styleId)
             return style;
     }
+    // A project may have been created before a preset was added, or a cue may
+    // reference a builtin id that was stripped while loading. Falling back to
+    // the builtin implementation makes presets render correct immediately
+    // instead of silently becoming the default style.
+    static const QList<SubtitleStyle> builtins = builtinSubtitleStyles();
+    for (const SubtitleStyle &style : builtins) {
+        if (style.id == styleId)
+            return style;
+    }
     for (const SubtitleStyle &style : m_project.subtitleStyles) {
+        if (style.id == QStringLiteral("default"))
+            return style;
+    }
+    for (const SubtitleStyle &style : builtins) {
         if (style.id == QStringLiteral("default"))
             return style;
     }
@@ -105,6 +118,15 @@ QList<AudioLayer> TimelineEvaluator::audioRange(int64_t startUs, int64_t endUs) 
         }
     }
     return layers;
+}
+
+bool TimelineEvaluator::anySolo() const
+{
+    for (const Track &track : m_project.tracks) {
+        if (track.enabled && track.type == TrackType::Audio && track.solo)
+            return true;
+    }
+    return false;
 }
 
 int64_t TimelineEvaluator::durationUs() const

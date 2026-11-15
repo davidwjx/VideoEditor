@@ -222,6 +222,43 @@ TEST(ClipVideoSource, UsesDecodedProxyDimensionsNotMediaInfo)
     EXPECT_EQ(source->height(), actual->height);
 }
 
+TEST(ClipVideoSource, UsesOriginalHighresSourceWhenProxyDisabled)
+{
+    QString error;
+    auto context = createContext(&error);
+    if (!context)
+        GTEST_SKIP() << "D3D11 unavailable: " << error.toStdString();
+
+    const QString highres = fixture(QStringLiteral("highres.mp4"));
+    if (!QFileInfo::exists(highres))
+        GTEST_SKIP() << "missing highres fixture";
+    const Asset source = assetFor(highres);
+    ASSERT_TRUE(source.info.supported);
+    ASSERT_EQ(source.info.width, 2560);
+    ASSERT_EQ(source.info.height, 1440);
+
+    // Pretend a cached 640x360 proxy exists (h264.mp4 has those dimensions).
+    Asset asset = source;
+    asset.proxyPath = fixture(QStringLiteral("h264.mp4"));
+
+    // Proxy enabled: decode the small proxy.
+    EXPECT_EQ(activeProxyPath(asset, true), asset.proxyPath);
+    auto proxy = ClipVideoSource::open(asset, *context,
+                                       activeProxyPath(asset, true), &error);
+    ASSERT_TRUE(proxy) << error.toStdString();
+    EXPECT_EQ(proxy->width(), 640);
+    EXPECT_EQ(proxy->height(), 360);
+
+    // Proxy disabled: the render worker passes an empty path, so the original
+    // 2560x1440 source is decoded instead of the cached proxy.
+    EXPECT_TRUE(activeProxyPath(asset, false).isEmpty());
+    auto original = ClipVideoSource::open(
+        asset, *context, activeProxyPath(asset, false), &error);
+    ASSERT_TRUE(original) << error.toStdString();
+    EXPECT_EQ(original->width(), 2560);
+    EXPECT_EQ(original->height(), 1440);
+}
+
 TEST(ClipVideoSource, AcceptsSharedConverters)
 {
     QString error;

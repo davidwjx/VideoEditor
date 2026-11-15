@@ -51,6 +51,10 @@ private:
     std::unique_ptr<OlaTimeStretcher> m_stretcher;
     std::vector<float> m_sourceScratch;
     std::vector<float> m_olaScratch;
+    // Output samples produced past the requested block (OLA works in whole
+    // 10 ms hops). Carrying them avoids dropping a partial final hop.
+    std::vector<float> m_olaCarry;
+    int m_olaCarryOffset = 0;
     int m_sampleRate = 48000;
     int m_channels = 2;
     int m_sourceChannels = 0;

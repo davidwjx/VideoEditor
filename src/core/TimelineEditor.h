@@ -48,6 +48,8 @@ public:
     void unlinkClip(const QString &trackId, const QString &clipId);
     void copy(const QList<ClipLocator> &clips);
     bool hasClipboard() const { return !m_clipboard.isEmpty(); }
+    // Loading another project invalidates clipboard source track ids.
+    void clearClipboard() { m_clipboard.clear(); }
     void paste(int64_t timelineUs, const QString &targetTrackId);
     void addTrack(const Track &track);
     void removeTrack(const QString &trackId);
@@ -60,6 +62,10 @@ public:
     // sorted by startUs. Returns without an undo step when the cue is missing.
     void updateSubtitleCue(const QString &trackId, const QString &cueId,
                            const SubtitleCue &cue);
+    // Convenience update for the start/end fields: preserves every other cue
+    // field and keeps the track sorted. Invalid ranges are ignored.
+    void setCueTiming(const QString &trackId, const QString &cueId,
+                      int64_t startUs, int64_t endUs);
     void removeSubtitleCue(const QString &trackId, const QString &cueId);
     void applySubtitleStyle(const QString &trackId, const QString &styleId,
                             const QString &cueId = {});
@@ -73,6 +79,7 @@ public:
 private:
     struct ClipboardEntry {
         QString sourceTrackId;
+        TrackType sourceTrackType = TrackType::Video;
         Clip clip;
     };
 

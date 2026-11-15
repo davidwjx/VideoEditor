@@ -609,6 +609,51 @@ TEST(TimelineEditor, AddClipsRejectsInvalidEntries)
     EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
 }
 
+TEST(TimelineEditor, PasteLinkedPairKeepsBothHalvesOnOriginalTracks)
+{
+    Fixture fixture;
+    linkedPair(fixture, QStringLiteral("link-1"), 0);
+    TimelineEditor editor(fixture.document);
+    editor.copy({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("clip-v")},
+                 ClipLocator{QStringLiteral("track-a1"), QStringLiteral("clip-a")}});
+
+    // Target a video track; the audio half must still land on A1, not be
+    // dropped because its track type differs from the paste target.
+    editor.paste(20'000'000, QStringLiteral("track-v1"));
+
+    ASSERT_EQ(fixture.videoTrack().clips.size(), 2);
+    ASSERT_EQ(fixture.audioTrack().clips.size(), 2);
+    const Clip &video = fixture.videoTrack().clips.at(1);
+    const Clip &audio = fixture.audioTrack().clips.at(1);
+    EXPECT_EQ(video.timelineStartUs, 20'000'000);
+    EXPECT_EQ(audio.timelineStartUs, 20'000'000);
+    EXPECT_FALSE(video.linkId.isEmpty());
+    EXPECT_EQ(video.linkId, audio.linkId);
+    EXPECT_NE(video.linkId, QStringLiteral("link-1"));
+
+    fixture.document.undo();
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.audioTrack().clips.size(), 1);
+}
+
+TEST(TimelineEditor, PasteLinkedPairRejectsAtomicallyWhenAnyDestinationLocked)
+{
+    Fixture fixture;
+    linkedPair(fixture, QStringLiteral("link-1"), 0);
+    TimelineEditor editor(fixture.document);
+    editor.copy({ClipLocator{QStringLiteral("track-v1"), QStringLiteral("clip-v")},
+                 ClipLocator{QStringLiteral("track-a1"), QStringLiteral("clip-a")}});
+    setTrackLocked(fixture.document, QStringLiteral("track-a1"), true);
+    const int undoIndex = fixture.document.undoStack()->index();
+
+    editor.paste(20'000'000, QStringLiteral("track-v1"));
+
+    EXPECT_EQ(fixture.videoTrack().clips.size(), 1)
+        << "the unlocked video half must not be pasted alone";
+    EXPECT_EQ(fixture.audioTrack().clips.size(), 1);
+    EXPECT_EQ(fixture.document.undoStack()->index(), undoIndex);
+}
+
 TEST(TimelineEditor, PasteOffsetsAndClampsNegativeStart)
 {
     Fixture fixture;

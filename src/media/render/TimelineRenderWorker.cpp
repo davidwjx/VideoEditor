@@ -82,7 +82,8 @@ bool TimelineRenderWorker::ensureConverters(QString *error)
 }
 
 void TimelineRenderWorker::setProject(VideoEditor::Project project,
-                                      QString projectPath, quint64 generation)
+                                      QString projectPath, quint64 generation,
+                                      bool useProxy)
 {
     const int width = project.timeline.width > 0 ? project.timeline.width : 1920;
     const int height =
@@ -96,6 +97,9 @@ void TimelineRenderWorker::setProject(VideoEditor::Project project,
     m_project = std::move(project);
     m_projectPath = std::move(projectPath);
     m_generation = generation;
+    // Every queued snapshot re-opens clip decoders; a proxy toggle in
+    // particular must discard sources opened from the other file.
+    m_useProxy = useProxy;
     m_sources.clear();
     m_failedClips.clear();
     m_reportedErrors.clear();
@@ -164,7 +168,8 @@ ClipVideoSource *TimelineRenderWorker::sourceFor(const VideoLayer &layer)
         return nullptr;
     }
 
-    auto source = ClipVideoSource::open(*asset, *m_context, asset->proxyPath,
+    const QString proxyPath = activeProxyPath(*asset, m_useProxy);
+    auto source = ClipVideoSource::open(*asset, *m_context, proxyPath,
                                         m_converters.get(), &error);
     if (!source) {
         m_failedClips.insert(layer.clipId);

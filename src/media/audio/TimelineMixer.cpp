@@ -84,12 +84,76 @@ TimelineMixer::TimelineMixer(int sampleRate, int channels)
 
 TimelineMixer::~TimelineMixer() = default;
 
+QString TimelineMixer::sourceKeyFor(const Asset &asset)
+{
+    return asset.id + QLatin1Char('|') + asset.path;
+}
+
+void TimelineMixer::dropStaleReaders()
+{
+    // Readers are keyed by clip id. A parameter-only edit (volume, pan, fade,
+    // keyframes) keeps the same clip id and asset, so its decoder stays open.
+    // A removed clip, a re-pointed asset or a source-mapping change drops or
+    // resets only the affected reader.
+    for (auto it = m_readers.begin(); it != m_readers.end();) {
+        const Clip *clip = nullptr;
+        for (const Track &track : m_project.tracks) {
+            for (const Clip &candidate : track.clips) {
+                if (candidate.id == it->first) {
+                    clip = &candidate;
+                    break;
+                }
+            }
+            if (clip)
+                break;
+        }
+        const Asset *asset = clip ? m_project.assetById(clip->assetId) : nullptr;
+        if (!clip || !asset
+            || sourceKeyFor(*asset) != it->second.sourceKey) {
+            it = m_readers.erase(it);
+            continue;
+        }
+        if (clip->sourceInUs != it->second.sourceInUs
+            || clip->sourceOutUs != it->second.sourceOutUs
+            || clip->timelineStartUs != it->second.timelineStartUs
+            || clip->speedMilli != it->second.speedMilli
+            || clip->preservePitch != it->second.preservePitch) {
+            if (it->second.reader)
+                it->second.reader->reset();
+            it->second.sourceInUs = clip->sourceInUs;
+            it->second.sourceOutUs = clip->sourceOutUs;
+            it->second.timelineStartUs = clip->timelineStartUs;
+            it->second.speedMilli = clip->speedMilli;
+            it->second.preservePitch = clip->preservePitch;
+        }
+        ++it;
+    }
+}
+
+void TimelineMixer::evictUnusedReaders(const QSet<QString> &used)
+{
+    // Bounded LRU: long timelines must not accumulate one decoder per clip.
+    // Readers used by the current block are never evicted.
+    while (int(m_readers.size()) > kMaxCachedReaders) {
+        auto oldest = m_readers.end();
+        for (auto it = m_readers.begin(); it != m_readers.end(); ++it) {
+            if (used.contains(it->first))
+                continue;
+            if (oldest == m_readers.end()
+                || it->second.lastUsedRender < oldest->second.lastUsedRender) {
+                oldest = it;
+            }
+        }
+        if (oldest == m_readers.end())
+            return;
+        m_readers.erase(oldest);
+    }
+}
+
 void TimelineMixer::setProject(const Project &project)
 {
     m_project = project;
-    // Decoders are bound to an asset path and sample format; rebuilding them
-    // avoids reusing a stale decoder after a project/asset change.
-    m_readers.clear();
+    dropStaleReaders();
 }
 
 void TimelineMixer::setPosition(int64_t positionUs)
@@ -97,8 +161,8 @@ void TimelineMixer::setPosition(int64_t positionUs)
     m_startPositionUs = qMax<int64_t>(0, positionUs);
     m_framesRendered = 0;
     for (auto &entry : m_readers) {
-        if (entry.second)
-            entry.second->reset();
+        if (entry.second.reader)
+            entry.second.reader->reset();
     }
 }
 
@@ -117,18 +181,39 @@ ClipAudioReader *TimelineMixer::readerFor(const Clip &clip)
 {
     const QString key = clip.id.isEmpty() ? clip.assetId : clip.id;
     auto existing = m_readers.find(key);
-    if (existing != m_readers.end())
-        return existing->second.get();
-
-    std::unique_ptr<ClipAudioReader> reader;
-    if (const Asset *asset = m_project.assetById(clip.assetId)) {
-        auto candidate = std::make_unique<ClipAudioReader>();
-        QString error;
-        if (candidate->open(*asset, m_sampleRate, m_channels, &error))
-            reader = std::move(candidate);
+    if (existing != m_readers.end()) {
+        existing->second.lastUsedRender = m_renderSerial;
+        return existing->second.reader.get();
     }
-    ClipAudioReader *raw = reader.get();
-    m_readers.emplace(key, std::move(reader));
+
+    const Asset *asset = m_project.assetById(clip.assetId);
+    if (!asset) {
+        // Remember the failure so a removed/unknown asset is not retried every
+        // block; dropStaleReaders() removes it when the project changes.
+        ReaderEntry entry;
+        entry.lastUsedRender = m_renderSerial;
+        m_readers.emplace(key, std::move(entry));
+        return nullptr;
+    }
+
+    auto candidate = std::make_unique<ClipAudioReader>();
+    QString error;
+    if (!candidate->open(*asset, m_sampleRate, m_channels, &error))
+        candidate.reset();
+    else
+        ++m_readerOpenCount;
+
+    ReaderEntry entry;
+    entry.reader = std::move(candidate);
+    entry.sourceKey = sourceKeyFor(*asset);
+    entry.sourceInUs = clip.sourceInUs;
+    entry.sourceOutUs = clip.sourceOutUs;
+    entry.timelineStartUs = clip.timelineStartUs;
+    entry.speedMilli = clip.speedMilli;
+    entry.preservePitch = clip.preservePitch;
+    entry.lastUsedRender = m_renderSerial;
+    ClipAudioReader *raw = entry.reader.get();
+    m_readers.emplace(key, std::move(entry));
     return raw;
 }
 
@@ -151,9 +236,9 @@ void TimelineMixer::render(float *interleaved, int frames, MixStats *stats)
     const TimelineEvaluator evaluator(m_project);
     const QList<AudioLayer> layers = evaluator.audioRange(blockStartUs, blockEndUs);
 
-    bool anySolo = false;
-    for (const AudioLayer &layer : layers)
-        anySolo = anySolo || layer.trackSolo;
+    // Solo is project-wide, not block-local: a soloed track with a gap must
+    // keep silencing the other tracks during that gap.
+    const bool anySolo = evaluator.anySolo();
 
     QList<AudioLayer> audible;
     for (const AudioLayer &layer : layers) {
@@ -166,11 +251,15 @@ void TimelineMixer::render(float *interleaved, int frames, MixStats *stats)
     // begins mid-block therefore starts at the block boundary (up to 10 ms
     // early) rather than being offset inside the block; this is the documented
     // preview mixing granularity (well below the one-frame A/V tolerance).
+    ++m_renderSerial;
+    QSet<QString> usedReaders;
     std::vector<float> scratch(sampleCount, 0.0f);
     for (const AudioLayer &layer : audible) {
         // Fully muted/disabled clips need no decoding at all.
         if (!layer.clip.enabled || layer.clip.audio.muted)
             continue;
+        usedReaders.insert(layer.clip.id.isEmpty() ? layer.clip.assetId
+                                                   : layer.clip.id);
         ClipAudioReader *reader = readerFor(layer.clip);
         if (!reader)
             continue;
@@ -213,6 +302,8 @@ void TimelineMixer::render(float *interleaved, int frames, MixStats *stats)
             interleaved[i] *= scale;
         blockPeak = kLimiterCeiling;
     }
+
+    evictUnusedReaders(usedReaders);
 
     if (stats) {
         stats->peak = blockPeak;

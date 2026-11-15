@@ -54,6 +54,20 @@ TEST(ProjectDocument, NewCommandClearsRedo)
     EXPECT_FALSE(doc.canRedo());
 }
 
+TEST(ProjectDocument, SetProjectMergesBuiltinSubtitleStyles)
+{
+    Project project;
+    project.subtitleStyles = {SubtitleStyle{}}; // legacy v2 snapshot
+    ProjectDocument doc;
+    doc.setProject(project);
+
+    ASSERT_EQ(doc.project().subtitleStyles.size(), 3);
+    EXPECT_EQ(doc.project().subtitleStyles.at(0).id, QStringLiteral("default"));
+    EXPECT_EQ(doc.project().subtitleStyles.at(1).id, QStringLiteral("boxed"));
+    EXPECT_EQ(doc.project().subtitleStyles.at(2).id,
+              QStringLiteral("bold-outline"));
+}
+
 TEST(ProjectDocument, UndoLimitKeepsLatestHundred)
 {
     ProjectDocument doc;

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QStringList>
+
 namespace VideoEditor {
 
 namespace {
@@ -91,6 +93,81 @@ QString formatTimecodeAtRate(int64_t micros, Rational fps, bool dropFrame)
         .arg(minutes, 2, 10, QLatin1Char('0'))
         .arg(seconds, 2, 10, QLatin1Char('0'))
         .arg(frameNumber, 2, 10, QLatin1Char('0'));
+}
+
+std::optional<int64_t> parseTimecode(const QString &text, Rational fps)
+{
+    QString value = text.trimmed();
+    value.replace(QLatin1Char(';'), QLatin1Char(':'));
+    if (value.isEmpty())
+        return std::nullopt;
+    if (!fps.isValid())
+        fps = Rational{30, 1};
+
+    const QStringList parts = value.split(QLatin1Char(':'));
+    if (parts.size() > 4)
+        return std::nullopt;
+
+    bool frameField = false;
+    double seconds = 0.0;
+    int64_t totalSecondsPart = 0;
+    int64_t frames = 0;
+
+    if (parts.size() == 1) {
+        bool ok = false;
+        seconds = parts.first().toDouble(&ok);
+        if (!ok || seconds < 0.0)
+            return std::nullopt;
+    } else {
+        QStringList whole = parts;
+        QString last = whole.takeLast();
+        // A decimal point means the final component is a fractional second
+        // (HH:MM:SS.mmm / MM:SS.mmm); otherwise it is a frame number when
+        // there are four components, or whole seconds for HH:MM:SS.
+        if (last.contains(QLatin1Char('.'))) {
+            bool ok = false;
+            seconds = last.toDouble(&ok);
+            if (!ok || seconds < 0.0 || seconds >= 60.0)
+                return std::nullopt;
+        } else if (parts.size() == 4) {
+            bool ok = false;
+            frames = last.toLongLong(&ok);
+            const int nominalFps =
+                std::max(1, int(std::llround(fps.toDouble())));
+            if (!ok || frames < 0 || frames >= nominalFps)
+                return std::nullopt;
+            frameField = true;
+            totalSecondsPart = 0;
+        } else if (parts.size() == 3) {
+            bool ok = false;
+            totalSecondsPart = last.toLongLong(&ok);
+            if (!ok || totalSecondsPart < 0 || totalSecondsPart >= 60)
+                return std::nullopt;
+        } else {
+            return std::nullopt;
+        }
+
+        // With a frame field the remaining components end in seconds, so the
+        // first multiplier is 1; otherwise the last component was seconds and
+        // the next one up is minutes (×60).
+        int64_t multiplier = frameField ? 1 : 60;
+        for (int i = whole.size() - 1; i >= 0; --i) {
+            bool ok = false;
+            const int64_t component = whole.at(i).toLongLong(&ok);
+            if (!ok || component < 0)
+                return std::nullopt;
+            totalSecondsPart += component * multiplier;
+            multiplier *= 60;
+        }
+    }
+
+    const int64_t secondsUs = int64_t(std::llround(seconds * 1'000'000.0));
+    const int64_t frameUs = frameField ? framesToMicros(frames, fps) : 0;
+    const int64_t totalUs = totalSecondsPart * kMicrosPerSecond + secondsUs
+                            + frameUs;
+    if (totalUs < 0)
+        return std::nullopt;
+    return totalUs;
 }
 
 QString formatDuration(int64_t micros)

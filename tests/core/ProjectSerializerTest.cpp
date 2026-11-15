@@ -2,6 +2,7 @@
 
 #include <QTemporaryDir>
 #include <QJsonArray>
+#include <QSet>
 
 #include "ProjectSerializer.h"
 #include "ProjectStore.h"
@@ -28,6 +29,9 @@ Project sampleProject()
     Project project;
     project.name = QStringLiteral("测试工程");
     project.assets.append(Asset{QStringLiteral("asset-1"), info.path, info, {}});
+    // Loading merges the builtin subtitle presets; normalizing the fixture
+    // keeps the round-trip equality assertion exact.
+    project.ensureSubtitleStyles();
     return project;
 }
 
@@ -188,6 +192,44 @@ TEST(ProjectSerializer, RoundTripsTimelineSchemaV2)
     EXPECT_EQ(*restored, original);
 }
 
+TEST(ProjectSerializer, LoadSeedsBuiltinStylesAndKeepsOverrides)
+{
+    QJsonObject json = ProjectSerializer::toJson(sampleTimelineProject());
+    // Simulate a v2 file written before the boxed/bold-outline presets.
+    json.remove(QStringLiteral("subtitleStyles"));
+
+    QString error;
+    const auto restored = ProjectSerializer::fromJson(json, &error);
+    ASSERT_TRUE(restored.has_value()) << error.toStdString();
+    ASSERT_EQ(restored->subtitleStyles.size(), 3);
+    QSet<QString> ids;
+    for (const SubtitleStyle &style : restored->subtitleStyles)
+        ids.insert(style.id);
+    EXPECT_TRUE(ids.contains(QStringLiteral("default")));
+    EXPECT_TRUE(ids.contains(QStringLiteral("boxed")));
+    EXPECT_TRUE(ids.contains(QStringLiteral("bold-outline")));
+
+    // A project that stored its own default style must keep that override
+    // instead of being replaced by the builtin.
+    QJsonArray styles = json.value(QStringLiteral("subtitleStyles")).toArray();
+    QJsonObject custom;
+    custom.insert(QStringLiteral("id"), QStringLiteral("default"));
+    custom.insert(QStringLiteral("name"), QStringLiteral("自定义默认"));
+    custom.insert(QStringLiteral("fontPixelSize"), 42);
+    styles.append(custom);
+    json.insert(QStringLiteral("subtitleStyles"), styles);
+
+    const auto overridden = ProjectSerializer::fromJson(json, &error);
+    ASSERT_TRUE(overridden.has_value()) << error.toStdString();
+    ASSERT_EQ(overridden->subtitleStyles.size(), 3);
+    for (const SubtitleStyle &style : overridden->subtitleStyles) {
+        if (style.id == QStringLiteral("default")) {
+            EXPECT_EQ(style.name, QStringLiteral("自定义默认"));
+            EXPECT_EQ(style.fontPixelSize, 42);
+        }
+    }
+}
+
 TEST(ProjectSerializer, MigratesVersionOneProject)
 {
     QJsonObject v1 = ProjectSerializer::toJson(sampleTimelineProject());
@@ -204,7 +246,7 @@ TEST(ProjectSerializer, MigratesVersionOneProject)
     EXPECT_EQ(restored->tracks.size(), 3);
     EXPECT_TRUE(restored->tracks.at(0).clips.isEmpty());
     EXPECT_EQ(restored->timeline.fps, (Rational{30, 1}));
-    EXPECT_EQ(restored->subtitleStyles.size(), 1);
+    EXPECT_EQ(restored->subtitleStyles.size(), 3);
 
     // Saving a migrated project writes schemaVersion 2.
     const QJsonObject saved = ProjectSerializer::toJson(*restored);

@@ -34,7 +34,9 @@ public:
         KeyframeCountRole,
         KeyframesRole,
         PositionXPermilleRole,
-        PositionYPermilleRole
+        PositionYPermilleRole,
+        SourceInUsRole,
+        SourceOutUsRole
     };
 
     explicit TimelineModel(QObject *parent = nullptr);

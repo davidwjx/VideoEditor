@@ -51,6 +51,29 @@ TEST(TimeBase, FormatsDropFrameTimecodeAtSixtyNtsc)
               QStringLiteral("00:10:00;00"));
 }
 
+TEST(TimeBase, ParsesTimecodeEntry)
+{
+    const Rational fps{30, 1};
+    EXPECT_EQ(parseTimecode(QStringLiteral("00:00:01:15"), fps),
+              std::optional<int64_t>(1'500'000));
+    EXPECT_EQ(parseTimecode(QStringLiteral("00:00:01;15"), fps),
+              std::optional<int64_t>(1'500'000));
+    EXPECT_EQ(parseTimecode(QStringLiteral("00:01:02.250"), fps),
+              std::optional<int64_t>(62'250'000));
+    EXPECT_EQ(parseTimecode(QStringLiteral("01:02.250"), fps),
+              std::optional<int64_t>(62'250'000));
+    EXPECT_EQ(parseTimecode(QStringLiteral("2.5"), fps),
+              std::optional<int64_t>(2'500'000));
+    EXPECT_EQ(parseTimecode(QStringLiteral(" 2 "), fps),
+              std::optional<int64_t>(2'000'000));
+
+    EXPECT_FALSE(parseTimecode(QStringLiteral(""), fps).has_value());
+    EXPECT_FALSE(parseTimecode(QStringLiteral("00:00:01:30"), fps).has_value());
+    EXPECT_FALSE(parseTimecode(QStringLiteral("00:xx:01"), fps).has_value());
+    EXPECT_FALSE(parseTimecode(QStringLiteral("-1"), fps).has_value());
+    EXPECT_FALSE(parseTimecode(QStringLiteral("1:2:3:4:5"), fps).has_value());
+}
+
 TEST(TimeBase, IgnoresDropFrameForIntegerRates)
 {
     // Drop-frame is only defined for NTSC 29.97/59.94. An integer rate must

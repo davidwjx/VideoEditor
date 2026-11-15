@@ -59,6 +59,32 @@ QList<SubtitleStyle> builtinSubtitleStyles()
     return {SubtitleStyle{}, boxed, bold};
 }
 
+QList<int> displayTrackOrder(const QList<Track> &tracks)
+{
+    QList<int> video;
+    QList<int> audio;
+    QList<int> subtitle;
+    for (int i = 0; i < tracks.size(); ++i) {
+        switch (tracks.at(i).type) {
+        case TrackType::Video:
+            video.prepend(i); // highest composited layer on top
+            break;
+        case TrackType::Audio:
+            audio.append(i);
+            break;
+        case TrackType::Subtitle:
+            subtitle.append(i);
+            break;
+        }
+    }
+    QList<int> order;
+    order.reserve(tracks.size());
+    order.append(video);
+    order.append(audio);
+    order.append(subtitle);
+    return order;
+}
+
 int64_t scaleBySpeed(int64_t timelineDeltaUs, int speedMilli)
 {
     if (timelineDeltaUs <= 0)

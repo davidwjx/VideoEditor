@@ -88,6 +88,13 @@ struct SubtitleCue {
     bool operator==(const SubtitleCue &) const = default;
 };
 
+// Canonical horizontal alignment encoding for subtitle text blocks. These are
+// deliberately not Qt::Alignment values: the project schema has always stored
+// 2 as "centered", so the rasterizer must interpret that number as center.
+constexpr int kSubtitleAlignLeft = 1;
+constexpr int kSubtitleAlignCenter = 2;
+constexpr int kSubtitleAlignRight = 3;
+
 struct SubtitleStyle {
     QString id = QStringLiteral("default");
     QString name = QStringLiteral("默认样式");
@@ -97,7 +104,9 @@ struct SubtitleStyle {
     quint32 outlineColorArgb = 0xFF000000;
     int outlineWidth = 2;
     quint32 backgroundArgb = 0x00000000;
-    int alignment = 2;          // Qt::AlignHCenter
+    // kSubtitleAlignLeft / Center / Right. Older files may contain arbitrary
+    // values; the rasterizer treats anything else as centered.
+    int alignment = kSubtitleAlignCenter;
 
     bool operator==(const SubtitleStyle &) const = default;
 };
@@ -117,6 +126,11 @@ struct Track {
 };
 
 QList<SubtitleStyle> builtinSubtitleStyles();
+
+// UI lane order, grouped by track type: video (topmost composited track first,
+// i.e. reverse project order), then audio, then subtitle tracks. The video
+// ordering matches the compositor, which draws project order bottom to top.
+QList<int> displayTrackOrder(const QList<Track> &tracks);
 
 // Integer speed mapping. Both directions round half up so a clip that is
 // trimmed and untrimmed by the same amount does not drift.

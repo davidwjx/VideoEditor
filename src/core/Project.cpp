@@ -33,13 +33,26 @@ void Project::ensureDefaultTracks()
         track.name = QStringLiteral("S1");
         tracks.append(track);
     }
-    bool hasDefaultStyle = false;
-    for (const SubtitleStyle &style : subtitleStyles) {
-        if (style.id == QStringLiteral("default"))
-            hasDefaultStyle = true;
+    ensureSubtitleStyles();
+}
+
+void Project::ensureSubtitleStyles()
+{
+    // Merge by id: an existing project style (possibly customized) is kept,
+    // while builtin presets the project never had are appended. This makes
+    // "boxed" and "bold-outline" selectable for new projects, v1 migrations
+    // and v2 files written before the presets existed.
+    for (const SubtitleStyle &builtin : builtinSubtitleStyles()) {
+        bool found = false;
+        for (const SubtitleStyle &existing : subtitleStyles) {
+            if (existing.id == builtin.id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            subtitleStyles.append(builtin);
     }
-    if (!hasDefaultStyle)
-        subtitleStyles.append(SubtitleStyle{});
 }
 
 const Asset *Project::assetById(const QString &id) const

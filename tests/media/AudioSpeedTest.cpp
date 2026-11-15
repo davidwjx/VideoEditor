@@ -336,6 +336,33 @@ TEST(AudioSpeed, ShortClipWithOlaIsAudible)
     EXPECT_GT(peakOf(out), 0.005f);
 }
 
+TEST(AudioSpeed, OlaCarriesPartialHopAcrossUnevenBlocks)
+{
+    if (!QFileInfo::exists(toneFixturePath()))
+        GTEST_SKIP() << "missing tone.wav";
+
+    ClipAudioReader reader;
+    QString error;
+    ASSERT_TRUE(reader.open(toneAsset(), 48000, 2, &error)) << error.toStdString();
+
+    Clip clip;
+    clip.assetId = QStringLiteral("a");
+    clip.sourceOutUs = 2'000'000;
+    clip.speedMilli = 2000;
+    clip.preservePitch = true;
+
+    // 500-frame blocks are not multiples of the 480-frame OLA hop. The second
+    // block must contain carried audio instead of starting with silence.
+    std::vector<float> first(size_t(500) * 2);
+    std::vector<float> second(size_t(500) * 2);
+    reader.render(clip, 0, 500, first.data());
+    reader.render(clip, 10'417, 500, second.data()); // ~500 frames at 48 kHz
+
+    EXPECT_GT(peakOf(first), 0.005f);
+    EXPECT_GT(peakOf(second), 0.005f)
+        << "partial OLA hops were dropped between uneven blocks";
+}
+
 TEST(AudioSpeed, OlaSlowSpeedKeepsStartAndTail)
 {
     if (!QFileInfo::exists(toneFixturePath()))

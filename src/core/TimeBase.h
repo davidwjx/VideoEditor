@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <QString>
 
 namespace VideoEditor {
@@ -21,5 +22,11 @@ int64_t microsToFrames(int64_t micros, Rational fps);
 QString formatTimecode(int64_t micros, Rational fps);
 QString formatTimecodeAtRate(int64_t micros, Rational fps, bool dropFrame);
 QString formatDuration(int64_t micros);
+
+// Parses a user-entered position. Accepted forms: "HH:MM:SS:FF",
+// "HH:MM:SS;FF", "HH:MM:SS.mmm", "MM:SS.mmm" and plain seconds. Frame fields
+// are converted with fps. Returns std::nullopt for malformed or negative
+// input, or when a frame field is outside 0..fps-1.
+std::optional<int64_t> parseTimecode(const QString &text, Rational fps);
 
 } // namespace VideoEditor

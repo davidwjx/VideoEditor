@@ -39,9 +39,33 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
     if (peaks.isEmpty())
         return image;
 
+    // Optional source range from the trim points. Mapping the requested
+    // source interval onto the clip rectangle means a trimmed clip no longer
+    // shows the whole asset's waveform squeezed or stretched.
+    int64_t sourceInUs = 0;
+    int64_t sourceOutUs = 0;
+    if (parts.size() > 3) {
+        sourceInUs = qMax<int64_t>(0, parts.at(2).toLongLong());
+        sourceOutUs = parts.at(3).toLongLong();
+    }
+    if (sourceOutUs <= sourceInUs || peaks.durationUs <= 0) {
+        sourceInUs = 0;
+        sourceOutUs = peaks.durationUs > 0
+                          ? peaks.durationUs
+                          : int64_t(peaks.bucketCount())
+                                * 1'000'000 / WaveformPeaks::kBucketsPerSecond;
+    }
+    sourceOutUs = qMin<int64_t>(sourceOutUs, peaks.durationUs);
+    const int firstBucket = int(sourceInUs * peaks.bucketCount()
+                                / qMax<int64_t>(1, peaks.durationUs));
+    const int lastBucket = int(sourceOutUs * peaks.bucketCount()
+                               / qMax<int64_t>(1, peaks.durationUs));
+
     const QString cacheKey = parts.first() + QLatin1Char('/')
                              + QString::number(width) + QLatin1Char('x')
                              + QString::number(height) + QLatin1Char('/')
+                             + QString::number(firstBucket) + QLatin1Char('-')
+                             + QString::number(lastBucket) + QLatin1Char('/')
                              + QString::number(peaks.bucketCount());
     {
         QMutexLocker locker(&m_cacheMutex);
@@ -53,13 +77,17 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
     painter.setRenderHint(QPainter::Antialiasing, false);
     painter.setPen(QColor(0x7f, 0xc8, 0xff, 220));
     const double center = height / 2.0;
+    const int rangeBuckets = qMax(1, lastBucket - firstBucket);
     for (int x = 0; x < width; ++x) {
-        const int from = int(int64_t(x) * peaks.bucketCount() / width);
+        const int from = firstBucket
+                         + int(int64_t(x) * rangeBuckets / width);
         const int to = qMax(from + 1,
-                            int(int64_t(x + 1) * peaks.bucketCount() / width));
+                            firstBucket
+                                + int(int64_t(x + 1) * rangeBuckets / width));
         float minimum = 0.0f;
         float maximum = 0.0f;
-        for (int b = from; b < qMin(to, peaks.bucketCount()); ++b) {
+        for (int b = from; b < qMin(to, qMin(lastBucket + 1,
+                                             peaks.bucketCount())); ++b) {
             minimum = qMin(minimum, peaks.minValues.at(b));
             maximum = qMax(maximum, peaks.maxValues.at(b));
         }

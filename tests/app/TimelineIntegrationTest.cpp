@@ -62,9 +62,14 @@ TEST(TimelineIntegration, EditsSurviveSaveAndReload)
     controller.timeline()->seekUs(1'000'000);
     controller.timeline()->setClipSpeed(
         controller.document()->project().tracks.at(0).clips.first().id, 1500, true);
+    // UAT item 5 also covers authored keyframes and cue positions.
+    ASSERT_TRUE(controller.timeline()->addVolumeKeyframe(
+        QStringLiteral("track-a1"), audioClipId, 500'000, 900));
     controller.timeline()->addCueAtPlayhead();
     const QString cueId = controller.document()->project().tracks.at(2).cues.first().id;
     controller.timeline()->setCueText(cueId, QStringLiteral("保存测试"));
+    EXPECT_TRUE(controller.timeline()->setCuePosition(
+        QStringLiteral("track-s1"), cueId, 250, 700));
 
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -93,6 +98,13 @@ TEST(TimelineIntegration, EditsSurviveSaveAndReload)
     EXPECT_EQ(reloadedBgm->audio.panMilli, -50);
     EXPECT_EQ(reloadedBgm->audio.fadeInUs, 2'000'000);
     EXPECT_EQ(reloadedBgm->audio.fadeOutUs, 2'000'000);
+    ASSERT_EQ(reloadedBgm->audio.keyframes.size(), 1);
+    EXPECT_EQ(reloadedBgm->audio.keyframes.first().timeUs, 500'000);
+    EXPECT_EQ(reloadedBgm->audio.keyframes.first().volumeMilli, 900);
+    const SubtitleCue &reloadedCue =
+        reopened.project().tracks.at(2).cues.first();
+    EXPECT_EQ(reloadedCue.positionXPermille, 250);
+    EXPECT_EQ(reloadedCue.positionYPermille, 700);
 
     const int64_t duration = TimelineEvaluator(reopened.project()).durationUs();
     EXPECT_GT(duration, 0);

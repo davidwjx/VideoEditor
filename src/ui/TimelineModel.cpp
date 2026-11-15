@@ -12,8 +12,11 @@ TimelineModel::TimelineModel(QObject *parent)
 QList<TimelineModel::Row> TimelineModel::buildRows(const Project &project)
 {
     QList<Row> rows;
-    for (int trackIndex = 0; trackIndex < project.tracks.size(); ++trackIndex) {
-        const Track &track = project.tracks.at(trackIndex);
+    // Lanes are grouped by type in TimelinePanel; trackIndex is the display
+    // index so clips/cues line up with the matching header row.
+    const QList<int> order = displayTrackOrder(project.tracks);
+    for (int displayIndex = 0; displayIndex < order.size(); ++displayIndex) {
+        const Track &track = project.tracks.at(order.at(displayIndex));
         if (track.type == TrackType::Subtitle) {
             for (const SubtitleCue &cue : track.cues) {
                 Row row;
@@ -21,7 +24,7 @@ QList<TimelineModel::Row> TimelineModel::buildRows(const Project &project)
                 row.id = cue.id;
                 row.trackId = track.id;
                 row.trackType = track.type;
-                row.trackIndex = trackIndex;
+                row.trackIndex = displayIndex;
                 row.cue = cue;
                 rows.append(row);
             }
@@ -32,7 +35,7 @@ QList<TimelineModel::Row> TimelineModel::buildRows(const Project &project)
                 row.id = clip.id;
                 row.trackId = track.id;
                 row.trackType = track.type;
-                row.trackIndex = trackIndex;
+                row.trackIndex = displayIndex;
                 row.clip = clip;
                 rows.append(row);
             }
@@ -203,6 +206,10 @@ QVariant TimelineModel::data(const QModelIndex &index, int role) const
         return isClip ? 0 : row.cue.positionXPermille;
     case PositionYPermilleRole:
         return isClip ? 0 : row.cue.positionYPermille;
+    case SourceInUsRole:
+        return QVariant::fromValue<qint64>(isClip ? row.clip.sourceInUs : 0);
+    case SourceOutUsRole:
+        return QVariant::fromValue<qint64>(isClip ? row.clip.sourceOutUs : 0);
     default:
         return {};
     }
@@ -234,6 +241,8 @@ QHash<int, QByteArray> TimelineModel::roleNames() const
         {KeyframesRole, QByteArrayLiteral("keyframes")},
         {PositionXPermilleRole, QByteArrayLiteral("positionXPermille")},
         {PositionYPermilleRole, QByteArrayLiteral("positionYPermille")},
+        {SourceInUsRole, QByteArrayLiteral("sourceInUs")},
+        {SourceOutUsRole, QByteArrayLiteral("sourceOutUs")},
     };
 }
 

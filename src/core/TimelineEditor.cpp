@@ -637,9 +637,11 @@ void TimelineEditor::copy(const QList<ClipLocator> &clips)
     m_clipboard.clear();
     for (const ClipLocator &locator : clips) {
         const Clip *clip = findClip(locator.trackId, locator.clipId);
-        if (!clip)
+        const Track *track = m_document.trackById(locator.trackId);
+        if (!clip || !track)
             continue;
-        m_clipboard.append(ClipboardEntry{locator.trackId, *clip});
+        m_clipboard.append(
+            ClipboardEntry{locator.trackId, track->type, *clip});
     }
 }
 
@@ -649,8 +651,32 @@ void TimelineEditor::paste(int64_t timelineUs, const QString &targetTrackId)
         return;
     timelineUs = qMax<int64_t>(0, timelineUs);
     const Track *target = m_document.trackById(targetTrackId);
-    if (!target || target->locked)
-        return;
+
+    // Resolve every destination before touching the document: a pasted linked
+    // group either lands completely (both halves on their original tracks) or
+    // not at all. Missing source tracks fall back to the requested lane, but
+    // only when its type matches.
+    QList<QString> destinationIds;
+    destinationIds.reserve(m_clipboard.size());
+    for (const ClipboardEntry &entry : m_clipboard) {
+        const Track *sourceTrack = m_document.trackById(entry.sourceTrackId);
+        QString destinationId;
+        if (sourceTrack && sourceTrack->type != TrackType::Subtitle) {
+            destinationId = sourceTrack->id;
+        } else if (target && target->type == entry.sourceTrackType) {
+            // The original track is gone: the requested lane may stand in,
+            // but only when it has the same media type.
+            destinationId = target->id;
+        }
+        const Track *destination = m_document.trackById(destinationId);
+        if (!destination || destination->type == TrackType::Subtitle)
+            return;
+        if (destination->type != entry.sourceTrackType)
+            return;
+        if (destination->locked)
+            return; // One lock policy: reject the whole paste atomically.
+        destinationIds.append(destinationId);
+    }
 
     int64_t minStart = INT64_MAX;
     for (const ClipboardEntry &entry : m_clipboard)
@@ -658,19 +684,9 @@ void TimelineEditor::paste(int64_t timelineUs, const QString &targetTrackId)
 
     QHash<QString, QList<Clip>> addedByTrack;
     QHash<QString, QString> linkMap;
-    for (const ClipboardEntry &entry : m_clipboard) {
-        const Track *sourceTrack = m_document.trackById(entry.sourceTrackId);
-        QString destinationId = entry.sourceTrackId;
-        if (!sourceTrack || sourceTrack->type != target->type) {
-            if (sourceTrack && sourceTrack->type != target->type)
-                continue;
-            destinationId = targetTrackId;
-        }
-        const Track *destination = m_document.trackById(destinationId);
-        if (!destination || destination->type != target->type)
-            continue;
-        if (destination->locked)
-            return; // One lock policy: reject the whole paste.
+    for (int i = 0; i < m_clipboard.size(); ++i) {
+        const ClipboardEntry &entry = m_clipboard.at(i);
+        const QString &destinationId = destinationIds.at(i);
 
         Clip copy = entry.clip;
         copy.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -829,6 +845,30 @@ void TimelineEditor::updateSubtitleCue(const QString &trackId,
                                        return a.startUs < b.startUs;
                                    });
               }));
+}
+
+void TimelineEditor::setCueTiming(const QString &trackId,
+                                  const QString &cueId, int64_t startUs,
+                                  int64_t endUs)
+{
+    if (startUs < 0 || endUs <= startUs)
+        return;
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->type != TrackType::Subtitle)
+        return;
+    const SubtitleCue *existing = nullptr;
+    for (const SubtitleCue &cue : track->cues) {
+        if (cue.id == cueId) {
+            existing = &cue;
+            break;
+        }
+    }
+    if (!existing)
+        return;
+    SubtitleCue updated = *existing;
+    updated.startUs = startUs;
+    updated.endUs = endUs;
+    updateSubtitleCue(trackId, cueId, updated);
 }
 
 void TimelineEditor::removeSubtitleCue(const QString &trackId,

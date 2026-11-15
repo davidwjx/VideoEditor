@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 #include <QDir>
@@ -120,6 +121,55 @@ TEST(AudioMix, SoloOverridesOtherTracks)
     EXPECT_EQ(stats.activeLayers, 1);
 }
 
+TEST(AudioMix, SoloMutesOtherTracksDuringSoloTrackGap)
+{
+    if (!QFileInfo::exists(tonePath()))
+        GTEST_SKIP() << "missing tone.wav";
+    // A1 starts at 0 and plays; A2 is soloed but starts at 1 s. During A2's
+    // gap A1 must stay silent: solo is a project-wide state, not block-local.
+    Project project = projectWithAudio(QStringLiteral("c1"), 0, 2'000'000);
+    Track second = project.tracks.first();
+    second.id = QStringLiteral("a2");
+    second.solo = true;
+    second.clips[0].id = QStringLiteral("c2");
+    second.clips[0].timelineStartUs = 1'000'000;
+    project.tracks.append(second);
+
+    TimelineMixer mixer;
+    mixer.setProject(project);
+    mixer.setPosition(0);
+    std::vector<float> out(size_t(4800) * 2);
+    MixStats stats;
+    mixer.render(out.data(), 4800, &stats);
+    EXPECT_EQ(stats.activeLayers, 0);
+    for (float sample : out)
+        EXPECT_EQ(sample, 0.0f);
+
+    // Once the soloed clip is active it is the only audible layer.
+    mixer.setPosition(1'000'000);
+    mixer.render(out.data(), 4800, &stats);
+    EXPECT_EQ(stats.activeLayers, 1);
+    EXPECT_GT(stats.peak, 0.1f);
+}
+
+TEST(AudioMix, PanGainsAreConstantPower)
+{
+    float left = 0.0f;
+    float right = 0.0f;
+    panGains(0, &left, &right);
+    EXPECT_NEAR(left, 0.70710678f, 1e-5f);
+    EXPECT_NEAR(right, 0.70710678f, 1e-5f);
+    EXPECT_NEAR(left * left + right * right, 1.0f, 1e-5f);
+
+    panGains(-1000, &left, &right);
+    EXPECT_NEAR(left, 1.0f, 1e-5f);
+    EXPECT_NEAR(right, 0.0f, 1e-5f);
+
+    panGains(1000, &left, &right);
+    EXPECT_NEAR(left, 0.0f, 1e-5f);
+    EXPECT_NEAR(right, 1.0f, 1e-5f);
+}
+
 TEST(AudioMix, FadeInRampsFromSilence)
 {
     if (!QFileInfo::exists(tonePath()))
@@ -206,6 +256,85 @@ TEST(AudioMix, PreservePitchSpeedRendersThroughMixer)
     for (float sample : out)
         EXPECT_TRUE(std::isfinite(sample));
     EXPECT_EQ(mixer.positionUs(), 100'000);
+}
+
+TEST(AudioMix, ParameterOnlyEditsKeepReadersOpen)
+{
+    if (!QFileInfo::exists(tonePath()))
+        GTEST_SKIP() << "missing tone.wav";
+    Project project = projectWithAudio(QStringLiteral("c1"), 0, 2'000'000);
+    TimelineMixer mixer;
+    mixer.setProject(project);
+    mixer.setPosition(0);
+    std::vector<float> out(size_t(4800) * 2);
+    mixer.render(out.data(), 4800, nullptr);
+    EXPECT_EQ(mixer.cachedReaderCountForTest(), 1);
+    EXPECT_EQ(mixer.readerOpenCountForTest(), 1);
+
+    // Volume/pan/fade/keyframe edits must update the snapshot in place, not
+    // rebuild every decoder (which used to happen on every inspector drag).
+    for (const std::function<void(Clip &)> &edit :
+         {std::function<void(Clip &)>(
+              [](Clip &clip) { clip.audio.volumeMilli = 1500; }),
+          std::function<void(Clip &)>(
+              [](Clip &clip) { clip.audio.panMilli = -300; }),
+          std::function<void(Clip &)>(
+              [](Clip &clip) { clip.audio.fadeInUs = 250'000; }),
+          std::function<void(Clip &)>(
+              [](Clip &clip) { clip.audio.keyframes = {VolumeKeyframe{0, 800}}; })}) {
+        Project edited = project;
+        edit(edited.tracks[0].clips[0]);
+        mixer.setProject(edited);
+        mixer.render(out.data(), 4800, nullptr);
+        EXPECT_EQ(mixer.cachedReaderCountForTest(), 1);
+        EXPECT_EQ(mixer.readerOpenCountForTest(), 1)
+            << "a parameter-only edit reopened the decoder";
+        project = edited;
+    }
+
+    // A speed change resets the cursor but keeps the same decoder.
+    Project faster = project;
+    faster.tracks[0].clips[0].speedMilli = 2000;
+    faster.tracks[0].clips[0].sourceOutUs = 4'000'000;
+    mixer.setProject(faster);
+    mixer.setPosition(0);
+    mixer.render(out.data(), 4800, nullptr);
+    EXPECT_EQ(mixer.readerOpenCountForTest(), 1);
+}
+
+TEST(AudioMix, LongTimelineKeepsBoundedReaderCache)
+{
+    if (!QFileInfo::exists(tonePath()))
+        GTEST_SKIP() << "missing tone.wav";
+    Project project;
+    project.timeline.fps = Rational{30, 1};
+    project.assets.append(toneAsset());
+    Track track;
+    track.id = QStringLiteral("a1");
+    track.type = TrackType::Audio;
+    constexpr int kClips = 14; // more than the cache cap
+    for (int i = 0; i < kClips; ++i) {
+        Clip clip;
+        clip.id = QStringLiteral("c%1").arg(i);
+        clip.assetId = QStringLiteral("asset-a");
+        clip.sourceInUs = int64_t(i) * 100'000;
+        clip.sourceOutUs = clip.sourceInUs + 100'000;
+        clip.timelineStartUs = int64_t(i) * 100'000;
+        track.clips.append(clip);
+    }
+    project.tracks.append(track);
+
+    TimelineMixer mixer;
+    mixer.setProject(project);
+    std::vector<float> out(size_t(4800) * 2);
+    for (int i = 0; i < kClips; ++i) {
+        mixer.setPosition(int64_t(i) * 100'000);
+        mixer.render(out.data(), 4800, nullptr);
+        EXPECT_LE(mixer.cachedReaderCountForTest(),
+                  TimelineMixer::kMaxCachedReaders)
+            << "reader cache grew without bound at clip " << i;
+    }
+    EXPECT_EQ(mixer.readerOpenCountForTest(), kClips);
 }
 
 TEST(AudioMix, InterpolatesVolumeKeyframes)

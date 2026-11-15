@@ -49,6 +49,12 @@ TEST(Timeline, SurvivesLongTimelineArithmeticAtFourX)
     EXPECT_EQ(sourceTimeAt(clip, 1'800'000'000), 7'200'000'000);
 }
 
+TEST(Timeline, PreservePitchDefaultsOffToMatchTheInspector)
+{
+    // README documents the checkbox as opt-in; the model default must agree.
+    EXPECT_FALSE(Clip{}.preservePitch);
+}
+
 TEST(Timeline, TrackTypeRoundTrips)
 {
     EXPECT_EQ(trackTypeFromString(QStringLiteral("video")), TrackType::Video);
@@ -69,6 +75,9 @@ TEST(Timeline, EnsureDefaultTracksIsIdempotent)
     EXPECT_EQ(project.tracks.at(0).type, TrackType::Video);
     EXPECT_EQ(project.tracks.at(1).type, TrackType::Audio);
     EXPECT_EQ(project.tracks.at(2).type, TrackType::Subtitle);
-    EXPECT_EQ(project.subtitleStyles.size(), 1);
+    // Builtin presets are merged by id, so every project can select them.
+    EXPECT_EQ(project.subtitleStyles.size(), 3);
     EXPECT_EQ(project.subtitleStyles.first().id, QStringLiteral("default"));
+    EXPECT_EQ(project.subtitleStyles.at(1).id, QStringLiteral("boxed"));
+    EXPECT_EQ(project.subtitleStyles.at(2).id, QStringLiteral("bold-outline"));
 }

@@ -44,6 +44,12 @@ TimelineController::TimelineController(ProjectDocument &document, QObject *paren
             &TimelineController::refreshFromDocument);
     connect(&m_document, &ProjectDocument::tracksChanged, this,
             &TimelineController::refreshFromDocument);
+    connect(&m_document, &ProjectDocument::projectReplaced, this, [this] {
+        // Clipboard entries point at the old document's tracks; pasting them
+        // into a freshly loaded project would either target stale ids or
+        // duplicate content invisibly.
+        m_editor.clearClipboard();
+    });
 }
 
 QVariantMap TimelineController::selectedClip() const
@@ -53,11 +59,13 @@ QVariantMap TimelineController::selectedClip() const
         return map;
 
     QString trackId;
+    TrackType trackType = TrackType::Video;
     const Clip *clip = nullptr;
     for (const Track &track : m_document.project().tracks) {
         for (const Clip &candidate : track.clips) {
             if (candidate.id == m_selectedClipId) {
                 trackId = track.id;
+                trackType = track.type;
                 clip = &candidate;
                 break;
             }
@@ -70,6 +78,11 @@ QVariantMap TimelineController::selectedClip() const
 
     map.insert(QStringLiteral("id"), clip->id);
     map.insert(QStringLiteral("trackId"), trackId);
+    // The inspector disables clip-audio controls on video tracks: a picture
+    // clip whose only audio lives on the linked A-track cannot be heard.
+    map.insert(QStringLiteral("trackType"), trackTypeToString(trackType));
+    map.insert(QStringLiteral("hasAudioControls"),
+               trackType == TrackType::Audio);
     map.insert(QStringLiteral("assetId"), clip->assetId);
     map.insert(QStringLiteral("speedMilli"), clip->speedMilli);
     map.insert(QStringLiteral("preservePitch"), clip->preservePitch);
@@ -158,6 +171,11 @@ void TimelineController::refreshFromDocument()
         m_timelineModel->selectItem(QString());
         emit selectionChanged();
     }
+    // A removed track must not remain the target for later inserts.
+    if (!m_targetTrackId.isEmpty() && !m_document.trackById(m_targetTrackId)) {
+        m_targetTrackId.clear();
+        emit targetTrackChanged();
+    }
     // Clip properties may have changed while the same clip stayed selected;
     // the inspector binds to these maps, so refresh them on every edit.
     emit selectedClipChanged();
@@ -200,6 +218,17 @@ void TimelineController::setSnapEnabled(bool enabled)
     emit viewChanged();
 }
 
+void TimelineController::setTargetTrackId(const QString &trackId)
+{
+    QString next = trackId;
+    if (!next.isEmpty() && !m_document.trackById(next))
+        next.clear();
+    if (next == m_targetTrackId)
+        return;
+    m_targetTrackId = next;
+    emit targetTrackChanged();
+}
+
 void TimelineController::seekUs(qint64 positionUs)
 {
     const qint64 clamped = positionUs < 0 ? 0 : positionUs;
@@ -207,6 +236,25 @@ void TimelineController::seekUs(qint64 positionUs)
         return;
     m_positionUs = clamped;
     emit positionChanged();
+}
+
+qint64 TimelineController::frameQuantizeUs(qint64 timeUs) const
+{
+    const Rational fps = projectFps(m_document.project());
+    if (!fps.isValid())
+        return qMax<qint64>(0, timeUs);
+    const int64_t frame = microsToFrames(qMax<qint64>(0, timeUs), fps);
+    return framesToMicros(frame < 0 ? 0 : frame, fps);
+}
+
+bool TimelineController::seekTimecode(const QString &text)
+{
+    const std::optional<int64_t> parsed =
+        parseTimecode(text, projectFps(m_document.project()));
+    if (!parsed)
+        return false;
+    seekUs(*parsed);
+    return true;
 }
 
 void TimelineController::stepFrames(int delta)
@@ -373,6 +421,30 @@ QString TimelineController::addAssetToTimeline(const QString &assetId,
     const int64_t startUs = qMax<int64_t>(0, atUs);
     const Track *requested = m_document.trackById(trackId);
 
+    // Nth track of a type, used to pair original audio with the target video
+    // lane (V2 -> A2). Falls back to the first matching track when no such
+    // ordinal exists.
+    const auto trackIdAtOrdinal = [this](TrackType type, int ordinal) {
+        int seen = 0;
+        for (const Track &track : m_document.project().tracks) {
+            if (track.type != type)
+                continue;
+            if (seen == ordinal)
+                return track.id;
+            ++seen;
+        }
+        return QString();
+    };
+    int requestedVideoOrdinal = 0;
+    if (requested && requested->type == TrackType::Video) {
+        for (const Track &track : m_document.project().tracks) {
+            if (track.id == requested->id)
+                break;
+            if (track.type == TrackType::Video)
+                ++requestedVideoOrdinal;
+        }
+    }
+
     QString videoTrackId;
     if (wantsVideo) {
         if (requested && requested->type == TrackType::Video)
@@ -387,10 +459,18 @@ QString TimelineController::addAssetToTimeline(const QString &assetId,
 
     QString audioTrackId;
     if (wantsAudio) {
-        if (requested && requested->type == TrackType::Audio)
+        if (requested && requested->type == TrackType::Audio) {
             audioTrackId = requested->id;
-        if (audioTrackId.isEmpty())
+        } else if (requested && requested->type == TrackType::Video) {
+            // Keep the original audio on the A-lane paired with the chosen
+            // V-lane instead of piling every source onto A1.
+            audioTrackId = trackIdAtOrdinal(TrackType::Audio,
+                                            requestedVideoOrdinal);
+            if (audioTrackId.isEmpty())
+                audioTrackId = firstTrackIdOfType(TrackType::Audio);
+        } else {
             audioTrackId = firstTrackIdOfType(TrackType::Audio);
+        }
         if (audioTrackId.isEmpty() && !wantsVideo) {
             emit editFailed(QStringLiteral("没有可用的音频轨。"));
             return {};
@@ -838,6 +918,84 @@ bool TimelineController::setCuePosition(const QString &trackId,
     return true;
 }
 
+bool TimelineController::setCueTiming(const QString &cueId, qint64 startUs,
+                                      qint64 endUs)
+{
+    QString trackId;
+    if (!trackForCue(cueId, &trackId))
+        return false;
+    const Track *track = m_document.trackById(trackId);
+    if (!track || track->locked)
+        return false;
+    const SubtitleCue *cue = findCue(trackId, cueId);
+    if (!cue)
+        return false;
+    if (startUs < 0 || endUs <= startUs)
+        return false;
+
+    // Copy the cue so text, style, position and enabled state are preserved
+    // across the single undo step.
+    SubtitleCue updated = *cue;
+    updated.startUs = startUs;
+    updated.endUs = endUs;
+    const int undoIndex = m_document.undoStack()->index();
+    m_editor.updateSubtitleCue(trackId, cueId, updated);
+    return m_document.undoStack()->index() != undoIndex;
+}
+
+bool TimelineController::linkSelectedClip()
+{
+    if (m_selectedClipId.isEmpty())
+        return false;
+    QString trackId;
+    const Track *track = trackForClip(m_selectedClipId, &trackId);
+    if (!track)
+        return false;
+    const Clip *selected = findClip(trackId, m_selectedClipId);
+    if (!selected)
+        return false;
+
+    // Find a same-time counterpart of the opposite media type. Original A/V
+    // pairs share the asset and start time, so this is the common relink flow.
+    QString counterpartTrackId;
+    const Clip *counterpart = nullptr;
+    for (const Track &candidateTrack : m_document.project().tracks) {
+        if (candidateTrack.type == track->type
+            || candidateTrack.type == TrackType::Subtitle) {
+            continue;
+        }
+        for (const Clip &candidate : candidateTrack.clips) {
+            if (candidate.id == selected->id
+                || candidate.timelineStartUs != selected->timelineStartUs
+                || candidate.assetId != selected->assetId) {
+                continue;
+            }
+            counterpartTrackId = candidateTrack.id;
+            counterpart = &candidate;
+            break;
+        }
+        if (counterpart)
+            break;
+    }
+    if (!counterpart)
+        return false;
+
+    const int undoIndex = m_document.undoStack()->index();
+    m_editor.linkClips({ClipLocator{trackId, m_selectedClipId},
+                        ClipLocator{counterpartTrackId, counterpart->id}});
+    return m_document.undoStack()->index() != undoIndex;
+}
+
+void TimelineController::unlinkSelectedClip()
+{
+    if (m_selectedClipId.isEmpty())
+        return;
+    QString trackId;
+    if (!trackForClip(m_selectedClipId, &trackId))
+        return;
+    m_editor.unlinkClip(trackId, m_selectedClipId);
+}
+
 void TimelineController::deleteSelectedCue()
 {
     if (m_selectedCueId.isEmpty())
@@ -915,7 +1073,7 @@ bool TimelineController::exportSrtFile(const QString &path)
     return true;
 }
 
-void TimelineController::addTrack(int type)
+QString TimelineController::addTrack(int type)
 {
     TrackType trackType;
     QString prefix;
@@ -934,7 +1092,7 @@ void TimelineController::addTrack(int type)
         break;
     default:
         emit editFailed(QStringLiteral("未知的轨道类型。"));
-        return;
+        return {};
     }
 
     int count = 0;
@@ -948,6 +1106,11 @@ void TimelineController::addTrack(int type)
     track.type = trackType;
     track.name = prefix + QString::number(count + 1);
     m_editor.addTrack(track);
+    if (!m_document.trackById(track.id))
+        return {};
+    // New media should land on the lane the user just created.
+    setTargetTrackId(track.id);
+    return track.id;
 }
 
 void TimelineController::removeTrack(const QString &trackId)

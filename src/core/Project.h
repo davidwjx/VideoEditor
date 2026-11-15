@@ -28,6 +28,10 @@ struct Project {
     QList<SubtitleStyle> subtitleStyles;
 
     void ensureDefaultTracks();
+    // Merges every builtin subtitle style (default, boxed, bold-outline) into
+    // the project by id. Styles already present win, so a project may override
+    // a builtin while still gaining presets added by a newer app version.
+    void ensureSubtitleStyles();
     const Asset *assetById(const QString &id) const;
 
     bool operator==(const Project &) const = default;

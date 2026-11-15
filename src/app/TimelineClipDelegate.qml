@@ -14,13 +14,18 @@ Rectangle {
     property string name
     property real startUs
     property real durationUs
+    property real sourceInUs
+    property real sourceOutUs
     property int speedMilli
     property bool linked
     property string trackType
     property bool selected: false
 
+    // Range-aware waveform: trimmed clips show only their source interval.
     property string waveformUrl: "image://waveform/" + assetId + "/"
-                                 + Math.max(1, Math.round(width))
+                                 + Math.max(1, Math.round(width)) + "/"
+                                 + Math.round(sourceInUs) + "/"
+                                 + Math.round(sourceOutUs)
     property bool dragging: false
     property bool trimming: false
 
@@ -116,7 +121,8 @@ Rectangle {
         onReleased: (mouse) => {
             const proposed = Math.round(
                 clipItem.x / Math.max(1, timeline.pixelsPerSecond) * 1e6)
-            Timeline.moveClip(clipItem.itemId, Timeline.snapUs(proposed))
+            Timeline.moveClip(clipItem.itemId,
+                             Timeline.frameQuantizeUs(Timeline.snapUs(proposed)))
             clipItem.restoreGeometry()
         }
         onCanceled: clipItem.restoreGeometry()
@@ -159,7 +165,8 @@ Rectangle {
             onReleased: (mouse) => {
                 const proposed = Math.round(
                     clipItem.x / Math.max(1, timeline.pixelsPerSecond) * 1e6)
-                Timeline.trimStart(clipItem.itemId, Timeline.snapUs(proposed))
+                Timeline.trimStart(clipItem.itemId,
+                                Timeline.frameQuantizeUs(Timeline.snapUs(proposed)))
                 clipItem.restoreGeometry()
             }
             onCanceled: clipItem.restoreGeometry()
@@ -198,7 +205,8 @@ Rectangle {
             onReleased: (mouse) => {
                 const proposedEnd = clipItem.startUs + Math.round(
                     clipItem.width / Math.max(1, timeline.pixelsPerSecond) * 1e6)
-                Timeline.trimEnd(clipItem.itemId, Timeline.snapUs(proposedEnd))
+                Timeline.trimEnd(clipItem.itemId,
+                              Timeline.frameQuantizeUs(Timeline.snapUs(proposedEnd)))
                 clipItem.restoreGeometry()
             }
             onCanceled: clipItem.restoreGeometry()

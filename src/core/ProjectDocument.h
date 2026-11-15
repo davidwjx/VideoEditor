@@ -52,6 +52,9 @@ signals:
     void assetsChanged();
     void timelineChanged();
     void tracksChanged();
+    // Emitted when setProject() replaces the whole document (load, recovery,
+    // tests). Consumers holding document-scoped transient state clear it here.
+    void projectReplaced();
     void undoStateChanged();
     void dirtyChanged();
 
