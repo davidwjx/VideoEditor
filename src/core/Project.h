@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <QMetaType>
 #include <QString>
 
 #include "MediaInfo.h"
@@ -33,3 +34,10 @@ struct Project {
 };
 
 } // namespace VideoEditor
+
+// Queued worker invocations (TimelineRenderWorker::setProject and
+// AudioEngine::setProject) pass Project by value across threads. Qt's moc also
+// references the type from several metaobjects combined into one translation
+// unit, so the declaration must live in the type's own header rather than in
+// any single consumer.
+Q_DECLARE_METATYPE(VideoEditor::Project)

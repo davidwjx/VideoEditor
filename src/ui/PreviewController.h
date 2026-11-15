@@ -1,16 +1,21 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QThread>
 #include <QTimer>
 
 #include "MediaInfo.h"
+#include "Project.h"
+#include "TimeBase.h"
 #include "VideoPreviewItem.h"
 
 namespace VideoEditor {
 
+class AudioEngine;
 class DecoderWorker;
+class TimelineRenderWorker;
 
 class PreviewController : public QObject {
     Q_OBJECT
@@ -22,8 +27,13 @@ class PreviewController : public QObject {
     Q_PROPERTY(QString timecode READ timecode NOTIFY positionChanged)
     Q_PROPERTY(QString decodeMode READ decodeMode NOTIFY decodeModeChanged)
     Q_PROPERTY(QString mediaName READ mediaName NOTIFY mediaChanged)
+    Q_PROPERTY(bool timelineMode READ timelineMode NOTIFY mediaChanged)
+    Q_PROPERTY(qint64 durationUs READ durationUs NOTIFY durationChanged)
 
 public:
+    enum class Mode { Asset, Timeline };
+    Q_ENUM(Mode)
+
     explicit PreviewController(QObject *parent = nullptr);
     ~PreviewController() override;
 
@@ -33,9 +43,13 @@ public:
     bool playing() const { return m_playing; }
     qint64 positionMs() const { return m_positionUs / 1000; }
     qint64 durationMs() const { return m_durationUs / 1000; }
+    qint64 durationUs() const { return m_durationUs; }
     QString timecode() const;
     QString decodeMode() const { return m_decodeMode; }
     QString mediaName() const { return m_mediaName; }
+
+    Mode mode() const { return m_mode; }
+    bool timelineMode() const { return m_mode == Mode::Timeline; }
 
     Q_INVOKABLE void openMedia(const QString &path,
                                const QString &proxyPath = {});
@@ -45,6 +59,15 @@ public:
     Q_INVOKABLE void togglePlay();
     Q_INVOKABLE void seekMs(qint64 ms);
     Q_INVOKABLE void stepFrames(int delta);
+    // Timeline mode only: seek to an absolute project frame number.
+    Q_INVOKABLE void seekFrame(qint64 frame);
+
+    // Timeline mode entry point. Takes ownership of its own rendering thread;
+    // the caller keeps using play()/pause()/seekFrame() as usual.
+    void openTimeline(const Project &project, qint64 durationUs);
+    // AudioEngine lives on its own thread; PreviewController only forwards
+    // queued calls and reads the lock-free master clock.
+    void setAudioEngine(AudioEngine *engine);
 
 signals:
     void itemChanged();
@@ -54,6 +77,9 @@ signals:
     void decodeModeChanged();
     void mediaChanged();
     void framePresented(qint64 ptsUs);
+    // Emitted after a timeline-composited frame has been presented by the
+    // scene graph, for self-tests and performance gates.
+    void timelineFramePresented(qint64 timelineUs);
     void error(QString message);
 
 private:
@@ -66,6 +92,14 @@ private:
     void onFinished();
     void onError(const QString &message);
     void requestNextFrame();
+
+    void onTimelineFrameReady(int slot, const QSize &size, qint64 timelineUs,
+                              quintptr h0, quintptr h1, quintptr h2,
+                              quint64 generation);
+    void onTimelineError(const QString &message);
+    void onTimelineTick();
+    void requestTimelineFrame(qint64 timelineUs);
+    int64_t currentTimelineUs() const;
 
     QThread m_thread;
     DecoderWorker *m_worker = nullptr;
@@ -82,6 +116,20 @@ private:
     bool m_playing = false;
     bool m_framePending = false;
     bool m_atEnd = false;
+
+    Mode m_mode = Mode::Asset;
+    QThread m_timelineThread;
+    TimelineRenderWorker *m_timelineWorker = nullptr;
+    AudioEngine *m_audioEngine = nullptr;
+    Project m_timelineProject;
+    QTimer m_presentationTimer;
+    QElapsedTimer m_wallClock;
+    QElapsedTimer m_timelinePendingSince;
+    Rational m_timelineFps{30, 1};
+    int64_t m_playStartUs = 0;
+    int64_t m_lastTimelineFrame = -1;
+    qint64 m_lastTimelineSubmittedUs = -1;
+    bool m_timelineFramePending = false;
 };
 
 } // namespace VideoEditor

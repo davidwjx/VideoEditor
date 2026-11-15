@@ -58,6 +58,21 @@ target_compile_definitions(ui_tests PRIVATE
 gtest_discover_tests(ui_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 
+# Render pipeline tests need a GUI application (QPainter text uses the font
+# database). Like ui_tests they use the default platform: the Windows offscreen
+# plugin hangs QGuiApplication startup, while no window is actually shown.
+add_executable(render_tests
+  media/FrameSelectorTest.cpp
+  media/SubtitleRasterizerTest.cpp
+  media/CompositorTest.cpp
+  TestGuiMain.cpp)
+target_link_libraries(render_tests PRIVATE
+  videoeditor_media GTest::gtest Qt6::Core Qt6::Gui d3d11 dxgi d3dcompiler)
+target_compile_definitions(render_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+gtest_discover_tests(render_tests PROPERTIES
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
+
 add_executable(app_tests app/AppControllerTest.cpp TestMain.cpp)
 target_link_libraries(app_tests PRIVATE videoeditor_app GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(app_tests PRIVATE

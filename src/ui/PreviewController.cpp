@@ -3,16 +3,32 @@
 #include <QFileInfo>
 #include <QMetaObject>
 
+#include "AudioEngine.h"
 #include "DecoderWorker.h"
 #include "TimeBase.h"
+#include "TimelineEvaluator.h"
+#include "TimelineRenderWorker.h"
 #include "VideoPreviewItem.h"
 
 namespace VideoEditor {
+
+namespace {
+
+int frameIntervalMs(Rational fps)
+{
+    if (!fps.isValid())
+        return 33;
+    return qMax(1, int(1000.0 * fps.den / fps.num));
+}
+
+} // namespace
 
 PreviewController::PreviewController(QObject *parent)
     : QObject(parent)
     , m_worker(new DecoderWorker)
 {
+    qRegisterMetaType<VideoEditor::Project>("VideoEditor::Project");
+
     m_worker->moveToThread(&m_thread);
     connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
     connect(m_worker, &DecoderWorker::opened, this, &PreviewController::onOpened);
@@ -24,14 +40,42 @@ PreviewController::PreviewController(QObject *parent)
             &PreviewController::onFinished);
     m_thread.start();
 
+    // The timeline compositor has its own D3D11 device and thread; keeping it
+    // off the asset decoder thread means neither can stall the other.
+    m_timelineWorker = new TimelineRenderWorker;
+    m_timelineWorker->moveToThread(&m_timelineThread);
+    connect(&m_timelineThread, &QThread::finished, m_timelineWorker,
+            &QObject::deleteLater);
+    connect(m_timelineWorker, &TimelineRenderWorker::frameReady, this,
+            &PreviewController::onTimelineFrameReady);
+    connect(m_timelineWorker, &TimelineRenderWorker::error, this,
+            &PreviewController::onTimelineError);
+    m_timelineThread.setObjectName(QStringLiteral("TimelineRender"));
+    m_timelineThread.start();
+
     m_frameTimer.setSingleShot(false);
     connect(&m_frameTimer, &QTimer::timeout, this,
             &PreviewController::requestNextFrame);
+
+    m_presentationTimer.setSingleShot(false);
+    m_presentationTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_presentationTimer, &QTimer::timeout, this,
+            &PreviewController::onTimelineTick);
 }
 
 PreviewController::~PreviewController()
 {
     m_frameTimer.stop();
+    m_presentationTimer.stop();
+
+    if (m_timelineThread.isRunning()) {
+        // Stop the worker before its D3D11 resources outlive the thread.
+        QMetaObject::invokeMethod(m_timelineWorker, "close",
+                                  Qt::BlockingQueuedConnection);
+        m_timelineThread.quit();
+        m_timelineThread.wait();
+    }
+
     m_thread.quit();
     m_thread.wait();
 }
@@ -59,6 +103,18 @@ void PreviewController::setItem(VideoPreviewItem *item)
 void PreviewController::openMedia(const QString &path, const QString &proxyPath)
 {
     pause();
+    if (m_mode == Mode::Timeline) {
+        m_presentationTimer.stop();
+        if (m_timelineWorker)
+            QMetaObject::invokeMethod(m_timelineWorker, "close",
+                                      Qt::QueuedConnection);
+        m_mode = Mode::Asset;
+        m_timelineProject = Project{};
+        m_lastTimelineFrame = -1;
+        m_lastTimelineSubmittedUs = -1;
+        m_timelineFramePending = false;
+    }
+
     const quint64 generation = ++m_generation;
     if (m_item)
         m_item->resetBridge();
@@ -83,6 +139,18 @@ void PreviewController::closeMedia()
 {
     pause();
     m_frameTimer.stop();
+    if (m_mode == Mode::Timeline) {
+        m_presentationTimer.stop();
+        if (m_timelineWorker)
+            QMetaObject::invokeMethod(m_timelineWorker, "close",
+                                      Qt::QueuedConnection);
+        m_mode = Mode::Asset;
+        m_timelineProject = Project{};
+        m_lastTimelineFrame = -1;
+        m_lastTimelineSubmittedUs = -1;
+        m_timelineFramePending = false;
+    }
+
     // Bump before clearing anything so any frame the worker already emitted
     // for the previous media is treated as stale.
     ++m_generation;
@@ -105,15 +173,49 @@ void PreviewController::closeMedia()
 
 void PreviewController::play()
 {
-    if (!m_info.supported || m_playing)
+    if (m_playing)
+        return;
+
+    if (m_mode == Mode::Timeline) {
+        if (m_durationUs > 0 && m_positionUs >= m_durationUs) {
+            m_positionUs = 0;
+            m_lastTimelineFrame = -1;
+        }
+        m_atEnd = false;
+
+        if (m_audioEngine && m_audioEngine->hasOutputDevice()) {
+            // AudioEngine lives on its own thread; never call its slots
+            // directly. The audio clock becomes the master clock.
+            QMetaObject::invokeMethod(m_audioEngine, "setProject",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(VideoEditor::Project,
+                                            m_timelineProject));
+            QMetaObject::invokeMethod(m_audioEngine, "play",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(qint64, m_positionUs));
+        } else {
+            // No output device: silent preview advanced by the wall clock.
+            m_playStartUs = m_positionUs;
+            m_wallClock.restart();
+        }
+
+        m_playing = true;
+        m_lastTimelineFrame = -1;
+        m_presentationTimer.start(frameIntervalMs(m_timelineFps));
+        emit playingChanged();
+        onTimelineTick();
+        return;
+    }
+
+    if (!m_info.supported)
         return;
     // Pressing play on the last frame restarts from the beginning; the seek
     // also clears the decoder's EOF state and queues the first frame.
     if (m_atEnd)
         seekMs(0);
     m_playing = true;
-    if (m_frameTimer.interval() <= 0)
-        m_frameTimer.setInterval(33);
+    m_frameTimer.setInterval(frameIntervalMs(
+        m_info.frameRate.isValid() ? m_info.frameRate : Rational{30, 1}));
     m_frameTimer.start();
     emit playingChanged();
     requestNextFrame();
@@ -123,8 +225,20 @@ void PreviewController::pause()
 {
     if (!m_playing)
         return;
+
+    if (m_mode == Mode::Timeline) {
+        if (m_audioEngine)
+            m_audioEngine->pause();
+        m_presentationTimer.stop();
+        const int64_t current = currentTimelineUs();
+        m_positionUs = qBound<qint64>(
+            0, current, m_durationUs > 0 ? m_durationUs : current);
+        emit positionChanged();
+    } else {
+        m_frameTimer.stop();
+    }
+
     m_playing = false;
-    m_frameTimer.stop();
     emit playingChanged();
 }
 
@@ -135,6 +249,11 @@ void PreviewController::togglePlay()
 
 void PreviewController::seekMs(qint64 ms)
 {
+    if (m_mode == Mode::Timeline) {
+        seekFrame(microsToFrames(qMax<qint64>(0, ms) * 1000, m_timelineFps));
+        return;
+    }
+
     m_atEnd = false;
     m_positionUs = qMax<qint64>(0, ms) * 1000;
     emit positionChanged();
@@ -146,12 +265,110 @@ void PreviewController::seekMs(qint64 ms)
 
 void PreviewController::stepFrames(int delta)
 {
+    if (m_mode == Mode::Timeline) {
+        pause();
+        seekFrame(microsToFrames(m_positionUs, m_timelineFps) + delta);
+        return;
+    }
+
     pause();
     const Rational fps = m_info.frameRate.isValid() ? m_info.frameRate
                                                      : Rational{30, 1};
     const int64_t frameUs = framesToMicros(1, fps);
     const qint64 target = qMax<qint64>(0, m_positionUs + delta * frameUs);
     seekMs(target / 1000);
+}
+
+void PreviewController::seekFrame(qint64 frame)
+{
+    if (m_mode != Mode::Timeline) {
+        const Rational fps = m_info.frameRate.isValid() ? m_info.frameRate
+                                                         : Rational{30, 1};
+        seekMs(framesToMicros(qMax<qint64>(0, frame), fps) / 1000);
+        return;
+    }
+
+    qint64 target = framesToMicros(qMax<qint64>(0, frame), m_timelineFps);
+    if (m_durationUs > 0)
+        target = qMin(target, m_durationUs);
+
+    const bool wasPlaying = m_playing;
+    if (wasPlaying && m_audioEngine)
+        m_audioEngine->pause();
+    if (m_audioEngine)
+        m_audioEngine->seek(target);
+
+    m_positionUs = target;
+    m_playStartUs = target;
+    m_wallClock.restart();
+    m_atEnd = false;
+    m_lastTimelineFrame = microsToFrames(target, m_timelineFps);
+    m_lastTimelineSubmittedUs = -1;
+    m_timelineFramePending = false;
+    emit positionChanged();
+
+    if (wasPlaying) {
+        if (m_audioEngine && m_audioEngine->hasOutputDevice()) {
+            QMetaObject::invokeMethod(m_audioEngine, "play",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(qint64, target));
+        } else {
+            m_playStartUs = target;
+            m_wallClock.restart();
+        }
+    }
+
+    requestTimelineFrame(target);
+}
+
+void PreviewController::openTimeline(const Project &project, qint64 durationUs)
+{
+    pause();
+    if (m_item)
+        m_item->resetBridge();
+
+    const quint64 generation = ++m_generation;
+    m_mode = Mode::Timeline;
+    m_timelineProject = project;
+    m_timelineFps = project.timeline.fps.isValid() ? project.timeline.fps
+                                                     : Rational{30, 1};
+    m_durationUs = durationUs > 0 ? durationUs
+                                  : TimelineEvaluator(project).durationUs();
+    m_positionUs = 0;
+    m_playStartUs = 0;
+    m_lastTimelineFrame = -1;
+    m_lastTimelineSubmittedUs = -1;
+    m_timelineFramePending = false;
+    m_atEnd = false;
+    m_framePending = false;
+    m_mediaName = project.name;
+    m_decodeMode = QStringLiteral("时间线 D3D11 合成");
+    m_info = MediaInfo{};
+    m_wallClock.invalidate();
+    m_presentationTimer.stop();
+    m_frameTimer.stop();
+    // Release the asset decoder and its device while the timeline owns the
+    // preview; entering timeline mode is a full preview switch.
+    QMetaObject::invokeMethod(m_worker, "close", Qt::QueuedConnection);
+
+    emit positionChanged();
+    emit durationChanged();
+    emit mediaChanged();
+    emit decodeModeChanged();
+
+    if (m_timelineWorker) {
+        QMetaObject::invokeMethod(m_timelineWorker, "setProject",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(VideoEditor::Project, m_timelineProject),
+                                  Q_ARG(QString, QString()),
+                                  Q_ARG(quint64, generation));
+    }
+    requestTimelineFrame(0);
+}
+
+void PreviewController::setAudioEngine(AudioEngine *engine)
+{
+    m_audioEngine = engine;
 }
 
 void PreviewController::onOpened(const MediaInfo &info, bool hardware,
@@ -169,9 +386,8 @@ void PreviewController::onOpened(const MediaInfo &info, bool hardware,
         mode += QStringLiteral("（%1）").arg(fallbackReason);
     m_decodeMode = mode;
 
-    const Rational fps = info.frameRate.isValid() ? info.frameRate
-                                                   : Rational{30, 1};
-    m_frameTimer.setInterval(qMax(1, int(1000.0 * fps.den / fps.num)));
+    m_frameTimer.setInterval(frameIntervalMs(
+        info.frameRate.isValid() ? info.frameRate : Rational{30, 1}));
 
     emit durationChanged();
     emit decodeModeChanged();
@@ -183,7 +399,7 @@ void PreviewController::onFrameReady(int slot, const QSize &size, int rotation,
                                      qint64 ptsUs, quintptr h0, quintptr h1,
                                      quintptr h2, quint64 generation)
 {
-    if (generation != m_generation) {
+    if (generation != m_generation || m_mode != Mode::Asset) {
         // The frame belongs to a media that is no longer open. Release its
         // ring slot so the old producer/ring teardown is never left waiting.
         if (m_item)
@@ -208,9 +424,37 @@ void PreviewController::onFrameReady(int slot, const QSize &size, int rotation,
     m_item->submitFrame(slot, size, rotation, ptsUs);
 }
 
+void PreviewController::onTimelineFrameReady(int slot, const QSize &size,
+                                             qint64 timelineUs, quintptr h0,
+                                             quintptr h1, quintptr h2,
+                                             quint64 generation)
+{
+    if (generation != m_generation || m_mode != Mode::Timeline) {
+        if (m_item)
+            m_item->discardFrame(slot);
+        return;
+    }
+
+    m_timelineFramePending = false;
+    if (!m_playing) {
+        m_positionUs = qBound<qint64>(
+            0, timelineUs, m_durationUs > 0 ? m_durationUs : timelineUs);
+        emit positionChanged();
+    }
+
+    if (!m_item)
+        return;
+
+    m_lastTimelineSubmittedUs = timelineUs;
+    m_item->setSharedHandles({h0, h1, h2});
+    m_item->submitFrame(slot, size, 0, timelineUs);
+}
+
 void PreviewController::onFramePresented(qint64 pts)
 {
     m_framePending = false;
+    if (m_mode == Mode::Timeline && pts == m_lastTimelineSubmittedUs)
+        emit timelineFramePresented(pts);
 }
 
 void PreviewController::onFinished()
@@ -227,16 +471,93 @@ void PreviewController::onError(const QString &message)
     emit error(message);
 }
 
+void PreviewController::onTimelineError(const QString &message)
+{
+    // A missing clip or a failed composition must not stop preview: the
+    // remaining layers keep rendering and the error is surfaced once.
+    m_timelineFramePending = false;
+    emit error(message);
+}
+
 void PreviewController::requestNextFrame()
 {
-    if (!m_info.supported || m_framePending)
+    if (m_mode != Mode::Asset || !m_info.supported || m_framePending)
         return;
     m_framePending = true;
     QMetaObject::invokeMethod(m_worker, "requestFrame", Qt::QueuedConnection);
 }
 
+int64_t PreviewController::currentTimelineUs() const
+{
+    if (m_mode != Mode::Timeline)
+        return m_positionUs;
+    if (m_audioEngine && m_audioEngine->hasOutputDevice())
+        return m_audioEngine->positionUs();
+    if (m_playing && m_wallClock.isValid())
+        return m_playStartUs + m_wallClock.elapsed() * 1000;
+    return m_positionUs;
+}
+
+void PreviewController::onTimelineTick()
+{
+    if (m_mode != Mode::Timeline) {
+        m_presentationTimer.stop();
+        return;
+    }
+
+    // If the output device disappears mid-playback, fall back to the wall
+    // clock anchored at the last known position instead of freezing.
+    if (m_playing && !(m_audioEngine && m_audioEngine->hasOutputDevice())
+        && !m_wallClock.isValid()) {
+        m_playStartUs = m_positionUs;
+        m_wallClock.restart();
+    }
+
+    const int64_t current = currentTimelineUs();
+    const int64_t limit = m_durationUs > 0 ? m_durationUs : current;
+    m_positionUs = qBound<qint64>(0, current, limit);
+    emit positionChanged();
+
+    if (m_playing && m_durationUs > 0 && current >= m_durationUs) {
+        m_atEnd = true;
+        pause();
+        // Compose the last real frame so the preview does not freeze on a
+        // stale picture.
+        const qint64 lastFrame =
+            qMax<qint64>(0, microsToFrames(m_durationUs, m_timelineFps) - 1);
+        m_lastTimelineFrame = lastFrame;
+        requestTimelineFrame(framesToMicros(lastFrame, m_timelineFps));
+        return;
+    }
+
+    const qint64 frame = microsToFrames(m_positionUs, m_timelineFps);
+    if (frame != m_lastTimelineFrame) {
+        m_lastTimelineFrame = frame;
+        requestTimelineFrame(framesToMicros(frame, m_timelineFps));
+    } else if (m_timelineFramePending && m_timelinePendingSince.isValid()
+               && m_timelinePendingSince.elapsed() > 500) {
+        // The worker skips a frame when the scene graph still owns the ring
+        // slot. Do not let that skip stall the request gate forever.
+        m_timelineFramePending = false;
+    }
+}
+
+void PreviewController::requestTimelineFrame(qint64 timelineUs)
+{
+    if (!m_timelineWorker)
+        return;
+    m_timelineFramePending = true;
+    m_timelinePendingSince.start();
+    QMetaObject::invokeMethod(m_timelineWorker, "renderFrame",
+                              Qt::QueuedConnection, Q_ARG(qint64, timelineUs),
+                              Q_ARG(quint64, m_generation));
+}
+
 QString PreviewController::timecode() const
 {
+    if (m_mode == Mode::Timeline) {
+        return formatTimecode(m_positionUs, m_timelineFps);
+    }
     return formatTimecode(m_positionUs,
                           m_info.frameRate.isValid() ? m_info.frameRate
                                                      : Rational{30, 1});
