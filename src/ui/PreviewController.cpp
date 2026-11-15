@@ -114,6 +114,7 @@ void PreviewController::openMedia(const QString &path, const QString &proxyPath)
         m_timelineProject = Project{};
         m_lastTimelineFrame = -1;
         m_lastTimelineSubmittedUs = -1;
+        m_requestedTimelineUs = -1;
         m_timelineRequests.reset();
     }
 
@@ -150,6 +151,7 @@ void PreviewController::closeMedia()
         m_timelineProject = Project{};
         m_lastTimelineFrame = -1;
         m_lastTimelineSubmittedUs = -1;
+        m_requestedTimelineUs = -1;
         m_timelineRequests.reset();
     }
 
@@ -346,6 +348,7 @@ void PreviewController::openTimeline(const Project &project, qint64 durationUs)
     m_playStartUs = 0;
     m_lastTimelineFrame = -1;
     m_lastTimelineSubmittedUs = -1;
+    m_requestedTimelineUs = -1;
     m_timelineRequests.reset();
     m_atEnd = false;
     m_framePending = false;
@@ -372,6 +375,47 @@ void PreviewController::openTimeline(const Project &project, qint64 durationUs)
                                   Q_ARG(quint64, generation));
     }
     requestTimelineFrame(0);
+}
+
+void PreviewController::updateTimelineProject(const Project &project)
+{
+    if (m_mode != Mode::Timeline)
+        return;
+
+    m_timelineProject = project;
+    m_timelineFps = project.timeline.fps.isValid() ? project.timeline.fps
+                                                     : Rational{30, 1};
+
+    const qint64 duration = TimelineEvaluator(project).durationUs();
+    const bool durationChangedNow = duration != m_durationUs;
+    m_durationUs = duration;
+    if (m_durationUs >= 0 && m_positionUs > m_durationUs) {
+        m_positionUs = m_durationUs;
+        emit positionChanged();
+    }
+    if (durationChangedNow)
+        emit durationChanged();
+
+    // Reuse the current generation: the in-flight coalescer gate is only
+    // released for the generation it was opened with.
+    if (m_timelineWorker) {
+        QMetaObject::invokeMethod(m_timelineWorker, "setProject",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(VideoEditor::Project, project),
+                                  Q_ARG(QString, QString()),
+                                  Q_ARG(quint64, m_generation));
+    }
+    if (m_audioEngine) {
+        QMetaObject::invokeMethod(m_audioEngine, "setProject",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(VideoEditor::Project, project));
+    }
+
+    // Recompose the current instant so a paused edit is visible immediately;
+    // while playing the presentation timer picks up the new last frame too.
+    m_lastTimelineFrame = -1;
+    m_lastTimelineSubmittedUs = -1;
+    requestTimelineFrame(m_positionUs);
 }
 
 void PreviewController::setAudioEngine(AudioEngine *engine)
@@ -448,7 +492,10 @@ void PreviewController::onTimelineFrameReady(int slot, const QSize &size,
     const std::optional<int64_t> next =
         m_timelineRequests.complete(timelineUs);
 
-    if (!m_playing) {
+    // A frame requested before the latest seek/edit must not move the paused
+    // playhead back to its older timestamp; the coalescer will dispatch the
+    // newest request next.
+    if (!m_playing && timelineUs == m_requestedTimelineUs) {
         const qint64 clamped = qBound<qint64>(
             0, timelineUs, m_durationUs > 0 ? m_durationUs : timelineUs);
         if (clamped != m_positionUs) {
@@ -583,6 +630,7 @@ void PreviewController::requestTimelineFrame(qint64 timelineUs)
 {
     if (!m_timelineWorker)
         return;
+    m_requestedTimelineUs = timelineUs;
     // While a frame is in flight, request() only records the newest target;
     // the completion path dispatches it. Stale intermediate frames never hit
     // the worker queue.

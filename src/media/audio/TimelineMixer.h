@@ -36,6 +36,7 @@ public:
     TimelineMixer &operator=(const TimelineMixer &) = delete;
 
     void setProject(const Project &project);
+    const Project &project() const { return m_project; }
     void setPosition(int64_t positionUs);
     int64_t positionUs() const;
 

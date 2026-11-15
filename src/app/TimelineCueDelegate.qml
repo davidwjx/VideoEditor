@@ -55,6 +55,9 @@ Rectangle {
         visible: false
         wrapMode: TextArea.Wrap
         selectByMouse: true
+        color: "#f5ecd0"
+        selectionColor: "#8fc4ff"
+        selectedTextColor: "#111111"
 
         onEditingFinished: {
             if (text !== cueItem.text)

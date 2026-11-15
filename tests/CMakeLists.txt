@@ -88,6 +88,21 @@ target_compile_definitions(app_tests PRIVATE
 gtest_discover_tests(app_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 
+# Loads Main.qml from the source tree and drives a real click/drag through the
+# Qt Quick event delivery path, so Flickable/MouseArea interaction regressions
+# (such as a stolen drag) fail here instead of only in manual UAT.
+add_executable(app_qml_tests app/TimelineQmlTest.cpp TestGuiMain.cpp)
+target_link_libraries(app_qml_tests PRIVATE
+  videoeditor_app GTest::gtest
+  Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml Qt6::Test)
+target_compile_definitions(app_qml_tests PRIVATE
+  VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
+  VIDEOEDITOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+gtest_discover_tests(app_qml_tests PROPERTIES
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
+
 add_test(NAME preview_selftest
          COMMAND VideoEditor --selftest "${CMAKE_SOURCE_DIR}/tests/fixtures/h264.mp4")
 set_tests_properties(preview_selftest PROPERTIES

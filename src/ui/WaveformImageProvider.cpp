@@ -39,6 +39,13 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
     if (peaks.isEmpty())
         return image;
 
+    const QString cacheKey = parts.first() + QLatin1Char('/')
+                             + QString::number(width) + QLatin1Char('x')
+                             + QString::number(height) + QLatin1Char('/')
+                             + QString::number(peaks.bucketCount());
+    if (const QImage *cached = m_cache.object(cacheKey))
+        return *cached;
+
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, false);
     painter.setPen(QColor(0x7f, 0xc8, 0xff, 220));
@@ -57,6 +64,8 @@ QImage WaveformImageProvider::requestImage(const QString &id, QSize *size,
         const double bottom = center - minimum * center;
         painter.drawLine(QPointF(x, top), QPointF(x, bottom));
     }
+    painter.end();
+    m_cache.insert(cacheKey, new QImage(image));
     return image;
 }
 

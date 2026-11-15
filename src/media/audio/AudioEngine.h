@@ -36,13 +36,17 @@ public:
         std::function<std::unique_ptr<IAudioSink>(int sampleRate, int channels,
                                                   QString *error)>;
 
-    explicit AudioEngine(QObject *parent = nullptr);
+    // `sinkFactory` may inject a test sink before any device is opened; an
+    // empty factory uses the real WASAPI output.
+    explicit AudioEngine(QObject *parent = nullptr, SinkFactory sinkFactory = {});
     ~AudioEngine() override;
 
     // Lock-free master clock reads, valid from the GUI/video thread.
     int64_t positionUs() const { return m_clock.positionUs(); }
     bool hasOutputDevice() const { return m_hasOutputDevice.load(); }
     QString lastDeviceError() const;
+    // Blocking snapshot of the mixer's project (test/inspection hook).
+    Project projectSnapshot() const;
 
     // Replaces the sink immediately (blocking) so tests can run without audio
     // hardware. Safe to call right after construction; must not be used while

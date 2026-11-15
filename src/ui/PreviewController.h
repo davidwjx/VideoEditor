@@ -66,6 +66,10 @@ public:
     // Timeline mode entry point. Takes ownership of its own rendering thread;
     // the caller keeps using play()/pause()/seekFrame() as usual.
     void openTimeline(const Project &project, qint64 durationUs);
+    // Pushes an edited project snapshot to the compositor and audio mixer
+    // without resetting the playhead or interrupting playback.
+    void updateTimelineProject(const Project &project);
+    const Project &timelineProject() const { return m_timelineProject; }
     // AudioEngine lives on its own thread; PreviewController only forwards
     // queued calls and reads the lock-free master clock.
     void setAudioEngine(AudioEngine *engine);
@@ -133,6 +137,9 @@ private:
     int64_t m_playStartUs = 0;
     int64_t m_lastTimelineFrame = -1;
     qint64 m_lastTimelineSubmittedUs = -1;
+    // Newest position requested from the compositor. Older completions must
+    // not pull the paused playhead backwards after a seek/edit.
+    qint64 m_requestedTimelineUs = -1;
 };
 
 } // namespace VideoEditor

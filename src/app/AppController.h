@@ -31,7 +31,10 @@ class AppController : public QObject {
     Q_PROPERTY(bool useProxy READ useProxy WRITE setUseProxy NOTIFY useProxyChanged)
 
 public:
-    explicit AppController(QObject *parent = nullptr, QString recoveryPath = {});
+    // The optional sink factory lets tests replace the WASAPI device before
+    // the audio engine starts; production callers keep the default.
+    explicit AppController(QObject *parent = nullptr, QString recoveryPath = {},
+                           AudioEngine::SinkFactory audioSinkFactory = {});
     ~AppController() override;
 
     MediaListModel *mediaModel() const { return m_mediaModel; }
@@ -103,6 +106,9 @@ private:
     std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<ProjectStore> m_store;
     QTimer m_autosaveTimer;
+    // Coalesces rapid edits into one preview/audio snapshot update so a drag
+    // release or command burst does not queue a recomposition per command.
+    QTimer m_timelineUpdateTimer;
     QString m_lastError;
     QString m_currentAssetId;
     bool m_recoveryAvailable = false;

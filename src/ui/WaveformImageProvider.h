@@ -1,5 +1,8 @@
 #pragma once
 
+#include <QCache>
+#include <QImage>
+#include <QString>
 #include <QQuickImageProvider>
 
 namespace VideoEditor {
@@ -17,6 +20,9 @@ public:
 
 private:
     WaveformService *m_service = nullptr;
+    // Rendered waveforms are deterministic per asset/width/height; caching
+    // them avoids repainting all peaks on every zoom step.
+    mutable QCache<QString, QImage> m_cache{64};
 };
 
 } // namespace VideoEditor

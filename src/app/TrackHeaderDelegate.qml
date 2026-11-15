@@ -34,28 +34,46 @@ Rectangle {
             font.pixelSize: 10
         }
         ToolButton {
+            id: muteButton
             text: "M"
             checkable: true
-            checked: header.muted
             font.pixelSize: 11
             padding: 2
-            onClicked: Timeline.setTrackMuted(header.trackId, checked)
+            onClicked: Timeline.setTrackMuted(header.trackId, !header.muted)
+            Binding {
+                target: muteButton
+                property: "checked"
+                value: header.muted
+                when: !muteButton.pressed
+            }
         }
         ToolButton {
+            id: soloButton
             text: "S"
             checkable: true
-            checked: header.solo
             font.pixelSize: 11
             padding: 2
-            onClicked: Timeline.setTrackSolo(header.trackId, checked)
+            onClicked: Timeline.setTrackSolo(header.trackId, !header.solo)
+            Binding {
+                target: soloButton
+                property: "checked"
+                value: header.solo
+                when: !soloButton.pressed
+            }
         }
         ToolButton {
+            id: lockButton
             text: "锁"
             checkable: true
-            checked: header.locked
             font.pixelSize: 11
             padding: 2
-            onClicked: Timeline.setTrackLocked(header.trackId, checked)
+            onClicked: Timeline.setTrackLocked(header.trackId, !header.locked)
+            Binding {
+                target: lockButton
+                property: "checked"
+                value: header.locked
+                when: !lockButton.pressed
+            }
         }
     }
 }

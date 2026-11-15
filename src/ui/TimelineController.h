@@ -4,6 +4,7 @@
 #include <functional>
 #include <QObject>
 #include <QString>
+#include <QVariantMap>
 
 #include "ProjectDocument.h"
 #include "TimelineEditor.h"
@@ -24,6 +25,8 @@ class TimelineController : public QObject {
     Q_PROPERTY(bool snapEnabled READ snapEnabled WRITE setSnapEnabled NOTIFY viewChanged)
     Q_PROPERTY(QString selectedClipId READ selectedClipId NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedCueId READ selectedCueId NOTIFY selectionChanged)
+    Q_PROPERTY(QVariantMap selectedClip READ selectedClip
+                   NOTIFY selectedClipChanged)
 
 public:
     explicit TimelineController(ProjectDocument &document, QObject *parent = nullptr);
@@ -39,6 +42,7 @@ public:
     void setSnapEnabled(bool enabled);
     QString selectedClipId() const { return m_selectedClipId; }
     QString selectedCueId() const { return m_selectedCueId; }
+    QVariantMap selectedClip() const;
 
     Q_INVOKABLE void seekUs(qint64 positionUs);
     Q_INVOKABLE void stepFrames(int delta);
@@ -62,6 +66,10 @@ public:
     Q_INVOKABLE void setClipTransform(const QString &clipId, int scaleMilli,
                                       int offsetXPermille, int offsetYPermille,
                                       int opacityMilli);
+    // Single-field setters: preserve every transform field the user did not
+    // touch (the full setter above replaces the whole struct).
+    Q_INVOKABLE void setClipScale(const QString &clipId, int scaleMilli);
+    Q_INVOKABLE void setClipOpacity(const QString &clipId, int opacityMilli);
     Q_INVOKABLE void selectClip(const QString &clipId);
     Q_INVOKABLE void selectCue(const QString &cueId);
     Q_INVOKABLE QString addCueAtPlayhead();
@@ -89,6 +97,7 @@ signals:
     void durationChanged();
     void viewChanged();
     void selectionChanged();
+    void selectedClipChanged();
     void editFailed(QString message);
 
 private:

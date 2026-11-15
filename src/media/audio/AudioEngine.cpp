@@ -25,10 +25,10 @@ std::unique_ptr<IAudioSink> createDefaultSink(int sampleRate, int channels,
 
 } // namespace
 
-AudioEngine::AudioEngine(QObject *parent)
+AudioEngine::AudioEngine(QObject *parent, SinkFactory sinkFactory)
     : QObject(nullptr)
     , m_mixer(kSampleRate, kChannels)
-    , m_sinkFactory(createDefaultSink)
+    , m_sinkFactory(sinkFactory ? std::move(sinkFactory) : createDefaultSink)
     , m_block(std::size_t(kBlockFrames) * std::size_t(kChannels), 0.0f)
     , m_carry(std::size_t(kBlockFrames) * std::size_t(kChannels), 0.0f)
 {
@@ -69,6 +69,16 @@ QString AudioEngine::lastDeviceError() const
 {
     QMutexLocker locker(&m_errorMutex);
     return m_deviceError;
+}
+
+Project AudioEngine::projectSnapshot() const
+{
+    Project result;
+    auto *self = const_cast<AudioEngine *>(this);
+    self->dispatchToAudioThread([this, &result] {
+        result = m_mixer.project();
+    }, true);
+    return result;
 }
 
 void AudioEngine::setDeviceError(const QString &error)

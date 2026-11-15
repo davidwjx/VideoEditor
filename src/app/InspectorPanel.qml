@@ -2,20 +2,42 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Properties for the selected clip. Sliders only commit to the controller
-// when the mouse is released (or on a keyboard step), so one drag is one
-// undo step.
+// Properties for the selected clip. Controls are initialized from
+// Timeline.selectedClip and only commit to the controller on release, so one
+// drag is one undo step and unrelated fields are preserved by the dedicated
+// single-field setters.
 ScrollView {
     id: inspector
+
+    readonly property var clip: Timeline.selectedClip
 
     function hasClip() {
         return Timeline.selectedClipId !== ""
     }
 
+    function clipField(name, fallback) {
+        const map = Timeline.selectedClip
+        const value = map ? map[name] : undefined
+        return value === undefined ? fallback : value
+    }
+
+    function speedIndexFor(milli) {
+        const speeds = [250, 500, 1000, 1500, 2000, 4000]
+        const index = speeds.indexOf(milli)
+        return index < 0 ? 2 : index
+    }
+
+    function currentSpeedMilli() {
+        return [250, 500, 1000, 1500, 2000, 4000][
+                    speedIndexFor(clipField("speedMilli", 1000))]
+    }
+
     function commitFades() {
+        if (!hasClip())
+            return
         Timeline.setClipFades(Timeline.selectedClipId,
-                              Math.round(fadeIn.value * 1e6),
-                              Math.round(fadeOut.value * 1e6))
+                              Math.round(fadeIn.pendingValue * 1e6),
+                              Math.round(fadeOut.pendingValue * 1e6))
     }
 
     ColumnLayout {
@@ -39,7 +61,6 @@ ScrollView {
                 id: speedBox
                 Layout.fillWidth: true
                 model: ["0.25x", "0.5x", "1x", "1.5x", "2x", "4x"]
-                currentIndex: 2
                 enabled: inspector.hasClip()
                 onActivated: {
                     const speeds = [250, 500, 1000, 1500, 2000, 4000]
@@ -47,108 +68,221 @@ ScrollView {
                                           preservePitch.checked)
                 }
             }
+            Binding {
+                target: speedBox
+                property: "currentIndex"
+                value: inspector.speedIndexFor(inspector.clipField("speedMilli", 1000))
+                when: !speedBox.pressed
+            }
         }
         CheckBox {
             id: preservePitch
             text: "保持音高"
-            checked: true
             enabled: inspector.hasClip()
+            onClicked: if (inspector.hasClip())
+                           Timeline.setClipSpeed(Timeline.selectedClipId,
+                                                 inspector.currentSpeedMilli(),
+                                                 checked)
+            Binding {
+                target: preservePitch
+                property: "checked"
+                value: inspector.clipField("preservePitch", false) === true
+                when: !preservePitch.pressed
+            }
         }
 
         Label { text: "音量"; color: "#cccccc" }
         Slider {
             id: volume
+            objectName: "inspector-volume"
             Layout.fillWidth: true
             from: 0
             to: 200
-            value: 100
             enabled: inspector.hasClip()
-            onMoved: if (!pressed && inspector.hasClip())
-                          Timeline.setClipVolume(Timeline.selectedClipId,
-                                                 Math.round(value * 10))
-            onPressedChanged: if (!pressed && inspector.hasClip())
-                                  Timeline.setClipVolume(Timeline.selectedClipId,
-                                                         Math.round(value * 10))
+            property real pendingValue: 100
+            onMoved: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipVolume(Timeline.selectedClipId,
+                                           Math.round(value * 10))
+                }
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipVolume(Timeline.selectedClipId,
+                                           Math.round(pendingValue * 10))
+                }
+            }
+            Binding {
+                target: volume
+                property: "value"
+                value: inspector.clipField("volumeMilli", 1000) / 10
+                when: !volume.pressed
+            }
         }
 
         Label { text: "声像"; color: "#cccccc" }
         Slider {
             id: pan
+            objectName: "inspector-pan"
             Layout.fillWidth: true
             from: -100
             to: 100
-            value: 0
             enabled: inspector.hasClip()
-            onMoved: if (!pressed && inspector.hasClip())
-                          Timeline.setClipPan(Timeline.selectedClipId,
-                                              Math.round(value * 10))
-            onPressedChanged: if (!pressed && inspector.hasClip())
-                                  Timeline.setClipPan(Timeline.selectedClipId,
-                                                      Math.round(value * 10))
+            property real pendingValue: 0
+            onMoved: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipPan(Timeline.selectedClipId,
+                                        Math.round(value * 10))
+                }
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipPan(Timeline.selectedClipId,
+                                        Math.round(pendingValue * 10))
+                }
+            }
+            Binding {
+                target: pan
+                property: "value"
+                value: inspector.clipField("panMilli", 0) / 10
+                when: !pan.pressed
+            }
         }
 
         Label { text: "淡入（秒）"; color: "#cccccc" }
         Slider {
             id: fadeIn
+            objectName: "inspector-fadeIn"
             Layout.fillWidth: true
             from: 0
             to: 5
-            value: 0
             enabled: inspector.hasClip()
-            onMoved: if (!pressed && inspector.hasClip())
-                          commitFades()
-            onPressedChanged: if (!pressed && inspector.hasClip())
-                                  commitFades()
+            property real pendingValue: 0
+            onMoved: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    inspector.commitFades()
+                }
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    inspector.commitFades()
+                }
+            }
+            Binding {
+                target: fadeIn
+                property: "value"
+                value: inspector.clipField("fadeInUs", 0) / 1e6
+                when: !fadeIn.pressed
+            }
         }
 
         Label { text: "淡出（秒）"; color: "#cccccc" }
         Slider {
             id: fadeOut
+            objectName: "inspector-fadeOut"
             Layout.fillWidth: true
             from: 0
             to: 5
-            value: 0
             enabled: inspector.hasClip()
-            onMoved: if (!pressed && inspector.hasClip())
-                          commitFades()
-            onPressedChanged: if (!pressed && inspector.hasClip())
-                                  commitFades()
+            property real pendingValue: 0
+            onMoved: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    inspector.commitFades()
+                }
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    inspector.commitFades()
+                }
+            }
+            Binding {
+                target: fadeOut
+                property: "value"
+                value: inspector.clipField("fadeOutUs", 0) / 1e6
+                when: !fadeOut.pressed
+            }
         }
 
         Label { text: "画面缩放"; color: "#cccccc" }
         Slider {
             id: scale
+            objectName: "inspector-scale"
             Layout.fillWidth: true
             from: 10
             to: 400
-            value: 100
             enabled: inspector.hasClip()
-            onMoved: if (!pressed && inspector.hasClip())
-                          Timeline.setClipTransform(Timeline.selectedClipId,
-                                                    Math.round(value * 10), 0, 0,
-                                                    Math.round(opacity.value * 10))
-            onPressedChanged: if (!pressed && inspector.hasClip())
-                                  Timeline.setClipTransform(Timeline.selectedClipId,
-                                                            Math.round(value * 10), 0, 0,
-                                                            Math.round(opacity.value * 10))
+            property real pendingValue: 100
+            onMoved: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipScale(Timeline.selectedClipId,
+                                          Math.round(value * 10))
+                }
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipScale(Timeline.selectedClipId,
+                                          Math.round(pendingValue * 10))
+                }
+            }
+            Binding {
+                target: scale
+                property: "value"
+                value: inspector.clipField("scaleMilli", 1000) / 10
+                when: !scale.pressed
+            }
         }
 
         Label { text: "不透明度"; color: "#cccccc" }
         Slider {
             id: opacity
+            objectName: "inspector-opacity"
             Layout.fillWidth: true
             from: 0
             to: 100
-            value: 100
             enabled: inspector.hasClip()
-            onMoved: if (!pressed && inspector.hasClip())
-                          Timeline.setClipTransform(Timeline.selectedClipId,
-                                                    Math.round(scale.value * 10), 0, 0,
-                                                    Math.round(value * 10))
-            onPressedChanged: if (!pressed && inspector.hasClip())
-                                  Timeline.setClipTransform(Timeline.selectedClipId,
-                                                            Math.round(scale.value * 10), 0, 0,
-                                                            Math.round(value * 10))
+            property real pendingValue: 100
+            onMoved: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipOpacity(Timeline.selectedClipId,
+                                            Math.round(value * 10))
+                }
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    pendingValue = value
+                } else if (inspector.hasClip()) {
+                    Timeline.setClipOpacity(Timeline.selectedClipId,
+                                            Math.round(pendingValue * 10))
+                }
+            }
+            Binding {
+                target: opacity
+                property: "value"
+                value: inspector.clipField("opacityMilli", 1000) / 10
+                when: !opacity.pressed
+            }
         }
     }
 }

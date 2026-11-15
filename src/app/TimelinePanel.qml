@@ -22,25 +22,32 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        // Track headers stay fixed while the timeline scrolls horizontally.
-        Column {
-            id: headerColumn
+        // Track headers stay fixed horizontally but follow vertical scrolling
+        // so they remain aligned with their lanes.
+        Item {
+            id: headerArea
             Layout.preferredWidth: root.headerWidth
             Layout.fillHeight: true
             clip: true
 
-            Item { width: 1; height: root.rulerHeight }
-            Repeater {
-                model: Timeline.trackModel
-                delegate: TrackHeaderDelegate {
-                    width: root.headerWidth
-                    height: root.trackHeight
-                    trackId: model.trackId
-                    name: model.name
-                    typeLabel: model.typeLabel
-                    muted: model.muted
-                    solo: model.solo
-                    locked: model.locked
+            Column {
+                id: headerColumn
+                width: headerArea.width
+                y: -flick.contentY
+
+                Item { width: 1; height: root.rulerHeight }
+                Repeater {
+                    model: Timeline.trackModel
+                    delegate: TrackHeaderDelegate {
+                        width: root.headerWidth
+                        height: root.trackHeight
+                        trackId: model.trackId
+                        name: model.name
+                        typeLabel: model.typeLabel
+                        muted: model.muted
+                        solo: model.solo
+                        locked: model.locked
+                    }
                 }
             }
         }

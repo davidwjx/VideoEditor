@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <memory>
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -7,6 +9,8 @@
 #include <QUrl>
 
 #include "AppController.h"
+#include "AudioEngine.h"
+#include "AudioSink.h"
 #include "MediaListModel.h"
 #include "PreviewController.h"
 #include "ProjectStore.h"
@@ -18,6 +22,15 @@ namespace {
 QString fixture(const QString &name)
 {
     return QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR)).filePath(name);
+}
+
+// Keep the app-level tests off the real WASAPI device.
+AudioEngine::SinkFactory nullSinkFactory()
+{
+    return [](int sampleRate, int channels, QString *) {
+        return std::unique_ptr<IAudioSink>(
+            new NullAudioSink(sampleRate, channels));
+    };
 }
 
 void writeRecovery(const QString &path)
@@ -39,7 +52,7 @@ void writeRecovery(const QString &path)
 
 TEST(AppController, ImportsSupportedFile)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     const QString path = fixture(QStringLiteral("h264.mp4"));
     if (!QFile::exists(path))
         GTEST_SKIP() << "missing fixture";
@@ -51,7 +64,7 @@ TEST(AppController, ImportsSupportedFile)
 
 TEST(AppController, ImportsAudioOnlyAsset)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     const QString path = fixture(QStringLiteral("bgm.mp3"));
     if (!QFile::exists(path))
         GTEST_SKIP() << "missing fixture";
@@ -66,7 +79,7 @@ TEST(AppController, ImportsAudioOnlyAsset)
 
 TEST(AppController, ReportsUnsupportedOrMissingFile)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     controller.importUrls({QUrl::fromLocalFile(fixture(QStringLiteral("corrupt.mp4")))});
     EXPECT_EQ(controller.mediaModel()->rowCount(), 0);
     EXPECT_TRUE(controller.lastError().contains(QStringLiteral("无法打开")));
@@ -78,7 +91,7 @@ TEST(AppController, ReportsUnsupportedOrMissingFile)
 
 TEST(AppController, UndoRemovesImportedAsset)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     const QString path = fixture(QStringLiteral("h264.mp4"));
     if (!QFile::exists(path))
         GTEST_SKIP() << "missing fixture";
@@ -102,7 +115,7 @@ TEST(AppController, SavesAndReopensProject)
     const QString projectPath = dir.filePath(QStringLiteral("project"));
 
     {
-        AppController controller;
+        AppController controller(nullptr, {}, nullSinkFactory());
         controller.importUrls({QUrl::fromLocalFile(path)});
         ASSERT_EQ(controller.mediaModel()->rowCount(), 1);
 
@@ -112,7 +125,7 @@ TEST(AppController, SavesAndReopensProject)
         EXPECT_TRUE(QFileInfo::exists(projectPath + QStringLiteral(".veproj")));
     }
 
-    AppController reopened;
+    AppController reopened(nullptr, {}, nullSinkFactory());
     reopened.openProject(
         QUrl::fromLocalFile(projectPath + QStringLiteral(".veproj")));
     EXPECT_TRUE(reopened.lastError().isEmpty());
@@ -138,7 +151,8 @@ TEST(AppController, OpeningProjectStopsCurrentPreview)
     ASSERT_TRUE(dir.isValid());
 
     AppController controller(nullptr,
-                             dir.filePath(QStringLiteral("recovery.json")));
+                             dir.filePath(QStringLiteral("recovery.json")),
+                             nullSinkFactory());
     controller.importUrls({QUrl::fromLocalFile(media)});
     ASSERT_EQ(controller.mediaModel()->rowCount(), 1);
 
@@ -168,7 +182,7 @@ TEST(AppController, RestoresRecoveryAtStartup)
     const QString recovery = dir.filePath(QStringLiteral("project.autosave.json"));
     writeRecovery(recovery);
 
-    AppController controller(nullptr, recovery);
+    AppController controller(nullptr, recovery, nullSinkFactory());
     EXPECT_TRUE(controller.recoveryAvailable());
 
     controller.restoreRecovery();
@@ -186,7 +200,7 @@ TEST(AppController, DiscardRecoveryRemovesFileAndClearsPrompt)
     const QString recovery = dir.filePath(QStringLiteral("project.autosave.json"));
     writeRecovery(recovery);
 
-    AppController controller(nullptr, recovery);
+    AppController controller(nullptr, recovery, nullSinkFactory());
     EXPECT_TRUE(controller.recoveryAvailable());
 
     controller.discardRecovery();
@@ -206,7 +220,7 @@ TEST(AppController, SuccessfulSaveDiscardsExistingRecovery)
     if (!QFile::exists(media))
         GTEST_SKIP() << "missing fixture";
 
-    AppController controller(nullptr, recovery);
+    AppController controller(nullptr, recovery, nullSinkFactory());
     ASSERT_TRUE(controller.recoveryAvailable());
 
     controller.importUrls({QUrl::fromLocalFile(media)});
@@ -227,7 +241,7 @@ TEST(AppController, CleanExitDiscardsStaleRecoveryWithoutPendingPrompt)
     const QString recovery = dir.filePath(QStringLiteral("project.autosave.json"));
 
     // No recovery file at startup, so no prompt is pending.
-    AppController controller(nullptr, recovery);
+    AppController controller(nullptr, recovery, nullSinkFactory());
     ASSERT_FALSE(controller.recoveryAvailable());
     ASSERT_FALSE(controller.document()->isDirty());
 
@@ -249,7 +263,7 @@ TEST(AppController, CleanExitKeepsPendingRecovery)
     const QString recovery = dir.filePath(QStringLiteral("project.autosave.json"));
     writeRecovery(recovery);
 
-    AppController controller(nullptr, recovery);
+    AppController controller(nullptr, recovery, nullSinkFactory());
     ASSERT_TRUE(controller.recoveryAvailable());
     ASSERT_FALSE(controller.document()->isDirty());
 
@@ -289,7 +303,7 @@ TEST(AppController, CorruptRecoveryKeepsPromptAndReportsError)
     file.write("{ this is not valid json");
     file.close();
 
-    AppController controller(nullptr, recovery);
+    AppController controller(nullptr, recovery, nullSinkFactory());
     EXPECT_TRUE(controller.recoveryAvailable());
 
     controller.restoreRecovery();
@@ -302,7 +316,7 @@ TEST(AppController, CorruptRecoveryKeepsPromptAndReportsError)
 
 TEST(MediaListModel, ExposesRolesForImportedFixture)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     const QString path = fixture(QStringLiteral("h264.mp4"));
     if (!QFile::exists(path))
         GTEST_SKIP() << "missing fixture";

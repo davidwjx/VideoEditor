@@ -46,6 +46,49 @@ TimelineController::TimelineController(ProjectDocument &document, QObject *paren
             &TimelineController::refreshFromDocument);
 }
 
+QVariantMap TimelineController::selectedClip() const
+{
+    QVariantMap map;
+    if (m_selectedClipId.isEmpty())
+        return map;
+
+    QString trackId;
+    const Clip *clip = nullptr;
+    for (const Track &track : m_document.project().tracks) {
+        for (const Clip &candidate : track.clips) {
+            if (candidate.id == m_selectedClipId) {
+                trackId = track.id;
+                clip = &candidate;
+                break;
+            }
+        }
+        if (clip)
+            break;
+    }
+    if (!clip)
+        return map;
+
+    map.insert(QStringLiteral("id"), clip->id);
+    map.insert(QStringLiteral("trackId"), trackId);
+    map.insert(QStringLiteral("assetId"), clip->assetId);
+    map.insert(QStringLiteral("speedMilli"), clip->speedMilli);
+    map.insert(QStringLiteral("preservePitch"), clip->preservePitch);
+    map.insert(QStringLiteral("volumeMilli"), clip->audio.volumeMilli);
+    map.insert(QStringLiteral("panMilli"), clip->audio.panMilli);
+    map.insert(QStringLiteral("fadeInUs"), QVariant::fromValue<qint64>(
+                                               clip->audio.fadeInUs));
+    map.insert(QStringLiteral("fadeOutUs"), QVariant::fromValue<qint64>(
+                                                clip->audio.fadeOutUs));
+    map.insert(QStringLiteral("scaleMilli"), clip->transform.scaleMilli);
+    map.insert(QStringLiteral("offsetXPermille"),
+               clip->transform.offsetXPermille);
+    map.insert(QStringLiteral("offsetYPermille"),
+               clip->transform.offsetYPermille);
+    map.insert(QStringLiteral("opacityMilli"),
+               clip->transform.opacityMilli);
+    return map;
+}
+
 void TimelineController::refreshFromDocument()
 {
     m_timelineModel->setProject(m_document.project());
@@ -64,6 +107,9 @@ void TimelineController::refreshFromDocument()
         m_timelineModel->selectItem(QString());
         emit selectionChanged();
     }
+    // Clip properties may have changed while the same clip stayed selected;
+    // the inspector binds to this map, so refresh it on every edit.
+    emit selectedClipChanged();
 
     // Track commands emit tracksChanged and timelineChanged back to back; only
     // notify bindings when the duration actually changed.
@@ -543,6 +589,32 @@ void TimelineController::setClipTransform(const QString &clipId, int scaleMilli,
     m_editor.setClipTransform(trackId, clipId, transform);
 }
 
+void TimelineController::setClipScale(const QString &clipId, int scaleMilli)
+{
+    QString trackId;
+    if (!trackForClip(clipId, &trackId))
+        return;
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip)
+        return;
+    Transform transform = clip->transform;
+    transform.scaleMilli = scaleMilli;
+    m_editor.setClipTransform(trackId, clipId, transform);
+}
+
+void TimelineController::setClipOpacity(const QString &clipId, int opacityMilli)
+{
+    QString trackId;
+    if (!trackForClip(clipId, &trackId))
+        return;
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip)
+        return;
+    Transform transform = clip->transform;
+    transform.opacityMilli = opacityMilli;
+    m_editor.setClipTransform(trackId, clipId, transform);
+}
+
 void TimelineController::selectClip(const QString &clipId)
 {
     if (m_selectedClipId == clipId && m_selectedCueId.isEmpty())
@@ -551,6 +623,7 @@ void TimelineController::selectClip(const QString &clipId)
     m_selectedCueId.clear();
     m_timelineModel->selectItem(clipId);
     emit selectionChanged();
+    emit selectedClipChanged();
 }
 
 void TimelineController::selectCue(const QString &cueId)
@@ -561,6 +634,7 @@ void TimelineController::selectCue(const QString &cueId)
     m_selectedClipId.clear();
     m_timelineModel->selectItem(cueId);
     emit selectionChanged();
+    emit selectedClipChanged();
 }
 
 QString TimelineController::addCueAtPlayhead()

@@ -79,13 +79,18 @@ ApplicationWindow {
             from: 0
             to: Math.max(1, Preview.timelineMode ? Timeline.durationUs / 1000
                                                  : Preview.durationMs)
-            value: Preview.timelineMode ? Timeline.positionUs / 1000
-                                        : Preview.positionMs
             onMoved: {
                 if (Preview.timelineMode)
                     App.seekTimeline(Math.round(value) * 1000)
                 else
                     Preview.seekMs(value)
+            }
+            Binding {
+                target: transport
+                property: "value"
+                value: Preview.timelineMode ? Timeline.positionUs / 1000
+                                            : Preview.positionMs
+                when: !transport.pressed
             }
         }
         CheckBox {

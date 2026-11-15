@@ -1,6 +1,7 @@
 #include "AppController.h"
 
 #include <algorithm>
+#include <utility>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -45,7 +46,8 @@ QString resolveFfmpegPath()
 
 } // namespace
 
-AppController::AppController(QObject *parent, QString recoveryPath)
+AppController::AppController(QObject *parent, QString recoveryPath,
+                             AudioEngine::SinkFactory audioSinkFactory)
     : QObject(parent)
     , m_document(new ProjectDocument(this))
     , m_mediaModel(new MediaListModel(this))
@@ -97,8 +99,24 @@ AppController::AppController(QObject *parent, QString recoveryPath)
 
     m_waveforms = new WaveformService(
         QDir(appData).filePath(QStringLiteral("cache")), this);
-    m_audio = std::make_unique<AudioEngine>();
+    m_audio = std::make_unique<AudioEngine>(nullptr, std::move(audioSinkFactory));
     m_preview->setAudioEngine(m_audio.get());
+
+    // Keep the compositor and audio mixer snapshots in sync with edits without
+    // resetting the playhead or playback state. Coalesce command bursts.
+    m_timelineUpdateTimer.setSingleShot(true);
+    m_timelineUpdateTimer.setInterval(40);
+    connect(&m_timelineUpdateTimer, &QTimer::timeout, this, [this] {
+        if (m_preview->timelineMode())
+            m_preview->updateTimelineProject(m_document->project());
+    });
+    const auto scheduleTimelineUpdate = [this] {
+        m_timelineUpdateTimer.start();
+    };
+    connect(m_document, &ProjectDocument::timelineChanged, this,
+            scheduleTimelineUpdate);
+    connect(m_document, &ProjectDocument::tracksChanged, this,
+            scheduleTimelineUpdate);
 
     const QString cacheRoot = QDir(appData).filePath(QStringLiteral("cache"));
     m_proxyService = new ProxyService(cacheRoot, resolveFfmpegPath(), this);
@@ -270,7 +288,9 @@ void AppController::setUseProxy(bool enabled)
     emit useProxyChanged();
     // Re-opening the current asset is what actually switches the preview
     // between the proxy and the source; changing the flag alone does nothing.
-    if (!m_currentAssetId.isEmpty())
+    // In timeline mode, re-opening the last asset would jump out of the
+    // timeline (e.g. right after double-clicking a media item to add it).
+    if (!m_currentAssetId.isEmpty() && !m_preview->timelineMode())
         openAsset(m_currentAssetId);
 }
 

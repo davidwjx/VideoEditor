@@ -76,13 +76,19 @@ ColumnLayout {
                     }
                     Item { Layout.fillWidth: true }
                     ComboBox {
+                        id: cueStyle
                         Layout.preferredWidth: 110
                         model: App.subtitleStyles()
                         textRole: "name"
                         valueRole: "id"
-                        currentIndex: Math.max(0, indexOfValue(model.styleId))
                         onActivated: Timeline.applySubtitleStyle(currentValue,
                                                                  model.itemId)
+                        Binding {
+                            target: cueStyle
+                            property: "currentIndex"
+                            value: Math.max(0, cueStyle.indexOfValue(model.styleId))
+                            when: !cueStyle.pressed
+                        }
                     }
                     ToolButton {
                         text: "删"
@@ -96,16 +102,33 @@ ColumnLayout {
                 }
 
                 TextField {
+                    id: cueText
                     Layout.fillWidth: true
-                    text: model.text
                     placeholderText: "字幕文本"
+                    // Capture what the user typed before the focus-loss
+                    // Binding below restores the model value.
+                    property string editBuffer: model.text
+                    onTextChanged: {
+                        if (activeFocus)
+                            editBuffer = text
+                    }
                     onEditingFinished: {
-                        if (text !== model.text)
-                            Timeline.setCueText(model.itemId, text)
+                        if (editBuffer !== model.text)
+                            Timeline.setCueText(model.itemId, editBuffer)
                     }
                     onActiveFocusChanged: {
-                        if (activeFocus)
+                        if (activeFocus) {
+                            editBuffer = text
                             Timeline.selectCue(model.itemId)
+                        }
+                    }
+                    // Undo/external edits must win while the user is not
+                    // typing in this field.
+                    Binding {
+                        target: cueText
+                        property: "text"
+                        value: model.text
+                        when: !cueText.activeFocus
                     }
                 }
             }
