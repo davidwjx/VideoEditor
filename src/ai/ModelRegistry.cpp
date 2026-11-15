@@ -435,6 +435,22 @@ const AiModelRecord *ModelRegistry::defaultTrackingModel() const
             && record.files.contains(QStringLiteral("prompt_encoder"))
             && record.files.contains(QStringLiteral("mask_decoder"));
     };
+    // The real fp16 bundle is named "efficienttam-ti-512" / "0.8.0"; only its
+    // file paths contain "_fp16/". Detect fp16 from any of id, version or a
+    // file path so the rejected bundle can never become the default tracker.
+    const auto isFp16 = [](const AiModelRecord &record) {
+        const auto containsFp16 = [](const QString &text) {
+            return text.contains(QStringLiteral("fp16"), Qt::CaseInsensitive);
+        };
+        if (containsFp16(record.id) || containsFp16(record.version))
+            return true;
+        for (auto it = record.files.constBegin(); it != record.files.constEnd();
+             ++it) {
+            if (containsFp16(it.value().path))
+                return true;
+        }
+        return false;
+    };
 
     const AiModelRecord *approvedFp32 = nullptr;
     const AiModelRecord *unapprovedFp32 = nullptr;
@@ -444,17 +460,13 @@ const AiModelRecord *ModelRegistry::defaultTrackingModel() const
     for (const AiModelRecord &record : m_manifest.models) {
         if (!record.isTracking())
             continue;
+        // The fp16 EfficientTAM bundle is explicitly rejected, so never make
+        // it the default (or the fallback) even if it becomes approved.
+        if (isFp16(record))
+            continue;
         if (!fallback)
             fallback = &record;
         if (!offlineCapable(record))
-            continue;
-        const bool fp16 = record.id.contains(QStringLiteral("fp16"),
-                                             Qt::CaseInsensitive)
-            || record.version.contains(QStringLiteral("fp16"),
-                                       Qt::CaseInsensitive);
-        // The fp16 EfficientTAM bundle is explicitly rejected, so never make
-        // it the default even if it later becomes commercially approved.
-        if (fp16)
             continue;
         const bool fp32 = record.id.contains(QStringLiteral("fp32"),
                                              Qt::CaseInsensitive)

@@ -76,22 +76,45 @@ TEST(ModelRegistry, DefaultTrackingModelPrefersOfflineCapableFp32)
 
 TEST(ModelRegistry, DefaultTrackingModelNeverPicksApprovedFp16)
 {
-    ModelManifest manifest;
-    manifest.schemaVersion = 1;
+    // Mirror the real manifest: the fp16 bundle is "efficienttam-ti-512"
+    // version 0.8.0 and only its file paths contain "_fp16/".
     AiModelRecord approvedFp16 =
-        trackingRecord(QStringLiteral("efficienttam-ti-512-fp16"), true);
+        trackingRecord(QStringLiteral("efficienttam-ti-512"), true);
+    approvedFp16.version = QStringLiteral("0.8.0");
     approvedFp16.commercialApproved = true;
+    approvedFp16.files[QStringLiteral("image_encoder")].path =
+        QStringLiteral("efficienttam_ti_512_fp16/image_encoder.onnx");
+    approvedFp16.files[QStringLiteral("prompt_encoder")].path =
+        QStringLiteral("efficienttam_ti_512_fp16/prompt_encoder.onnx");
+    approvedFp16.files[QStringLiteral("mask_decoder")].path =
+        QStringLiteral("efficienttam_ti_512_fp16/mask_decoder.onnx");
+
     AiModelRecord unapprovedFp32 =
         trackingRecord(QStringLiteral("efficienttam-ti-512-fp32"), true);
     unapprovedFp32.commercialApproved = false;
-    manifest.models = {approvedFp16, unapprovedFp32};
 
+    ModelManifest manifest;
+    manifest.schemaVersion = 1;
+    manifest.models = {approvedFp16, unapprovedFp32};
     const ModelRegistry registry =
         ModelRegistry::forTest(manifest, QStringLiteral("C:/models"));
     const AiModelRecord *record = registry.defaultTrackingModel();
     ASSERT_NE(record, nullptr);
     // "fp16 must not be used" wins over commercial approval.
     EXPECT_EQ(record->id, QStringLiteral("efficienttam-ti-512-fp32"));
+
+    // With no fp32 candidate the path-detected fp16 record is still skipped;
+    // the remaining tracking fallback is returned instead.
+    ModelManifest onlyFp16;
+    onlyFp16.schemaVersion = 1;
+    onlyFp16.models = {approvedFp16,
+                       trackingRecord(QStringLiteral("sam2.1-hiera-tiny"),
+                                      false)};
+    const ModelRegistry fallbackRegistry =
+        ModelRegistry::forTest(onlyFp16, QStringLiteral("C:/models"));
+    ASSERT_NE(fallbackRegistry.defaultTrackingModel(), nullptr);
+    EXPECT_EQ(fallbackRegistry.defaultTrackingModel()->id,
+              QStringLiteral("sam2.1-hiera-tiny"));
 }
 
 TEST(ModelRegistry, VerifyFilesByIdOnlyHashesRequestedModels)
