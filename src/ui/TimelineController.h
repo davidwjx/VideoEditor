@@ -69,6 +69,10 @@ public:
     Q_INVOKABLE void trimStart(const QString &clipId, qint64 newStartUs);
     Q_INVOKABLE void trimEnd(const QString &clipId, qint64 newEndUs);
     Q_INVOKABLE void splitAtPlayhead();
+    // Splits one specific clip at the playhead. Used by the clip context menu
+    // so a right-clicked clip is the target even when another clip sits under
+    // the playhead.
+    Q_INVOKABLE void splitClipAtPlayhead(const QString &clipId);
     Q_INVOKABLE void deleteSelected(bool ripple);
     // Deletes whatever is selected: a subtitle cue takes precedence, otherwise
     // the selected clip. One shortcut path for both selection types.

@@ -277,7 +277,12 @@ ColumnLayout {
         text: "静音"
         enabled: inspector.hasClip() && inspector.isAudioClip()
         property int lastVolume: 1000
-        checked: inspector.clipField("volumeMilli", 1000) === 0
+        property string lastClipId: ""
+        Component.onCompleted: {
+            lastClipId = Timeline.selectedClipId
+            const current = inspector.clipField("volumeMilli", 1000)
+            lastVolume = current > 0 ? current : 1000
+        }
         onToggled: {
             if (!inspector.hasClip())
                 return
@@ -287,6 +292,27 @@ ColumnLayout {
                 Timeline.setClipVolume(Timeline.selectedClipId, 0)
             } else {
                 Timeline.setClipVolume(Timeline.selectedClipId, lastVolume)
+            }
+        }
+        // A plain checked binding would be broken by the first user toggle.
+        // Re-apply it whenever the controller value or selection changes.
+        Binding {
+            target: muteBox
+            property: "checked"
+            value: inspector.clipField("volumeMilli", 1000) === 0
+            when: !muteBox.pressed
+        }
+        Connections {
+            target: Timeline
+            function onSelectedClipChanged() {
+                // Only reset when the identity changes: muting emits
+                // selectedClipChanged too and must not overwrite lastVolume.
+                const id = Timeline.selectedClipId
+                if (id === muteBox.lastClipId)
+                    return
+                muteBox.lastClipId = id
+                const current = inspector.clipField("volumeMilli", 1000)
+                muteBox.lastVolume = current > 0 ? current : 1000
             }
         }
     }

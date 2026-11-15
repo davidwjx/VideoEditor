@@ -608,6 +608,22 @@ void TimelineController::splitAtPlayhead()
     }
 }
 
+void TimelineController::splitClipAtPlayhead(const QString &clipId)
+{
+    QString trackId;
+    if (!trackForClip(clipId, &trackId)) {
+        emit editFailed(QStringLiteral("未找到片段。"));
+        return;
+    }
+    const Clip *clip = findClip(trackId, clipId);
+    if (!clip || m_positionUs <= clip->timelineStartUs
+        || m_positionUs >= clip->timelineEndUs()) {
+        emit editFailed(QStringLiteral("播放头不在该片段内。"));
+        return;
+    }
+    m_editor.splitClip(trackId, clipId, m_positionUs);
+}
+
 void TimelineController::deleteSelected(bool ripple)
 {
     if (m_selectedClipId.isEmpty())

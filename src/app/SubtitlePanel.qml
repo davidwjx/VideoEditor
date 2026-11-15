@@ -117,6 +117,9 @@ ColumnLayout {
             text: "＋ 字幕（播放头）"
             highlighted: true
             onClicked: {
+                // Commit text typed for the previous cue before selection
+                // moves to the new one, otherwise that edit is dropped.
+                panel.commitTopText()
                 const id = Timeline.addCueAtPlayhead()
                 if (id.length > 0) {
                     Qt.callLater(function() {
@@ -176,6 +179,15 @@ ColumnLayout {
             enabled: Timeline.selectedCueId !== ""
             onActivated: Timeline.applySubtitleStyle(
                              currentValue, Timeline.selectedCueId)
+            // Keep the visible style in sync with the selected cue, including
+            // after undo, external style changes and selection changes.
+            Binding {
+                target: styleBox
+                property: "currentIndex"
+                value: Math.max(0, styleBox.indexOfValue(
+                                    panel.cueField("styleId", "default")))
+                when: !styleBox.pressed
+            }
         }
     }
 

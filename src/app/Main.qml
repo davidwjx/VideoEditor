@@ -195,14 +195,6 @@ ApplicationWindow {
                 when: !transport.pressed
             }
         }
-        CheckBox {
-            objectName: "proxy-footer-toggle"
-            text: "代理"
-            checked: App.useProxy
-            onToggled: App.useProxy = checked
-            ToolTip.visible: hovered
-            ToolTip.text: "使用代理媒体预览"
-        }
     }
 
     RowLayout {
@@ -401,32 +393,42 @@ ApplicationWindow {
                         onClicked: Timeline.deleteSelection(true)
                     }
                     Button {
-                        objectName: "context-link"
-                        visible: root.clipSelected
-                        text: "链接"
-                        enabled: root.clipSelected
-                        onClicked: Timeline.linkSelectedClip()
-                    }
-                    Button {
-                        objectName: "context-unlink"
-                        visible: root.clipSelected
-                        text: "解链"
-                        enabled: root.clipSelected
-                        onClicked: Timeline.unlinkSelectedClip()
-                    }
-                    Button {
-                        objectName: "context-copy"
-                        visible: root.clipSelected
-                        text: "复制"
-                        onClicked: Timeline.copySelected()
-                    }
-                    Button {
                         objectName: "context-edit-text"
                         visible: root.cueSelected
                         text: "编辑文本"
                         onClicked: subtitlePanel.focusSelectedText()
                     }
-                    Item { Layout.fillWidth: true }
+                    ToolButton {
+                        objectName: "context-more-button"
+                        visible: root.clipSelected
+                        text: "更多 ▾"
+                        onClicked: contextMoreMenu.open()
+
+                        Menu {
+                            id: contextMoreMenu
+                            MenuItem {
+                                objectName: "context-menu-link"
+                                text: "链接音视频"
+                                onClicked: Timeline.linkSelectedClip()
+                            }
+                            MenuItem {
+                                objectName: "context-menu-unlink"
+                                text: "解除链接"
+                                onClicked: Timeline.unlinkSelectedClip()
+                            }
+                            MenuSeparator {}
+                            MenuItem {
+                                objectName: "context-menu-copy"
+                                text: "复制  Ctrl+C"
+                                onClicked: Timeline.copySelected()
+                            }
+                            MenuItem {
+                                objectName: "context-menu-paste"
+                                text: "粘贴到播放头  Ctrl+V"
+                                onClicked: Timeline.pasteAtPlayhead()
+                            }
+                        }
+                    }
                 }
             }
 
@@ -458,7 +460,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.leftMargin: 6
                             anchors.rightMargin: 6
-                            spacing: 6
+                            spacing: 4
 
                             ToolButton {
                                 objectName: "add-track-button"
@@ -488,20 +490,34 @@ ApplicationWindow {
                             }
 
                             CheckBox {
+                                id: snapChip
                                 objectName: "snap-toggle"
                                 text: "吸附"
                                 checked: Timeline.snapEnabled
                                 onToggled: Timeline.snapEnabled = checked
                                 ToolTip.visible: hovered
                                 ToolTip.text: "吸附到播放头和片段边缘"
+                                Binding {
+                                    target: snapChip
+                                    property: "checked"
+                                    value: Timeline.snapEnabled
+                                    when: !snapChip.pressed
+                                }
                             }
                             CheckBox {
+                                id: proxyChip
                                 objectName: "proxy-toggle"
                                 text: "代理"
                                 checked: App.useProxy
                                 onToggled: App.useProxy = checked
                                 ToolTip.visible: hovered
                                 ToolTip.text: "使用代理媒体预览"
+                                Binding {
+                                    target: proxyChip
+                                    property: "checked"
+                                    value: App.useProxy
+                                    when: !proxyChip.pressed
+                                }
                             }
                             CheckBox {
                                 objectName: "ripple-mode-toggle"
@@ -535,11 +551,6 @@ ApplicationWindow {
                                 onClicked: root.zoomBy(0.8)
                                 ToolTip.visible: hovered
                                 ToolTip.text: "缩小时间线 (-)"
-                            }
-                            Label {
-                                text: Math.round(Timeline.pixelsPerSecond) + " px/s"
-                                color: "#8a8a8a"
-                                font.pixelSize: 10
                             }
                             ToolButton {
                                 objectName: "zoom-in-button"
@@ -588,13 +599,29 @@ ApplicationWindow {
     // Shortcuts. Editing keys are disabled while a text editor has focus so
     // typing "s", "-" or pasting text never edits the timeline.
     // ---------------------------------------------------------------------
-    Shortcut { sequence: "Ctrl+I"; onActivated: fileDialog.open() }
-    Shortcut { sequence: "Ctrl+O"; onActivated: openProjectDialog.open() }
-    Shortcut { sequence: "Ctrl+S"; onActivated: saveProjectDialog.open() }
-    Shortcut { sequence: "Ctrl+E"; onActivated: {
-        if (root.hasTimelineContent)
-            exportDialog.openDialog()
-    } }
+    Shortcut {
+        sequence: "Ctrl+I"
+        enabled: !root.textEditing
+        onActivated: fileDialog.open()
+    }
+    Shortcut {
+        sequence: "Ctrl+O"
+        enabled: !root.textEditing
+        onActivated: openProjectDialog.open()
+    }
+    Shortcut {
+        sequence: "Ctrl+S"
+        enabled: !root.textEditing
+        onActivated: saveProjectDialog.open()
+    }
+    Shortcut {
+        sequence: "Ctrl+E"
+        enabled: !root.textEditing
+        onActivated: {
+            if (root.hasTimelineContent)
+                exportDialog.openDialog()
+        }
+    }
 
     Shortcut {
         sequence: "Ctrl+Z"
@@ -686,6 +713,7 @@ ApplicationWindow {
             Label { text: "Ctrl+Z / Ctrl+Y  撤销 / 重做" }
             Label { text: "← / →  逐帧     Home / End  开头 / 结尾" }
             Label { text: "+ / -  缩放时间线" }
+            Label { text: "Ctrl+C / Ctrl+V  复制 / 粘贴到播放头" }
             Label { text: "Ctrl+E  导出     Ctrl+I  导入     Ctrl+S / Ctrl+O  保存 / 打开" }
             Label {
                 text: "参考剪映操作习惯，快捷键与布局为独立设计。"

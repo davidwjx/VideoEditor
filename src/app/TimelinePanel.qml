@@ -264,7 +264,9 @@ Item {
             text: "分割  Ctrl+B"
             onClicked: {
                 Timeline.selectClip(root.contextClipId)
-                Timeline.splitAtPlayhead()
+                // Target the right-clicked clip, not whatever happens to sit
+                // under the playhead on another lane.
+                Timeline.splitClipAtPlayhead(root.contextClipId)
             }
         }
         MenuItem {
@@ -307,6 +309,14 @@ Item {
             onClicked: {
                 Timeline.selectClip(root.contextClipId)
                 Timeline.copySelected()
+            }
+        }
+        MenuItem {
+            objectName: "clip-menu-paste"
+            text: "粘贴到播放头  Ctrl+V"
+            onClicked: {
+                Timeline.selectClip(root.contextClipId)
+                Timeline.pasteAtPlayhead()
             }
         }
     }

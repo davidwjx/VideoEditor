@@ -673,6 +673,23 @@ int clipCount(const Project &project)
 
 // Loads Main.qml against a prepared controller and exposes the window. The
 // caller owns the returned root object.
+// Types plain ASCII into whichever item currently has active focus. Qt's test
+// library only ships keyClicks() for widgets, not QWindow.
+void typeText(QQuickWindow *window, const QString &text)
+{
+    for (const QChar &ch : text) {
+        Qt::Key key = Qt::Key_unknown;
+        if (ch >= QLatin1Char('a') && ch <= QLatin1Char('z')) {
+            key = static_cast<Qt::Key>(Qt::Key_A + (ch.unicode() - 'a'));
+        } else if (ch >= QLatin1Char('A') && ch <= QLatin1Char('Z')) {
+            key = static_cast<Qt::Key>(Qt::Key_A + (ch.unicode() - 'A'));
+        } else {
+            key = static_cast<Qt::Key>(ch.unicode());
+        }
+        QTest::keyClick(window, key);
+    }
+}
+
 QQuickWindow *showMainWindow(QQmlEngine &engine, AppController &controller,
                              QScopedPointer<QObject> &root)
 {
@@ -915,6 +932,29 @@ TEST(TimelineQml, OneClickSubtitleExportEntryAndDisclosure)
     EXPECT_TRUE(subtitleText->hasActiveFocus())
         << "the one-click subtitle flow must focus the text editor";
 
+    // The selected cue's style is visible and stays in sync both ways.
+    QQuickItem *styleBox = findItem(window, QStringLiteral("subtitle-style"));
+    ASSERT_NE(styleBox, nullptr);
+    const QString activeCueId = controller.timeline()->selectedCueId();
+    ASSERT_FALSE(activeCueId.isEmpty());
+    EXPECT_EQ(styleBox->property("currentIndex").toInt(), 0); // default
+    controller.timeline()->applySubtitleStyle(QStringLiteral("boxed"),
+                                              activeCueId);
+    QTest::qWait(80);
+    EXPECT_EQ(styleBox->property("currentIndex").toInt(), 1)
+        << "the style combo must follow the selected cue's style";
+    styleBox->setProperty("currentIndex", 2);
+    QMetaObject::invokeMethod(styleBox, "activated", Q_ARG(int, 2));
+    QTest::qWait(80);
+    QString appliedStyle;
+    for (const Track &track : controller.document()->project().tracks) {
+        for (const SubtitleCue &cue : track.cues) {
+            if (cue.id == activeCueId)
+                appliedStyle = cue.styleId;
+        }
+    }
+    EXPECT_EQ(appliedStyle, QStringLiteral("bold-outline"));
+
     // --- Progressive disclosure: keyframes stay hidden until 高级. --------
     QQuickItem *keyframeList =
         findItem(window, QStringLiteral("inspector-keyframe-list"));
@@ -953,10 +993,34 @@ TEST(TimelineQml, OneClickSubtitleExportEntryAndDisclosure)
              QStringLiteral("clip-menu-delete"),
              QStringLiteral("clip-menu-ripple"),
              QStringLiteral("clip-menu-detach"),
-             QStringLiteral("clip-menu-link") }) {
+             QStringLiteral("clip-menu-link"),
+             QStringLiteral("clip-menu-paste") }) {
         EXPECT_NE(window->findChild<QObject *>(name), nullptr)
             << name.toStdString();
     }
+
+    // The menu's split action targets the right-clicked clip at the playhead,
+    // not another lane's clip.
+    controller.timeline()->seekUs(1'000'000);
+    const QString menuTargetId = controller.document()
+                                     ->trackById(QStringLiteral("track-v1"))
+                                     ->clips.first().id;
+    const int v1BeforeMenuSplit = int(
+        controller.document()->trackById(QStringLiteral("track-v1"))
+            ->clips.size());
+    QObject *splitItem =
+        window->findChild<QObject *>(QStringLiteral("clip-menu-split"));
+    ASSERT_NE(splitItem, nullptr);
+    QMetaObject::invokeMethod(splitItem, "clicked");
+    QTest::qWait(100);
+    EXPECT_EQ(int(controller.document()->trackById(QStringLiteral("track-v1"))
+                      ->clips.size()),
+              v1BeforeMenuSplit + 1)
+        << "clip-menu split must target the right-clicked clip";
+    EXPECT_NE(findClip(controller.document()->project(), menuTargetId),
+              nullptr)
+        << "the target clip must still exist as one of the split halves";
+
     EXPECT_NE(findItem(window, QStringLiteral("selection-context-bar")),
               nullptr);
 
@@ -1096,4 +1160,151 @@ TEST(TimelineQml, PlayheadAutoFollowsDuringSeeks)
     QTest::qWait(120);
     EXPECT_GT(flick->property("contentX").toDouble(), 0.0)
         << "the timeline must scroll to keep the playhead visible";
+}
+
+TEST(TimelineQml, OneClickSubtitleCommitsPreviousCueText)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for key delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+
+    QQuickItem *subtitleAdd = findItem(window, QStringLiteral("subtitle-add"));
+    ASSERT_NE(subtitleAdd, nullptr);
+
+    clickItem(window, subtitleAdd);
+    QTest::qWait(120);
+    const QString firstCueId = controller.timeline()->selectedCueId();
+    ASSERT_FALSE(firstCueId.isEmpty());
+    QQuickItem *subtitleText =
+        findItem(window, QStringLiteral("subtitle-text"));
+    ASSERT_NE(subtitleText, nullptr);
+    ASSERT_TRUE(subtitleText->hasActiveFocus());
+    typeText(window, QStringLiteral("aaa"));
+    QTest::qWait(80);
+    EXPECT_EQ(subtitleText->property("text").toString(), QStringLiteral("aaa"));
+
+    // Adding the next cue must commit the previous cue's uncommitted text.
+    clickItem(window, subtitleAdd);
+    QTest::qWait(150);
+    const QString secondCueId = controller.timeline()->selectedCueId();
+    ASSERT_FALSE(secondCueId.isEmpty());
+    EXPECT_NE(secondCueId, firstCueId);
+
+    QString firstText;
+    QString secondText;
+    for (const Track &track : controller.document()->project().tracks) {
+        for (const SubtitleCue &cue : track.cues) {
+            if (cue.id == firstCueId)
+                firstText = cue.text;
+            else if (cue.id == secondCueId)
+                secondText = cue.text;
+        }
+    }
+    EXPECT_EQ(firstText, QStringLiteral("aaa"))
+        << "the previous cue's typed text must be committed before adding";
+
+    ASSERT_TRUE(subtitleText->hasActiveFocus());
+    typeText(window, QStringLiteral("bbb"));
+    QTest::qWait(80);
+    // Lose focus so the new cue commits too.
+    if (QQuickItem *importButton =
+            findItem(window, QStringLiteral("import-button")))
+        importButton->forceActiveFocus();
+    QTest::qWait(100);
+    for (const Track &track : controller.document()->project().tracks) {
+        for (const SubtitleCue &cue : track.cues) {
+            if (cue.id == secondCueId)
+                secondText = cue.text;
+        }
+    }
+    EXPECT_EQ(secondText, QStringLiteral("bbb"));
+}
+
+TEST(TimelineQml, InspectorMuteBindingSurvivesSelectionChanges)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"),
+                                          5'000'000)
+                     .isEmpty());
+    const Track *audioTrack =
+        controller.document()->trackById(QStringLiteral("track-a1"));
+    ASSERT_NE(audioTrack, nullptr);
+    ASSERT_EQ(audioTrack->clips.size(), 2);
+    const QString clipA = audioTrack->clips.at(0).id;
+    const QString clipB = audioTrack->clips.at(1).id;
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for click delivery";
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+
+    QQuickItem *mute = findItem(window, QStringLiteral("inspector-mute"));
+    ASSERT_NE(mute, nullptr);
+
+    controller.timeline()->selectClip(clipA);
+    controller.timeline()->setClipVolume(clipA, 1500);
+    QTest::qWait(120);
+    EXPECT_TRUE(mute->isVisible());
+    EXPECT_FALSE(mute->property("checked").toBool());
+    clickItem(window, mute);
+    QTest::qWait(100);
+    EXPECT_EQ(findClip(controller.document()->project(), clipA)
+                  ->audio.volumeMilli,
+              0);
+    EXPECT_TRUE(mute->property("checked").toBool());
+    clickItem(window, mute);
+    QTest::qWait(100);
+    EXPECT_EQ(findClip(controller.document()->project(), clipA)
+                  ->audio.volumeMilli,
+              1500);
+    EXPECT_FALSE(mute->property("checked").toBool());
+
+    // Switching clips must not restore the previous clip's saved volume.
+    controller.timeline()->selectClip(clipB);
+    controller.timeline()->setClipVolume(clipB, 800);
+    QTest::qWait(120);
+    EXPECT_FALSE(mute->property("checked").toBool());
+    clickItem(window, mute);
+    QTest::qWait(100);
+    EXPECT_EQ(findClip(controller.document()->project(), clipB)
+                  ->audio.volumeMilli,
+              0);
+    clickItem(window, mute);
+    QTest::qWait(100);
+    EXPECT_EQ(findClip(controller.document()->project(), clipB)
+                  ->audio.volumeMilli,
+              800)
+        << "unmute must restore this clip's volume, not the previous clip's";
 }
