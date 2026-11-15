@@ -99,7 +99,8 @@ void setTrackLocked(ProjectDocument &document, const QString &trackId, bool lock
 // Attaches a valid removal layer to one clip. setProject() clears undo, so
 // tests call this after building the clip and before the edit under test.
 void attachRemovalLayer(Fixture &fixture, const QString &clipId,
-                        const QString &layerId, int revision = 1)
+                        const QString &layerId, int revision = 1,
+                        bool generatedState = false)
 {
     Project project = fixture.document.project();
     RemovalLayer layer;
@@ -115,6 +116,12 @@ void attachRemovalLayer(Fixture &fixture, const QString &clipId,
         }
     }
     layer.revision = revision;
+    if (generatedState) {
+        layer.cacheKey = QString(64, QLatin1Char('d'));
+        layer.cachePath = QStringLiteral("removal/") + layer.cacheKey;
+        layer.trackingState = RemovalTrackingState::Complete;
+        layer.trackingConfidenceHash = QString(64, QLatin1Char('c'));
+    }
     MaskKeyframe keyframe;
     keyframe.id = QStringLiteral("mk-1");
     keyframe.sourceTimeUs = layer.sourceInUs;
@@ -1053,7 +1060,7 @@ TEST(TimelineEditor, SplitClonesRemovalLayerForRightHalfAndReloads)
                    makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
                             0, 0, 10'000'000));
     attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"),
-                       7);
+                       7, true);
 
     const int index = fixture.document.undoStack()->index();
     editor.splitClip(QStringLiteral("track-v1"), QStringLiteral("clip-v"),
@@ -1073,8 +1080,21 @@ TEST(TimelineEditor, SplitClonesRemovalLayerForRightHalfAndReloads)
     EXPECT_EQ(clone->sourceInUs, right.sourceInUs);
     EXPECT_EQ(clone->sourceOutUs, right.sourceOutUs);
     EXPECT_EQ(clone->revision, 7);
+    // Generated removal state is interval/layer specific and must be reset.
+    EXPECT_TRUE(clone->cacheKey.isEmpty());
+    EXPECT_TRUE(clone->cachePath.isEmpty());
+    EXPECT_TRUE(clone->trackingConfidenceHash.isEmpty());
+    EXPECT_EQ(clone->trackingState, RemovalTrackingState::NotTracked);
     ASSERT_EQ(clone->maskKeyframes.size(), 1);
     EXPECT_EQ(clone->maskKeyframes.first().maskHash, QString(64, QLatin1Char('a')));
+    const RemovalLayer *original =
+        fixture.document.removalLayerById(QStringLiteral("rl-v"));
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(original->cacheKey, QString(64, QLatin1Char('d')));
+    EXPECT_EQ(original->cachePath,
+              QStringLiteral("removal/") + QString(64, QLatin1Char('d')));
+    EXPECT_EQ(original->trackingState, RemovalTrackingState::Complete);
+    EXPECT_EQ(original->trackingConfidenceHash, QString(64, QLatin1Char('c')));
 
     QTemporaryDir dir;
     const QString path = dir.filePath(QStringLiteral("split.veproj"));
@@ -1098,7 +1118,7 @@ TEST(TimelineEditor, PasteDuplicatesRemovalLayerAndReloads)
                    makeClip(QStringLiteral("clip-v"), QStringLiteral("asset-v"),
                             0, 0, 8'000'000));
     attachRemovalLayer(fixture, QStringLiteral("clip-v"), QStringLiteral("rl-v"),
-                       7);
+                       7, true);
     editor.copy({ClipLocator{QStringLiteral("track-v1"),
                              QStringLiteral("clip-v")}});
 
@@ -1115,10 +1135,18 @@ TEST(TimelineEditor, PasteDuplicatesRemovalLayerAndReloads)
     ASSERT_NE(clone, nullptr);
     EXPECT_EQ(clone->clipId, pasted.id);
     EXPECT_EQ(clone->revision, 7);
+    // A pasted layer has a new identity, so generation/tracking results from
+    // the clipboard source are stale even though the interval is unchanged.
+    EXPECT_TRUE(clone->cacheKey.isEmpty());
+    EXPECT_TRUE(clone->cachePath.isEmpty());
+    EXPECT_TRUE(clone->trackingConfidenceHash.isEmpty());
+    EXPECT_EQ(clone->trackingState, RemovalTrackingState::NotTracked);
     const RemovalLayer *original =
         layerForClip(fixture.document.project(), QStringLiteral("clip-v"));
     ASSERT_NE(original, nullptr);
     EXPECT_EQ(original->id, QStringLiteral("rl-v"));
+    EXPECT_EQ(original->cacheKey, QString(64, QLatin1Char('d')));
+    EXPECT_EQ(original->trackingState, RemovalTrackingState::Complete);
     EXPECT_EQ(fixture.document.project().removalLayers.size(), 2);
 
     QTemporaryDir dir;

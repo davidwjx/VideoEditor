@@ -527,6 +527,13 @@ void TimelineEditor::splitClip(const QString &trackId, const QString &clipId,
                     clone.clipId = right.id;
                     clone.sourceInUs = right.sourceInUs;
                     clone.sourceOutUs = right.sourceOutUs;
+                    // Generated state belongs to the old interval/layer id.
+                    // The content-addressed cache can be reused later after a
+                    // generate recomputes the key for this range.
+                    clone.cacheKey.clear();
+                    clone.cachePath.clear();
+                    clone.trackingConfidenceHash.clear();
+                    clone.trackingState = RemovalTrackingState::NotTracked;
                     right.removalLayerId = clone.id;
                     addedLayers.append(clone);
                 } else {
@@ -801,6 +808,12 @@ void TimelineEditor::paste(int64_t timelineUs, const QString &targetTrackId)
                 clone.clipId = copy.id;
                 clone.sourceInUs = copy.sourceInUs;
                 clone.sourceOutUs = copy.sourceOutUs;
+                // Tracking results are keyed per layer id and the pasted clip
+                // is a new layer even when its interval is unchanged.
+                clone.cacheKey.clear();
+                clone.cachePath.clear();
+                clone.trackingConfidenceHash.clear();
+                clone.trackingState = RemovalTrackingState::NotTracked;
                 copy.removalLayerId = clone.id;
                 addedLayers.append(clone);
             } else {
