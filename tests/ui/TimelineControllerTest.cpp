@@ -75,6 +75,43 @@ TEST(TimelineController, SplitAtPlayheadAndUndo)
     EXPECT_EQ(document.project().tracks.at(0).clips.size(), 1);
 }
 
+// Ctrl+B cuts every independent group under the playhead. That must be one
+// undo step, not one per group, or a single Ctrl+Z would leave a half split.
+TEST(TimelineController, SplitAcrossGroupsIsOneUndoStep)
+{
+    ProjectDocument document;
+    document.addAsset(videoAsset(5'000'000));
+    Asset second = videoAsset(5'000'000);
+    second.id = QStringLiteral("asset-v2");
+    document.addAsset(second);
+    TimelineController controller(document);
+    ASSERT_FALSE(controller
+                     .addAssetToTimeline(QStringLiteral("asset-v"),
+                                         QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+    const QString secondTrack = controller.addTrack(0);
+    ASSERT_FALSE(secondTrack.isEmpty());
+    ASSERT_FALSE(controller
+                     .addAssetToTimeline(QStringLiteral("asset-v2"),
+                                         secondTrack, 0)
+                     .isEmpty());
+    ASSERT_EQ(document.trackById(QStringLiteral("track-v1"))->clips.size(), 1);
+    ASSERT_EQ(document.trackById(secondTrack)->clips.size(), 1);
+
+    controller.seekUs(2'000'000);
+    const int undoBefore = document.undoStack()->index();
+    controller.splitAtPlayhead();
+
+    EXPECT_EQ(document.trackById(QStringLiteral("track-v1"))->clips.size(), 2);
+    EXPECT_EQ(document.trackById(secondTrack)->clips.size(), 2);
+    EXPECT_EQ(document.undoStack()->index(), undoBefore + 1)
+        << "splitting two independent groups must be a single undo step";
+
+    document.undo();
+    EXPECT_EQ(document.trackById(QStringLiteral("track-v1"))->clips.size(), 1);
+    EXPECT_EQ(document.trackById(secondTrack)->clips.size(), 1);
+}
+
 TEST(TimelineController, SnapUsUsesPlayheadAndClipEdges)
 {
     ProjectDocument document;

@@ -13,6 +13,8 @@
 
 namespace VideoEditor {
 
+struct Project;
+
 enum class ExportVideoCodec { Mpeg4Part2, H264, H265 };
 enum class ExportQuality { Low, Medium, High };
 enum class ExportRateControl { Bitrate, Quality };
@@ -85,6 +87,14 @@ void audioSampleRangeForSegment(const ExportTiming &timing, int segmentIndex,
 
 QString validateExportSettings(const ExportSettings &settings,
                                const TimelineSettings &timeline);
+// Rejects an output video or SRT sidecar whose destination is an imported
+// asset or the project file itself; finalization replaces the destination, so
+// allowing either would delete source media. Paths are canonicalized and
+// compared case-insensitively on Windows. `projectPath` may be empty for an
+// unsaved document.
+QString validateExportDestinations(const ExportSettings &settings,
+                                   const Project &project,
+                                   const QString &projectPath);
 QString normalizedOutputPath(QString path);
 QString defaultSrtPathFor(const QString &outputPath);
 

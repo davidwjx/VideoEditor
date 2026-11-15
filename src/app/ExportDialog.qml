@@ -16,6 +16,10 @@ Dialog {
     standardButtons: Dialog.NoButton
     // Esc must not dismiss the dialog while an export is running.
     closePolicy: Export.running ? Popup.NoAutoClose : Popup.CloseOnEscape
+    // A start clicked while the async encoder probe was still running is
+    // deferred; closing the dialog must abandon it instead of starting an
+    // export in the background.
+    onClosed: Export.cancelExport()
 
     property bool advancedOpen: false
 
@@ -34,6 +38,9 @@ Dialog {
             ComboBox {
                 id: presetCombo
                 objectName: "presetCombo"
+                // Settings are frozen when the run starts; editing them here
+                // would only desynchronise the UI from the running export.
+                enabled: !Export.running
                 Layout.fillWidth: true
                 // Keep the dialog to the four common presets; the MPEG-4
                 // compatibility preset remains reachable through 视频编码.
@@ -81,6 +88,7 @@ Dialog {
             ComboBox {
                 id: codecCombo
                 objectName: "codecCombo"
+                enabled: !Export.running
                 Layout.preferredWidth: 220
                 model: [
                     { text: "H.264（MP4）", value: "h264" },
@@ -170,6 +178,7 @@ Dialog {
                 ComboBox {
                     id: qualityCombo
                     objectName: "qualityCombo"
+                    enabled: !Export.running
                     Layout.preferredWidth: 160
                     model: ["流畅", "标准", "高质量"]
                     currentIndex: 1
@@ -191,6 +200,7 @@ Dialog {
                 TextField {
                     id: bitrateField
                     objectName: "bitrateField"
+                    enabled: !Export.running
                     Layout.preferredWidth: 140
                     text: ""
                     validator: IntValidator { bottom: 100; top: 200000 }
@@ -216,16 +226,19 @@ Dialog {
                 Layout.fillWidth: true
                 CheckBox {
                     text: "优先硬件编码"
+                    enabled: !Export.running
                     checked: Export.hardwarePreferred
                     onToggled: Export.hardwarePreferred = checked
                 }
                 CheckBox {
                     text: "烧录字幕"
+                    enabled: !Export.running
                     checked: Export.burnSubtitles
                     onToggled: Export.burnSubtitles = checked
                 }
                 CheckBox {
                     text: "同时导出 SRT"
+                    enabled: !Export.running
                     checked: Export.writeSrt
                     onToggled: Export.writeSrt = checked
                 }
@@ -245,6 +258,7 @@ Dialog {
             TextField {
                 id: outputField
                 objectName: "outputPathField"
+                enabled: !Export.running
                 Layout.fillWidth: true
                 text: ""
                 function syncFromController(force) {
@@ -265,6 +279,7 @@ Dialog {
             }
             Button {
                 text: "浏览…"
+                enabled: !Export.running
                 onClicked: saveDialog.open()
             }
         }

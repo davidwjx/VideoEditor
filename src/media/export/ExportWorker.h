@@ -23,6 +23,9 @@ public:
     explicit ExportWorker(QObject *parent = nullptr);
 
     void setCatalog(const EncoderCatalog &catalog);
+    // Project file path, used by the pipeline to refuse an output that would
+    // overwrite the project itself. Empty for an unsaved document.
+    void setProjectPath(const QString &path) { m_projectPath = path; }
 
     bool isCanceled() const { return m_cancel.load(); }
 
@@ -37,6 +40,7 @@ signals:
 
 private:
     EncoderCatalog m_catalog;
+    QString m_projectPath;
     std::atomic_bool m_cancel{false};
 };
 

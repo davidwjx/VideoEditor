@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
 
@@ -299,6 +301,167 @@ TEST_F(ExportPipelineTest, HardwareH264ResumeFinishesAfterFailure)
                             << " / resumed=" << resumed.resumed;
     EXPECT_TRUE(resumed.validation.ok) << resumed.validation.error.toStdString();
     EXPECT_TRUE(QFileInfo::exists(output));
+}
+
+// A crash can land between closing a part and persisting the checkpoint. The
+// complete parts past the claim are valid work; resume must adopt them and
+// start at the first segment that is actually missing instead of re-rendering
+// (and deleting) all of them.
+TEST_F(ExportPipelineTest, ResumeAdoptsCompletePartsBeyondCheckpoint)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("adopt.mp4"));
+    const Project project = makeProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ExportSettings settings =
+        settingsFor(ExportVideoCodec::Mpeg4Part2, output);
+    settings.segmentTargetUs = 100'000; // 3 frames per segment
+    const EncoderCatalog catalog = detectEncoders(320, 180, Rational{30, 1});
+
+    ExportPipeline::Hooks failHooks;
+    failHooks.failAtSegment = 12;
+    ExportPipeline pipeline;
+    const ExportResult failed =
+        pipeline.run(project, settings, catalog, false, failHooks);
+    ASSERT_FALSE(failed.ok);
+
+    const QString checkpointPath =
+        QDir(partsDirectoryFor(output))
+            .filePath(QStringLiteral("checkpoint.json"));
+    const auto saved = ExportCheckpoint::load(checkpointPath);
+    ASSERT_TRUE(saved.has_value());
+    const int completeOnDisk = saved->completedSegments;
+    ASSERT_GT(completeOnDisk, 3);
+    ASSERT_LT(completeOnDisk, saved->segmentCount);
+
+    // Rewind the claim: the parts for completeOnDisk - 3 .. completeOnDisk - 1
+    // are still on disk but the checkpoint no longer mentions them.
+    ExportCheckpoint stale = *saved;
+    stale.completedSegments = completeOnDisk - 3;
+    ASSERT_TRUE(stale.save(checkpointPath));
+
+    int firstReported = -1;
+    ExportPipeline::Hooks resumeHooks;
+    resumeHooks.onProgress = [&firstReported](const ExportProgress &progress) {
+        if (firstReported < 0)
+            firstReported = progress.completedSegments;
+    };
+    const ExportResult resumed =
+        pipeline.run(project, settings, catalog, true, resumeHooks);
+    ASSERT_TRUE(resumed.ok) << resumed.error.toStdString();
+    EXPECT_TRUE(resumed.resumed);
+    EXPECT_TRUE(resumed.validation.ok);
+    EXPECT_EQ(firstReported, completeOnDisk)
+        << "resume must start at the first missing segment, not at the claim";
+    EXPECT_TRUE(QFileInfo::exists(output));
+}
+
+// Completed segments must be durable while the video pass is still running: a
+// hard crash between the last closeThrough and the end of the loop used to
+// leave a checkpoint claiming zero segments.
+TEST_F(ExportPipelineTest, CheckpointAdvancesWhileRendering)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("progress.mp4"));
+    const Project project = makeProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ExportSettings settings =
+        settingsFor(ExportVideoCodec::Mpeg4Part2, output);
+    settings.segmentTargetUs = 100'000; // 3 frames per segment
+    const EncoderCatalog catalog = detectEncoders(320, 180, Rational{30, 1});
+    const QString checkpointPath =
+        QDir(partsDirectoryFor(output))
+            .filePath(QStringLiteral("checkpoint.json"));
+
+    int observedDuringRun = -1;
+    ExportPipeline::Hooks hooks;
+    hooks.failAtSegment = 15;
+    hooks.onProgress = [&](const ExportProgress &progress) {
+        if (progress.stage != ExportStage::Rendering
+            || progress.completedFrames < 30) {
+            return;
+        }
+        const auto midRun = ExportCheckpoint::load(checkpointPath);
+        if (midRun)
+            observedDuringRun = std::max(observedDuringRun,
+                                         midRun->completedSegments);
+    };
+    ExportPipeline pipeline;
+    const ExportResult result =
+        pipeline.run(project, settings, catalog, false, hooks);
+    EXPECT_FALSE(result.ok); // the injected failure ends the run
+    EXPECT_GT(observedDuringRun, 0)
+        << "the checkpoint must advance before the video pass finishes";
+}
+
+// Finalization replaces the destination. An output or SRT path that is one of
+// the imported assets (or the project file) must be rejected before any part
+// is written, otherwise the source media would be deleted.
+TEST(ExportPipeline, RejectsDestinationsThatWouldOverwriteSource)
+{
+    const QString fixtureDir = QStringLiteral(VIDEOEDITOR_FIXTURE_DIR);
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString output = dir.filePath(QStringLiteral("source.mp4"));
+    {
+        QFile file(output);
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        file.write("source-media");
+    }
+    const auto contents = [](const QString &path) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly))
+            return QByteArray();
+        return file.readAll();
+    };
+
+    Project project = makeProject(fixtureDir);
+    project.assets[1].path = output; // pretend the target is imported media
+    const EncoderCatalog catalog = EncoderCatalog::withoutHardwareForTest();
+    ExportPipeline pipeline;
+
+    ExportSettings settings = settingsFor(ExportVideoCodec::Mpeg4Part2, output);
+    ExportResult result = pipeline.run(project, settings, catalog, false, {});
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.indexOf(QStringLiteral("素材")), -1)
+        << result.error.toStdString();
+    EXPECT_EQ(contents(output), QByteArray("source-media"));
+    EXPECT_FALSE(QFileInfo::exists(partsDirectoryFor(output)));
+
+    // The SRT sidecar may not replace an asset either.
+    const QString srtTarget = dir.filePath(QStringLiteral("captions.srt"));
+    {
+        QFile file(srtTarget);
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        file.write("previous-captions");
+    }
+    project = makeProject(fixtureDir);
+    project.assets[1].path = srtTarget;
+    settings = settingsFor(ExportVideoCodec::Mpeg4Part2,
+                           dir.filePath(QStringLiteral("movie.mp4")));
+    settings.writeSrt = true;
+    settings.srtPath = srtTarget;
+    result = pipeline.run(project, settings, catalog, false, {});
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.indexOf(QStringLiteral("SRT")), -1)
+        << result.error.toStdString();
+    EXPECT_EQ(contents(srtTarget), QByteArray("previous-captions"));
+    EXPECT_FALSE(QFileInfo::exists(
+        partsDirectoryFor(settings.outputPath)));
+
+    // The project file itself is equally protected.
+    const QString projectPath = dir.filePath(QStringLiteral("project.mp4"));
+    project = makeProject(fixtureDir);
+    project.assets[1].path = QDir(fixtureDir).filePath(
+        QStringLiteral("tone.wav"));
+    settings = settingsFor(ExportVideoCodec::Mpeg4Part2, projectPath);
+    settings.writeSrt = false;
+    result = pipeline.run(project, settings, catalog, false, {}, projectPath);
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.indexOf(QStringLiteral("工程")), -1)
+        << result.error.toStdString();
+    EXPECT_FALSE(QFileInfo::exists(projectPath));
+    EXPECT_FALSE(QFileInfo::exists(partsDirectoryFor(projectPath)));
 }
 
 TEST(ExportPipeline, H265WithoutHardwareFailsBeforeWritingAnything)

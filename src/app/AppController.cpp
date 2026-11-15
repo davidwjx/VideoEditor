@@ -407,6 +407,22 @@ void AppController::openAsset(const QString &id)
     }
 }
 
+void AppController::beginPopup()
+{
+    ++m_openPopupCount;
+    emit openPopupCountChanged();
+}
+
+void AppController::endPopup()
+{
+    // A menu is normally closed before it is destroyed; clamp so a stray
+    // close can never leave the editing shortcuts permanently disabled.
+    if (m_openPopupCount <= 0)
+        return;
+    --m_openPopupCount;
+    emit openPopupCountChanged();
+}
+
 void AppController::setUseProxy(bool enabled)
 {
     if (m_useProxy == enabled)

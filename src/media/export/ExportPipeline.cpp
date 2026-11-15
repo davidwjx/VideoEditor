@@ -125,7 +125,8 @@ bool probeSegmentExtradata(const EncoderDescriptor &descriptor,
 ExportResult ExportPipeline::run(const Project &project,
                                  const ExportSettings &settings,
                                  const EncoderCatalog &catalog, bool resume,
-                                 const Hooks &hooks)
+                                 const Hooks &hooks,
+                                 const QString &projectPath)
 {
     ExportResult result;
     result.outputPath = normalizedOutputPath(settings.outputPath);
@@ -137,6 +138,14 @@ ExportResult ExportPipeline::run(const Project &project,
         validateExportSettings(frozenSettings, project.timeline);
     if (!validationError.isEmpty()) {
         result.error = validationError;
+        return result;
+    }
+    // This guard must run before mkpath/clearParts: writing parts or replacing
+    // the destination would otherwise destroy an imported asset or project.
+    const QString destinationError =
+        validateExportDestinations(frozenSettings, project, projectPath);
+    if (!destinationError.isEmpty()) {
+        result.error = destinationError;
         return result;
     }
     const int64_t durationUs = TimelineEvaluator(project).durationUs();
@@ -260,6 +269,24 @@ ExportResult ExportPipeline::run(const Project &project,
     checkpoint.completedSegments = 0;
     int startSegment = 0;
     bool encoderParametersChanged = false;
+    // True when the parts directory belongs to this run only (fresh export, or
+    // a resume whose checkpoint was rejected). An early failure may then clean
+    // it up; a valid resume must keep its parts.
+    bool freshPartsDir = false;
+    // A part is usable only when it opens, starts on a keyframe and carries
+    // exactly the packet count its timeline range requires.
+    const auto segmentIsComplete = [&](int index, QString *inspectError) {
+        int64_t vBegin = 0;
+        int64_t vEnd = 0;
+        videoFrameRangeForSegment(timing, frozenSettings.fps, index, &vBegin,
+                                  &vEnd);
+        SegmentCounts counts;
+        if (!inspectSegment(segmentPath(partsDir, index), &counts,
+                            inspectError)) {
+            return false;
+        }
+        return counts.videoPackets == vEnd - vBegin;
+    };
     if (resume) {
         error.clear();
         const auto loaded = ExportCheckpoint::load(checkpointPath, &error);
@@ -278,15 +305,19 @@ ExportResult ExportPipeline::run(const Project &project,
             // A checkpoint is a claim, not proof: verify every claimed segment
             // and fall back to the first segment whose content does not match.
             for (int i = 0; i < startSegment; ++i) {
-                SegmentCounts counts;
-                int64_t vBegin = 0;
-                int64_t vEnd = 0;
-                videoFrameRangeForSegment(timing, frozenSettings.fps, i,
-                                          &vBegin, &vEnd);
-                if (!inspectSegment(segmentPath(partsDir, i), &counts, &error)
-                    || counts.videoPackets != vEnd - vBegin) {
+                if (!segmentIsComplete(i, &error)) {
                     startSegment = i;
                     break;
+                }
+            }
+            // A crash between closing a part and saving the checkpoint leaves
+            // complete parts past the claim on disk. Adopt them instead of
+            // re-rendering work that is already valid; resume at the first
+            // segment that is missing or broken.
+            if (startSegment == checkpoint.completedSegments) {
+                while (startSegment < timing.segmentCount
+                       && segmentIsComplete(startSegment, &error)) {
+                    ++startSegment;
                 }
             }
             // A reopened encoder may publish different SPS/PPS (hardware
@@ -304,9 +335,13 @@ ExportResult ExportPipeline::run(const Project &project,
                 const bool probed = probeSegmentExtradata(
                     *selected, frozenSettings, frozenSettings.fps, scratchPath,
                     &encoderExtradata);
+                // probeSegmentExtradata removes its file on the known failure
+                // paths; a failed writer open can still leave one behind.
+                QFile::remove(scratchPath);
                 if (readPart && probed && partExtradata != encoderExtradata) {
                     encoderParametersChanged = true;
                     startSegment = 0;
+                    freshPartsDir = true;
                 }
             }
             for (int i = startSegment; i < timing.segmentCount; ++i)
@@ -315,10 +350,12 @@ ExportResult ExportPipeline::run(const Project &project,
             checkpoint.completedSegments = startSegment;
         } else {
             clearParts(partsDir);
+            freshPartsDir = true;
         }
     } else {
         // A fresh export must never mix in parts from an older run.
         clearParts(partsDir);
+        freshPartsDir = true;
     }
     if (encoderParametersChanged) {
         appendWarning(
@@ -339,12 +376,23 @@ ExportResult ExportPipeline::run(const Project &project,
     AudioEncoder audioEncoder;
     OfflineFrameRenderer renderer;
     QStringList warnings;
+    bool srtWritten = false;
+    QString srtWrittenPath;
+    const auto cleanEarlyArtifacts = [&] {
+        // Only remove a parts directory this run owns: a valid resume's parts
+        // are the remaining work and must survive a later early failure.
+        if (freshPartsDir)
+            clearParts(partsDir);
+        if (srtWritten && !srtWrittenPath.isEmpty())
+            QFile::remove(srtWrittenPath);
+    };
     error.clear();
     if (!videoEncoder.open(*selected, frozenSettings, &error)
         || !audioEncoder.open(kSampleRate, kChannels, kAudioBitrateKbps, &error)
         || !renderer.open(renderProject, frozenSettings.width,
                           frozenSettings.height, &error)) {
         result.error = error;
+        cleanEarlyArtifacts();
         return result;
     }
     renderer.setWarningCallback([&warnings](const QString &message) {
@@ -372,22 +420,31 @@ ExportResult ExportPipeline::run(const Project &project,
         if (!srt.open(QIODevice::WriteOnly)
             || srt.write(srtBytes) != srtBytes.size() || !srt.commit()) {
             result.error = QStringLiteral("无法写入 SRT 字幕文件：%1").arg(srtPath);
+            cleanEarlyArtifacts();
             return result;
         }
+        srtWritten = true;
+        srtWrittenPath = srtPath;
     }
 
     error.clear();
     if (!checkpoint.save(checkpointPath, &error)) {
         result.error = error;
+        cleanEarlyArtifacts();
         return result;
     }
     // Checkpoint updates outside the critical pre-render save must not abort a
     // run that is otherwise progressing (the parts themselves are intact);
-    // they surface as a warning so a broken checkpoint is not silent.
+    // they surface as a warning so a broken checkpoint is not silent. Report
+    // the first failure only: this runs once per completed segment.
+    bool checkpointWarningReported = false;
     const auto saveCheckpoint = [&] {
         QString saveError;
         if (checkpoint.save(checkpointPath, &saveError))
             return;
+        if (checkpointWarningReported)
+            return;
+        checkpointWarningReported = true;
         appendWarning(&result,
                       QStringLiteral("无法保存导出检查点（续跑信息可能丢失）：%1")
                           .arg(saveError));
@@ -395,6 +452,20 @@ ExportResult ExportPipeline::run(const Project &project,
 
     SegmentRouter router(partsDir, timing, frozenSettings.fps,
                          videoEncoder.context());
+    // A segment completed by the router (either through an explicit
+    // closeThrough or the router's own bounded writer window) becomes durable
+    // state immediately: a hard crash then loses at most the buffered writers,
+    // never the whole video pass.
+    const auto persistCompletedSegments = [&] {
+        const int completed = std::min(timing.segmentCount,
+                                       startSegment + router.completedSegments());
+        if (completed <= checkpoint.completedSegments)
+            return;
+        checkpoint.completedSegments = completed;
+        checkpoint.bytesWritten = router.bytesWritten();
+        checkpoint.lastError.clear();
+        saveCheckpoint();
+    };
     TimelineMixer mixer(kSampleRate, kChannels);
     mixer.setProject(frozen);
     float peak = 0.0f;
@@ -488,6 +559,9 @@ ExportResult ExportPipeline::run(const Project &project,
     if (!audioTrack.open(audioPartPath, kSampleRate, audioEncoder.context(),
                          timing.totalSamples, &error)) {
         result.error = error;
+        audioTrack.finish(nullptr);
+        QFile::remove(audioPartPath);
+        cleanEarlyArtifacts();
         return result;
     }
     const auto writeAudioPackets =
@@ -640,6 +714,9 @@ ExportResult ExportPipeline::run(const Project &project,
                 break;
             }
         }
+        // Also covers parts the router closed on its own while routing packets
+        // (it keeps at most four writers open).
+        persistCompletedSegments();
         report(ExportStage::Rendering);
     }
 
@@ -710,23 +787,34 @@ ExportResult ExportPipeline::run(const Project &project,
         QFile::remove(temp);
         return result;
     }
-    if (QFileInfo::exists(result.outputPath)
-        && !QFile::remove(result.outputPath)) {
-        result.error =
-            QStringLiteral("无法覆盖已存在的导出文件：%1").arg(result.outputPath);
-        // The assembled temp and every part are still intact; a retry can
-        // finish without re-rendering.
-        result.resumable = true;
-        result.audioPeak = peak;
-        return result;
+    // Move an existing output aside instead of deleting it first: if the final
+    // rename fails (a lock, a full disk, an antivirus scan) the previous
+    // export is restored rather than lost.
+    QString previousOutput;
+    if (QFileInfo::exists(result.outputPath)) {
+        previousOutput = result.outputPath + QStringLiteral(".previous");
+        QFile::remove(previousOutput);
+        if (!QFile::rename(result.outputPath, previousOutput)) {
+            result.error = QStringLiteral("无法替换已存在的导出文件：%1")
+                               .arg(result.outputPath);
+            // The assembled temp and every part are still intact; a retry can
+            // finish without re-rendering.
+            result.resumable = true;
+            result.audioPeak = peak;
+            return result;
+        }
     }
     if (!QFile::rename(temp, result.outputPath)) {
+        if (!previousOutput.isEmpty())
+            QFile::rename(previousOutput, result.outputPath);
         result.error =
             QStringLiteral("无法写入最终导出文件：%1").arg(result.outputPath);
         result.resumable = true;
         result.audioPeak = peak;
         return result;
     }
+    if (!previousOutput.isEmpty())
+        QFile::remove(previousOutput);
     clearParts(partsDir);
     result.ok = true;
     result.audioPeak = peak;

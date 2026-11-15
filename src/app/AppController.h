@@ -33,6 +33,9 @@ class AppController : public QObject {
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoStateChanged)
     Q_PROPERTY(bool recoveryAvailable READ recoveryAvailable NOTIFY recoveryAvailableChanged)
     Q_PROPERTY(bool useProxy READ useProxy WRITE setUseProxy NOTIFY useProxyChanged)
+    // Number of open menus/popups. Main.qml uses it to disable the
+    // window-scoped editing shortcuts while a popup owns the keyboard.
+    Q_PROPERTY(int openPopupCount READ openPopupCount NOTIFY openPopupCountChanged)
 
 public:
     // The optional sink factory lets tests replace the WASAPI device before
@@ -52,6 +55,11 @@ public:
     bool recoveryAvailable() const { return m_recoveryAvailable; }
     bool useProxy() const { return m_useProxy; }
     void setUseProxy(bool enabled);
+    int openPopupCount() const { return m_openPopupCount; }
+    // Popups live in several QML components; each one pairs these calls from
+    // its opened/closed handlers so the shortcut gate sees every menu.
+    Q_INVOKABLE void beginPopup();
+    Q_INVOKABLE void endPopup();
 
     Q_INVOKABLE void importUrls(const QList<QUrl> &urls);
     Q_INVOKABLE void openAsset(const QString &id);
@@ -97,6 +105,7 @@ signals:
     void undoStateChanged();
     void recoveryAvailableChanged();
     void useProxyChanged();
+    void openPopupCountChanged();
     void projectChanged();
     void selftestFramePresented();
     void timelineFramePresented();
@@ -138,6 +147,7 @@ private:
     QString m_currentAssetId;
     bool m_recoveryAvailable = false;
     bool m_useProxy = true;
+    int m_openPopupCount = 0;
     bool m_syncingPlayhead = false;
 };
 

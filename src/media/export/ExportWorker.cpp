@@ -26,7 +26,7 @@ void ExportWorker::run(VideoEditor::Project project,
         emit progress(value);
     };
     const ExportResult result =
-        pipeline.run(project, settings, m_catalog, resume, hooks);
+        pipeline.run(project, settings, m_catalog, resume, hooks, m_projectPath);
     emit finished(result);
 }
 

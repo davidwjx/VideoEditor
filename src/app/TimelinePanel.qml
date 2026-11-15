@@ -256,6 +256,8 @@ Item {
     // not on a stale selection.
     Menu {
         id: clipMenu
+        onOpened: App.beginPopup()
+        onClosed: App.endPopup()
         objectName: "clip-context-menu"
         property bool linked: false
 
@@ -325,6 +327,8 @@ Item {
     // the timeline.
     Menu {
         id: cueMenu
+        onOpened: App.beginPopup()
+        onClosed: App.endPopup()
         objectName: "cue-context-menu"
 
         MenuItem {

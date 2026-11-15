@@ -47,6 +47,8 @@ class ExportController : public QObject {
     Q_PROPERTY(QString h265UnavailableReason READ h265UnavailableReason
                    NOTIFY h265UnavailableReasonChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(bool capabilitiesReady READ capabilitiesReady
+                   NOTIFY capabilitiesReadyChanged)
     Q_PROPERTY(bool canCancel READ canCancel NOTIFY canCancelChanged)
     Q_PROPERTY(bool canResume READ canResume NOTIFY canResumeChanged)
     Q_PROPERTY(double progress READ progress NOTIFY progressChanged)
@@ -86,6 +88,10 @@ public:
     bool h265Available() const { return m_h265Available; }
     QString h265UnavailableReason() const { return m_h265UnavailableReason; }
     bool running() const { return m_running; }
+    // False until the asynchronous encoder probe (or a test-injected catalog)
+    // has produced a capability table. Validation suppresses "no encoder"
+    // errors while false so first-open never flashes a false failure.
+    bool capabilitiesReady() const { return m_capabilitiesReady; }
     bool canCancel() const { return m_canCancel; }
     // Cached so property reads and unrelated setters never touch the
     // checkpoint file or hash the project.
@@ -143,6 +149,7 @@ signals:
     void h265AvailableChanged();
     void h265UnavailableReasonChanged();
     void runningChanged();
+    void capabilitiesReadyChanged();
     void canCancelChanged();
     void canResumeChanged();
     void progressChanged();
@@ -212,6 +219,10 @@ private:
 
     EncoderCatalog m_catalog;
     bool m_catalogInjected = false;
+    bool m_capabilitiesReady = false;
+    // A start requested before the encoder probe finished runs as soon as the
+    // catalog arrives.
+    bool m_startPending = false;
     bool m_resumeRequested = false;
 
     QThread *m_thread = nullptr;

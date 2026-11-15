@@ -222,19 +222,40 @@ QString ExportController::validate() const
         validateExportSettings(settings, m_document.project().timeline);
     if (!error.isEmpty())
         return error;
-    if (m_codec == ExportVideoCodec::H265
-        && !m_catalog.hasHardware(ExportVideoCodec::H265)) {
-        QString reason;
-        m_catalog.selectEncoder(ExportVideoCodec::H265, true, nullptr, &reason);
+
+    // Finalization replaces the destination, so an output that is also an
+    // imported asset (or the project file) would delete source media. Reject
+    // before any part or sidecar is written.
+    const QString projectPath =
+        m_projectPath.isEmpty() ? m_document.filePath() : m_projectPath;
+    const QString destinationError = validateExportDestinations(
+        settings, m_document.project(), projectPath);
+    if (!destinationError.isEmpty())
+        return destinationError;
+
+    // Ask the catalog for the encoder the pipeline would actually pick. A
+    // bare hasAny() also counts rows that the selection gate never uses (for
+    // example OpenH264 without the explicit opt-in).
+    QString reason;
+    const QString encoderId = m_catalog.selectEncoder(
+        m_codec, m_hardwarePreferred, nullptr, &reason);
+    if (!encoderId.isEmpty())
+        return {};
+    // The first dialog open probes encoders on a worker thread. Until that
+    // catalog arrives it is empty; reporting "no encoder" then would flash a
+    // false error over an otherwise valid configuration.
+    if (!m_capabilitiesReady)
+        return {};
+    if (m_codec == ExportVideoCodec::H265) {
         return reason.isEmpty()
                    ? QStringLiteral("当前系统没有可用的 H.265/HEVC 硬件编码器。")
                    : reason;
     }
-    if (m_codec == ExportVideoCodec::H264
-        && !m_catalog.hasAny(ExportVideoCodec::H264)) {
-        return QStringLiteral("当前系统没有可用的 H.264 编码器。");
+    if (m_codec == ExportVideoCodec::H264) {
+        return reason.isEmpty() ? QStringLiteral("当前系统没有可用的 H.264 编码器。")
+                                : reason;
     }
-    return {};
+    return reason.isEmpty() ? QStringLiteral("没有可用的视频编码器。") : reason;
 }
 
 bool ExportController::hasResumableCheckpoint() const
@@ -294,7 +315,9 @@ void ExportController::refreshValidation()
         emit h265AvailableChanged();
     }
     QString reason;
-    if (!available) {
+    if (!m_capabilitiesReady) {
+        reason = QStringLiteral("正在检测硬件编码器…");
+    } else if (!available) {
         m_catalog.selectEncoder(ExportVideoCodec::H265, true, nullptr, &reason);
         if (reason.isEmpty()) {
             reason = QStringLiteral(
@@ -352,6 +375,10 @@ void ExportController::refreshCapabilities()
     }
 
     if (m_catalogInjected) {
+        if (!m_capabilitiesReady) {
+            m_capabilitiesReady = true;
+            emit capabilitiesReadyChanged();
+        }
         refreshValidation();
         return;
     }
@@ -381,8 +408,18 @@ void ExportController::refreshCapabilities()
             [this, catalog] {
                 m_catalog = catalog;
                 m_detectRunning = false;
+                if (!m_capabilitiesReady) {
+                    m_capabilitiesReady = true;
+                    emit capabilitiesReadyChanged();
+                }
                 refreshValidation();
                 refreshResumeState();
+                // A start requested while the probe was running now has the
+                // catalog it was waiting for.
+                if (m_startPending) {
+                    m_startPending = false;
+                    startExport();
+                }
             },
             Qt::QueuedConnection);
     });
@@ -393,8 +430,24 @@ void ExportController::startExport()
     if (m_running)
         return;
 
+    // Validation intentionally stays silent while the first async probe runs.
+    // Defer this start instead of handing an empty catalog to the worker, then
+    // run it from the probe completion.
+    if (!m_capabilitiesReady) {
+        if (!m_detectRunning)
+            refreshCapabilities();
+        m_startPending = true;
+        setErrorText(QString());
+        setStageText(stageLabel(ExportStage::Preparing));
+        setStatusText(QStringLiteral("正在检测编码器，请稍候…"));
+        return;
+    }
+
     const QString errorText = validate();
     if (!errorText.isEmpty()) {
+        // A resume request must not survive a rejected start, or the next
+        // plain start would unexpectedly continue the old export.
+        m_resumeRequested = false;
         setErrorText(errorText);
         return;
     }
@@ -437,6 +490,10 @@ void ExportController::startExport()
     m_thread = new QThread;
     m_worker = new ExportWorker;
     m_worker->setCatalog(m_catalog);
+    // The pipeline needs the project path to reject an output that would
+    // overwrite the project file itself.
+    m_worker->setProjectPath(m_projectPath.isEmpty() ? m_document.filePath()
+                                                    : m_projectPath);
     m_worker->moveToThread(m_thread);
     connect(m_worker, &ExportWorker::progress, this,
             &ExportController::applyProgress, Qt::QueuedConnection);
@@ -452,8 +509,12 @@ void ExportController::startExport()
 
 void ExportController::cancelExport()
 {
-    if (!m_running)
+    if (!m_running) {
+        // A start queued behind the encoder probe can still be abandoned.
+        m_startPending = false;
+        m_resumeRequested = false;
         return;
+    }
     if (m_worker)
         m_worker->cancel();
     setStatusText(QStringLiteral("正在取消…已完成的片段会保留，可稍后继续。"));
@@ -759,6 +820,10 @@ void ExportController::setCatalogForTest(const EncoderCatalog &catalog)
 {
     m_catalog = catalog;
     m_catalogInjected = true;
+    if (!m_capabilitiesReady) {
+        m_capabilitiesReady = true;
+        emit capabilitiesReadyChanged();
+    }
 }
 
 void ExportController::setSyncRunnerForTest(SyncRunner runner)

@@ -89,6 +89,67 @@ TEST(ExportController, ValidationRejectsMissingOutputAndOddSize)
     EXPECT_TRUE(controller.outputPath().contains(QStringLiteral("server")));
 }
 
+TEST(ExportController, RejectsDestinationThatWouldOverwriteSource)
+{
+    ProjectDocument document;
+    Project project;
+    project.timeline.width = 320;
+    project.timeline.height = 180;
+    project.timeline.fps = Rational{30, 1};
+    Asset video;
+    video.id = QStringLiteral("v1");
+    video.path = QStringLiteral("D:/media/Source Video.MP4");
+    project.assets.append(video);
+    project.ensureDefaultTracks();
+    document.setProject(project, QStringLiteral("D:/projects/成片.mp4"));
+
+    ExportController controller(document, QString());
+    controller.setCatalogForTest(EncoderCatalog::withoutHardwareForTest());
+    controller.refreshCapabilities();
+    controller.applyPreset(QStringLiteral("h264-720p30"));
+
+    // Case-insensitive comparison: Windows would treat these as one file.
+    controller.setOutputPath(QStringLiteral("d:/MEDIA/source video.mp4"));
+    EXPECT_NE(controller.validate().indexOf(QStringLiteral("素材")), -1)
+        << controller.validate().toStdString();
+
+    controller.setOutputPath(QStringLiteral("D:/projects/成片.mp4"));
+    EXPECT_NE(controller.validate().indexOf(QStringLiteral("工程")), -1)
+        << controller.validate().toStdString();
+
+    // The SRT sidecar is guarded too, but only when it will be written.
+    controller.setOutputPath(QStringLiteral("D:/exports/movie.mp4"));
+    controller.setSrtPath(QStringLiteral("D:/media/source video.mp4"));
+    EXPECT_TRUE(controller.validate().isEmpty())
+        << "an unwritten SRT path must not block the export";
+    controller.setWriteSrt(true);
+    EXPECT_NE(controller.validate().indexOf(QStringLiteral("SRT")), -1)
+        << controller.validate().toStdString();
+
+    controller.setWriteSrt(false);
+    EXPECT_TRUE(controller.validate().isEmpty());
+}
+
+TEST(ExportController, ValidationStaysSilentUntilTheProbeCompletes)
+{
+    ProjectDocument document;
+    document.setProject(Project{});
+
+    ExportController controller(document, QString());
+    controller.applyPreset(QStringLiteral("h264-720p30"));
+    controller.setOutputPath(QStringLiteral("D:/tmp/pre-probe.mp4"));
+
+    // The first dialog open kicks off an async probe; before it finishes the
+    // catalog is empty and must not be reported as "no H.264 encoder".
+    EXPECT_FALSE(controller.capabilitiesReady());
+    EXPECT_TRUE(controller.validate().isEmpty())
+        << controller.validate().toStdString();
+
+    controller.setCatalogForTest(EncoderCatalog::withoutHardwareForTest());
+    EXPECT_TRUE(controller.capabilitiesReady());
+    EXPECT_TRUE(controller.validate().isEmpty());
+}
+
 TEST(ExportController, SyncRunnerDrivesProgressAndFinish)
 {
     ProjectDocument document;

@@ -591,8 +591,10 @@ void TimelineController::splitAtPlayhead()
     }
 
     // splitClip already acts on the whole linked group, so call it once per
-    // group instead of once per clip.
+    // group instead of once per clip. Collect the groups first so a split that
+    // cuts several independent clips becomes one undo step, not N.
     QSet<QString> handled;
+    QList<ClipLocator> groups;
     for (const ClipLocator &locator : locators) {
         const Clip *clip = findClip(locator.trackId, locator.clipId);
         if (!clip)
@@ -604,8 +606,15 @@ void TimelineController::splitAtPlayhead()
         if (handled.contains(key))
             continue;
         handled.insert(key);
-        m_editor.splitClip(locator.trackId, locator.clipId, m_positionUs);
+        groups.append(locator);
     }
+    const bool macro = groups.size() > 1;
+    if (macro)
+        m_document.undoStack()->beginMacro(QStringLiteral("分割片段"));
+    for (const ClipLocator &locator : groups)
+        m_editor.splitClip(locator.trackId, locator.clipId, m_positionUs);
+    if (macro)
+        m_document.undoStack()->endMacro();
 }
 
 void TimelineController::splitClipAtPlayhead(const QString &clipId)

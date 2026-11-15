@@ -99,6 +99,17 @@ ColumnLayout {
               : "未选择片段"
         color: "#999999"
     }
+    // Video clips have no audible volume/fades of their own; the linked A-track
+    // half owns them. Say so instead of showing disabled sliders with no hint.
+    Label {
+        objectName: "inspector-audio-hint"
+        visible: inspector.hasClip() && !inspector.isAudioClip()
+        text: "音量、淡入淡出等音频参数在链接的 A 轨片段上调整。"
+        color: "#9a9a9a"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
 
     // ------------------------------------------------------------------
     // 基础

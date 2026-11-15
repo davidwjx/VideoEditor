@@ -35,9 +35,13 @@ public:
         int failAtSegment = -1;
     };
 
+    // `projectPath` is the document file behind `project`, when it has one.
+    // The pipeline refuses an output/SRT destination equal to that file or to
+    // any imported asset, because finalization replaces the destination.
     ExportResult run(const Project &project, const ExportSettings &settings,
                      const EncoderCatalog &catalog, bool resume,
-                     const Hooks &hooks);
+                     const Hooks &hooks,
+                     const QString &projectPath = QString());
 };
 
 } // namespace VideoEditor

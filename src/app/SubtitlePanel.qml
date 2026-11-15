@@ -86,6 +86,8 @@ ColumnLayout {
             ToolTip.text: "更多字幕操作"
             Menu {
                 id: subtitleMenu
+                onOpened: App.beginPopup()
+                onClosed: App.endPopup()
                 MenuItem {
                     objectName: "subtitle-import-srt"
                     text: "导入 SRT…"

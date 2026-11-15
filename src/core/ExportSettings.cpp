@@ -8,6 +8,8 @@
 #include <QFileInfo>
 #include <QJsonValue>
 
+#include "Project.h"
+
 namespace VideoEditor {
 
 namespace {
@@ -340,6 +342,71 @@ QString validateExportSettings(const ExportSettings &settings,
     }
     if (settings.segmentTargetUs < 100'000 || settings.segmentTargetUs > 60'000'000)
         return QStringLiteral("分段长度必须在 0.1 到 60 秒之间。");
+    return {};
+}
+
+namespace {
+
+// Absolute, symlink-resolved form for comparisons. canonicalFilePath() is
+// empty for a path that does not exist yet, so fall back to absoluteFilePath().
+QString comparablePath(const QString &path)
+{
+    const QFileInfo info(path);
+    QString resolved = info.canonicalFilePath();
+    if (resolved.isEmpty())
+        resolved = info.absoluteFilePath();
+    return QDir::cleanPath(resolved);
+}
+
+bool sameFilePath(const QString &a, const QString &b)
+{
+    if (a.trimmed().isEmpty() || b.trimmed().isEmpty())
+        return false;
+    const QString left = comparablePath(a);
+    const QString right = comparablePath(b);
+#ifdef Q_OS_WIN
+    // Windows file systems are case-insensitive, so C:\Media\A.MP4 and
+    // c:\media\a.mp4 are the same file even when neither exists yet.
+    return left.compare(right, Qt::CaseInsensitive) == 0;
+#else
+    return left == right;
+#endif
+}
+
+} // namespace
+
+QString validateExportDestinations(const ExportSettings &settings,
+                                   const Project &project,
+                                   const QString &projectPath)
+{
+    const QString output = normalizedOutputPath(settings.outputPath);
+    if (!output.isEmpty()) {
+        for (const Asset &asset : project.assets) {
+            if (sameFilePath(output, asset.path)) {
+                return QStringLiteral("导出文件不能覆盖已导入的素材：%1")
+                    .arg(asset.path);
+            }
+        }
+        if (sameFilePath(output, projectPath)) {
+            return QStringLiteral("导出文件不能覆盖当前工程文件：%1")
+                .arg(projectPath);
+        }
+    }
+    if (settings.writeSrt) {
+        const QString srt = settings.srtPath.trimmed().isEmpty()
+                                ? defaultSrtPathFor(output)
+                                : settings.srtPath;
+        for (const Asset &asset : project.assets) {
+            if (sameFilePath(srt, asset.path)) {
+                return QStringLiteral("SRT 字幕文件不能覆盖已导入的素材：%1")
+                    .arg(asset.path);
+            }
+        }
+        if (sameFilePath(srt, projectPath)) {
+            return QStringLiteral("SRT 字幕文件不能覆盖当前工程文件：%1")
+                .arg(projectPath);
+        }
+    }
     return {};
 }
 

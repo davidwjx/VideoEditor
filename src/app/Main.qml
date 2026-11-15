@@ -26,6 +26,16 @@ ApplicationWindow {
                && item.cursorPosition !== undefined
     }
 
+    // Window-scoped Shortcuts stay armed regardless of focus, so a modal
+    // dialog or an open context menu would still receive timeline/transport
+    // keys. Gate every editing shortcut on this; a focused dialog button then
+    // handles Space itself instead of the global play toggle stealing it.
+    readonly property bool shortcutsBlocked: exportDialog.opened
+                                             || shortcutHelp.opened
+                                             || recoveryDialog.opened
+                                             || App.openPopupCount > 0
+    readonly property bool shortcutsEnabled: !textEditing && !shortcutsBlocked
+
     readonly property bool hasTimelineContent: Timeline.durationUs > 0
     readonly property bool clipSelected: Timeline.selectedClipId !== ""
     readonly property bool cueSelected: Timeline.selectedCueId !== ""
@@ -70,6 +80,8 @@ ApplicationWindow {
 
                 Menu {
                     id: projectMenu
+                    onOpened: App.beginPopup()
+                    onClosed: App.endPopup()
                     MenuItem {
                         objectName: "project-open"
                         text: "打开工程…  Ctrl+O"
@@ -255,6 +267,8 @@ ApplicationWindow {
                         }
                         Menu {
                             id: mediaMenu
+                            onOpened: App.beginPopup()
+                            onClosed: App.endPopup()
                             MenuItem {
                                 objectName: "media-menu-add"
                                 text: "加入时间线"
@@ -406,6 +420,8 @@ ApplicationWindow {
 
                         Menu {
                             id: contextMoreMenu
+                            onOpened: App.beginPopup()
+                            onClosed: App.endPopup()
                             MenuItem {
                                 objectName: "context-menu-link"
                                 text: "链接音视频"
@@ -471,6 +487,8 @@ ApplicationWindow {
 
                                 Menu {
                                     id: addTrackMenu
+                                    onOpened: App.beginPopup()
+                                    onClosed: App.endPopup()
                                     MenuItem {
                                         objectName: "track-add-video"
                                         text: "添加视频轨"
@@ -597,26 +615,28 @@ ApplicationWindow {
 
     // ---------------------------------------------------------------------
     // Shortcuts. Editing keys are disabled while a text editor has focus so
-    // typing "s", "-" or pasting text never edits the timeline.
+    // typing "s", "-" or pasting text never edits the timeline, and while a
+    // modal/popup is open so a focused dialog button keeps Space and the
+    // timeline behind the modal never receives Delete/Ctrl+B/arrows.
     // ---------------------------------------------------------------------
     Shortcut {
         sequence: "Ctrl+I"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: fileDialog.open()
     }
     Shortcut {
         sequence: "Ctrl+O"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: openProjectDialog.open()
     }
     Shortcut {
         sequence: "Ctrl+S"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: saveProjectDialog.open()
     }
     Shortcut {
         sequence: "Ctrl+E"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: {
             if (root.hasTimelineContent)
                 exportDialog.openDialog()
@@ -625,77 +645,77 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Ctrl+Z"
-        enabled: !root.textEditing && App.canUndo
+        enabled: root.shortcutsEnabled && App.canUndo
         onActivated: App.undo()
     }
     Shortcut {
         sequence: "Ctrl+Y"
-        enabled: !root.textEditing && App.canRedo
+        enabled: root.shortcutsEnabled && App.canRedo
         onActivated: App.redo()
     }
     Shortcut {
         sequence: "Ctrl+B"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.splitAtPlayhead()
     }
     Shortcut {
         sequence: "Delete"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.deleteSelection(root.rippleMode)
     }
     Shortcut {
         sequence: "Shift+Delete"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.deleteSelection(true)
     }
     Shortcut {
         sequence: "Space"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Preview.togglePlay()
     }
     Shortcut {
         sequence: "Left"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.stepFrames(-1)
     }
     Shortcut {
         sequence: "Right"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.stepFrames(1)
     }
     Shortcut {
         sequence: "Home"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.seekUs(0)
     }
     Shortcut {
         sequence: "End"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.seekUs(Timeline.durationUs)
     }
     Shortcut {
         sequence: "+"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: root.zoomBy(1.25)
     }
     Shortcut {
         sequence: "="
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: root.zoomBy(1.25)
     }
     Shortcut {
         sequence: "-"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: root.zoomBy(0.8)
     }
     Shortcut {
         sequence: "Ctrl+C"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.copySelected()
     }
     Shortcut {
         sequence: "Ctrl+V"
-        enabled: !root.textEditing
+        enabled: root.shortcutsEnabled
         onActivated: Timeline.pasteAtPlayhead()
     }
 

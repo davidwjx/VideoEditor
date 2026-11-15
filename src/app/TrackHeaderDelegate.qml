@@ -123,6 +123,8 @@ Rectangle {
 
                 Menu {
                     id: trackMenu
+                    onOpened: App.beginPopup()
+                    onClosed: App.endPopup()
                     MenuItem {
                         objectName: "track-up-" + header.trackId
                         text: "上移轨道"
