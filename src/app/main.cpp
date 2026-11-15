@@ -37,6 +37,9 @@ int main(int argc, char *argv[])
          QStringLiteral("Measure presented timeline frames and their video "
                         "layer count for five seconds; exit 0 at >=24 fps "
                         "with all three layers")});
+    parser.addOption({QStringLiteral("selftest-export"),
+                      QStringLiteral("Export the multi-track fixture project "
+                                     "with every available codec and exit")});
     parser.process(app);
 
     VideoEditor::AppController controller;
@@ -45,6 +48,16 @@ int main(int argc, char *argv[])
     // offer an older snapshot and could roll back edits saved after it.
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &controller,
                      &VideoEditor::AppController::discardRecoveryIfClean);
+
+    // The export self-test is a headless CLI gate: it renders through its own
+    // D3D11 device and never touches the QML scene graph, so not creating a
+    // window keeps it independent of an interactive desktop session.
+    if (parser.isSet(QStringLiteral("selftest-export"))) {
+        QTimer::singleShot(0, &controller, [&controller] {
+            controller.selftestExport();
+        });
+        return app.exec();
+    }
 
     qmlRegisterType<VideoEditor::VideoPreviewItem>("VideoEditor", 1, 0,
                                                   "VideoPreview");

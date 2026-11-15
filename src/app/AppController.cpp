@@ -1,12 +1,17 @@
 #include "AppController.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <thread>
 #include <utility>
+
+#include <objbase.h>
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QUuid>
 #include <QVariantList>
 #include <QVariantMap>
@@ -14,6 +19,8 @@
 #include "AudioEngine.h"
 #include "CodecSupport.h"
 #include "ExportController.h"
+#include "ExportEncoderCatalog.h"
+#include "ExportPipeline.h"
 #include "MediaListModel.h"
 #include "MediaProbe.h"
 #include "PreviewController.h"
@@ -688,6 +695,115 @@ void AppController::selftestPerf()
             QCoreApplication::exit(fpsOk && contentOk ? 0 : 3);
         });
     });
+}
+
+void AppController::selftestExport()
+{
+    // Reuse the M2 3V/2A/1S project builder; export is deliberately tested
+    // against the same timeline the preview performance gate uses.
+    buildTimelineSelftestProject();
+    Project project = m_document->project();
+    if (project.assets.size() < 3) {
+        qCritical("EXPORT_SELFTEST_FAIL missing fixtures");
+        QCoreApplication::exit(5);
+        return;
+    }
+    // Small enough that the full three-codec matrix stays well inside the
+    // CTest timeout even on a software-only machine.
+    project.timeline.width = 640;
+    project.timeline.height = 360;
+    project.timeline.fps = Rational{30, 1};
+
+    const QString root = QDir(QDir::tempPath())
+                             .filePath(QStringLiteral("videoeditor-export-selftest"));
+    QDir(root).removeRecursively();
+    if (!QDir().mkpath(root)) {
+        qCritical("EXPORT_SELFTEST_FAIL cannot create %s", qPrintable(root));
+        QCoreApplication::exit(5);
+        return;
+    }
+    // Encoder probing and Media Foundation need an MTA apartment. The Qt GUI
+    // thread is STA (OLE), where h264_mf refuses to open and leaves the
+    // process in a state that crashes the qwindows plugin at shutdown. Run
+    // both detection and the export on a dedicated MTA thread, exactly like
+    // ExportController + ExportWorker do in the real application.
+    bool ok = false;
+    std::thread worker([&ok, project, root] {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const EncoderCatalog catalog =
+            detectEncoders(project.timeline.width, project.timeline.height,
+                           project.timeline.fps);
+        QStringList done;
+        int64_t maxAvDiffUs = 0;
+        bool failed = false;
+        for (ExportVideoCodec codec : {ExportVideoCodec::Mpeg4Part2,
+                                       ExportVideoCodec::H264,
+                                       ExportVideoCodec::H265}) {
+            bool hardware = false;
+            QString reason;
+            const QString encoder =
+                catalog.selectEncoder(codec, true, &hardware, &reason);
+            if (encoder.isEmpty()) {
+                qInfo("EXPORT_SELFTEST_SKIP codec=%s reason=%s",
+                      qPrintable(exportCodecToString(codec)),
+                      qPrintable(reason));
+                continue;
+            }
+            ExportSettings settings;
+            settings.codec = codec;
+            settings.width = project.timeline.width;
+            settings.height = project.timeline.height;
+            settings.fps = project.timeline.fps;
+            settings.rateControl = ExportRateControl::Bitrate;
+            settings.bitrateKbps = 6000;
+            settings.outputPath = QDir(root).filePath(
+                exportCodecToString(codec) + QStringLiteral(".mp4"));
+            settings.segmentTargetUs = 1'000'000;
+            ExportPipeline pipeline;
+            const ExportResult result =
+                pipeline.run(project, settings, catalog, false, {});
+            if (!result.ok) {
+                qCritical("EXPORT_SELFTEST_FAIL codec=%s error=%s",
+                          qPrintable(exportCodecToString(codec)),
+                          qPrintable(result.error));
+                failed = true;
+                break;
+            }
+            const int64_t frameUs = 1'000'000 / 30;
+            const int64_t diff =
+                std::llabs(result.validation.audioDurationUs
+                           - result.validation.videoDurationUs);
+            // FFmpeg's headers pull in windows.h, whose max() macro would
+            // break std::max; qMax is unaffected.
+            maxAvDiffUs = qMax(maxAvDiffUs, diff);
+            if (diff > frameUs + 1) {
+                qCritical("EXPORT_SELFTEST_FAIL codec=%s avDiffUs=%lld",
+                          qPrintable(exportCodecToString(codec)),
+                          static_cast<long long>(diff));
+                failed = true;
+                break;
+            }
+            qInfo("EXPORT_SELFTEST_CODEC_OK codec=%s encoder=%s hardware=%d",
+                  qPrintable(exportCodecToString(codec)),
+                  qPrintable(result.encoderId),
+                  result.usedHardware ? 1 : 0);
+            done.append(exportCodecToString(codec));
+        }
+        if (!failed && done.isEmpty()) {
+            qCritical("EXPORT_SELFTEST_FAIL no encoder available");
+            failed = true;
+        }
+        if (!failed) {
+            qInfo("EXPORT_SELFTEST_OK codecs=%s maxAvDiffUs=%lld",
+                  qPrintable(done.join(QLatin1Char(','))),
+                  static_cast<long long>(maxAvDiffUs));
+        }
+        ok = !failed;
+        if (SUCCEEDED(com))
+            CoUninitialize();
+    });
+    worker.join();
+    QCoreApplication::exit(ok ? 0 : 5);
 }
 
 void AppController::setLastError(const QString &message)

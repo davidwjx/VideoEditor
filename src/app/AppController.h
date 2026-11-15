@@ -79,6 +79,9 @@ public:
     // --selftest-perf measures the presented-frame rate here.
     void selftestTimeline();
     void selftestPerf();
+    // --selftest-export: exports the same multi-track fixture project with
+    // every codec the machine actually has and exits 0 (5 on failure).
+    void selftestExport();
 
     // Called on clean shutdown: removes a stale autosave only when the open
     // document is clean and no startup recovery prompt is still pending.

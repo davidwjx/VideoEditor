@@ -202,3 +202,15 @@ set_tests_properties(timeline_perf PROPERTIES
   TIMEOUT 60
   CONFIGURATIONS Release
   LABELS "gpu;performance")
+
+# Export acceptance: builds the same 3V/2A/1S fixture project at 640x360p30
+# and exports it with every codec whose encoder the machine actually has,
+# then validates each finished MP4 (container/codecs/geometry/durations and a
+# decoded first frame). H.265 is skipped with a reason when no hardware encoder
+# is available. Exits 0 on success, 5 on any failure.
+add_test(NAME export_selftest COMMAND VideoEditor --selftest-export)
+set_tests_properties(export_selftest PROPERTIES
+  ENVIRONMENT "QSG_RHI_BACKEND=d3d11"
+  ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
+  TIMEOUT 180
+  LABELS "gpu;performance")

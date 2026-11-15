@@ -1,6 +1,6 @@
 # VideoEditor
 
-Windows 桌面视频编辑器（M2 多轨编辑、音频与字幕）。M1 提供媒体探测、工程模型与撤销/保存/崩溃恢复、D3D11 硬件解码与软件回退、Qt Quick 预览播放与高分辨率代理；M2 在此基础上加入多轨时间线编辑、原声/BGM 混音与波形、字幕轨与 SRT 双向导入导出、片段变速，以及 3 视频轨 + 2 音频轨 + 1 字幕轨的 1080p 实时预览性能门禁（三条视频轨均使用原生 1920×1080 测试源）。导出与 AI 功能属于后续里程碑。
+Windows 桌面视频编辑器（M2 多轨编辑、音频与字幕；M3 导出）。M1 提供媒体探测、工程模型与撤销/保存/崩溃恢复、D3D11 硬件解码与软件回退、Qt Quick 预览播放与高分辨率代理；M2 在此基础上加入多轨时间线编辑、原声/BGM 混音与波形、字幕轨与 SRT 双向导入导出、片段变速，以及 3 视频轨 + 2 音频轨 + 1 字幕轨的 1080p 实时预览性能门禁（三条视频轨均使用原生 1920×1080 测试源）；M3 加入 MPEG-4 Part 2 / H.264 / H.265 导出（硬件优先、断点续跑、成片校验）。AI 功能属于后续里程碑。
 
 - 平台：Windows x64，D3D11（不支持 OpenGL/Vulkan 预览路径）
 - 语言/框架：C++20、Qt 6.8（Qt Quick）
@@ -90,6 +90,54 @@ build/windows-x64-release/Release/VideoEditor.exe
 - 检查器提供 0.25x、0.5x、1x、1.5x、2x、4x，也可直接输入自定义速度（0.25–4x）；“保持音高”默认关闭，可勾选启用 OLA 时域伸缩。
 - 变速后片段时长按速度重新映射，仍可继续裁切、分割、移动与撤销；链接的音视频对保持同步。
 
+## M3 导出
+
+### 入口与选项
+
+- 主窗口工具栏“导出”打开导出对话框；导出在独立工作线程运行，显示阶段、百分比、编码速度与预计剩余时间，可随时“取消”。
+- 预设：匹配工程（H.264，跟随工程分辨率/帧率）、H.264 1080p30、H.264 720p30、H.265 1080p30（硬件）、MPEG-4 Part 2 1080p30。
+- 可调项：编码格式（H.264 / H.265 / MPEG-4 Part 2）、质量档（低/中/高，按分辨率与帧率推导码率）或显式码率（100–200000 kbps）、优先硬件编码、烧录字幕、同时导出 SRT、输出路径。
+- 分辨率范围 16×16–7680×4320，宽高必须为偶数；帧率 1–120 fps，输出为恒定帧率（CFR）。音频固定为 AAC-LC 48 kHz 双声道 192 kbps；无音频的工程也会写入一条静音 AAC 轨。
+- 输出默认写入系统“视频”目录下的 `导出_yyyyMMdd_HHmmss.mp4`；未填扩展名时自动补 `.mp4`。SRT 边车默认与输出同名（`.srt`，UTF-8），也可单独指定路径。
+- 字幕默认烧录进画面；关闭烧录仍可勾选“同时导出 SRT”，MP4 内不含字幕轨。
+
+### 编码器
+
+| 编码 | 路径 | 编码器 |
+|---|---|---|
+| MPEG-4 Part 2 | 软件 | FFmpeg 原生 `mpeg4`（始终可用） |
+| H.264 | 硬件优先 | NVIDIA NVENC `h264_nvenc` → Intel Quick Sync `h264_qsv` → AMD AMF `h264_amf` → Media Foundation 硬件 MFT `h264_mf` |
+| H.264 | 软件回退 | 默认 Media Foundation 软件 MFT `h264_mf`；可选 `libopenh264`（仅显式设置 `VIDEOEDITOR_H264_SOFTWARE=openh264`） |
+| H.265 / HEVC | 仅硬件 | NVIDIA NVENC `hevc_nvenc` → Intel Quick Sync `hevc_qsv` → AMD AMF `hevc_amf` → Media Foundation 硬件 `hevc_mf` |
+
+- 打开导出对话框时按目标分辨率/帧率逐个打开候选编码器并做 1–3 帧试编码，探测失败的编码器被跳过；后续调用使用进程内缓存。
+- H.264 默认“优先硬件编码”；取消勾选后优先选择软件编码（默认 MF 软件 MFT）。硬件探测失败时自动回退软件并提示“速度较慢”；没有可用 H.264 编码器时禁用“开始导出”。
+- H.265 只接受硬件编码器，绝不静默改用软件或其他编码。无可用硬件时对话框显示不可用原因（NVENC / Quick Sync / AMF / Media Foundation 均不可用），并禁用“开始导出”。
+- 硬件要求：NVENC 需要 NVIDIA 显卡与驱动，QSV 需要 Intel 核显、驱动与 MFX 运行时，AMF 需要 AMD 显卡与驱动，Media Foundation 需要 Windows 自带的 MF 组件。没有对应硬件时该编码器仅探测失败并被跳过，不影响其他编码。
+- 授权：应用只链接/分发 LGPL 版 FFmpeg；MPEG-4 为原生编码，Media Foundation H.264/HEVC 由 Windows 授权。不链接或分发 libx264/libx265。`libopenh264` 仅在操作者确认 Cisco 专利条款后通过环境变量显式启用，默认不选。
+
+### 断点续跑
+
+- 导出时在输出旁创建 `<输出文件>.parts/` 目录，保存已完成的 MP4 分段与 `checkpoint.json`。
+- 取消、导出失败或进程中断后，已完成的分段与检查点保留；重新打开导出对话框且工程、编码器与预设未变化时显示“继续上次导出”，从断点继续。
+- 修改工程、导出设置或输出路径会改变检查点哈希，续跑失效并从第一段重新导出；续跑前会逐段核对分段帧数，并确认硬件编码器的参数集（SPS/PPS）未变化，否则自动从头导出。
+- 成功导出后分段目录与检查点会被清理。
+
+### 成片校验
+
+- 封装完成后重新探测临时文件：容器为 MP4、视频编码/分辨率/帧率符合设置、音轨为 AAC 48 kHz 双声道、视频包数等于时间线帧数、音视频时长差不超过一帧，并实际解码首个视频帧。
+- 校验失败视为导出失败：删除临时文件，不写出最终文件（同名旧文件保持不变），保留可续跑的分段，并在对话框中显示中文错误。
+
+### M3 已知限制
+
+- 不支持 WMV/VC-1 导出；可导入并预览，但导出仅支持 MPEG-4 Part 2、H.264 与 H.265。
+- 不支持软字幕轨：字幕只能烧录进画面，或作为 SRT 边车导出。
+- 不支持 HDR 端到端：导出统一为 8-bit SDR（NV12 或 YUV420P）。
+- H.265 不提供软件编码；没有受支持的硬件时无法选择 H.265。
+- 音频固定 AAC-LC 48 kHz 双声道，不支持 5.1、其他采样率或无压缩音轨。
+- 输出为恒定帧率；不提供可变帧率封装。编码器不启用 B 帧，编码参数（GOP、预设、B 帧）不开放微调。
+- 1080p 硬件 H.264 ≥1× 实时的性能门禁依赖独显与交互式桌面会话；无硬件时相关测试会跳过。
+
 ## 测试
 
 ```bash
@@ -97,12 +145,19 @@ ctest --preset windows-x64-release --output-on-failure
 ```
 
 - `core_tests`、`media_tests`、`app_tests`、`ui_tests`、`render_tests` 为 GoogleTest 单元/集成测试，不需要桌面会话；`TimelineIntegration` 覆盖保存/重载与 100 步撤销，`AppController.SelftestTimelineBuildsThreeVideoTwoAudioOneSubtitleProject` 校验多轨自检工程结构。
-- `app_qml_tests`（CTest 名 `TimelineQml`）加载 `Main.qml` 并通过真实 Qt Quick 事件链验证拖拽、裁切等交互。
+- `export_tests`（标签 `gpu`）覆盖导出格式矩阵（三种编码 + AAC）、预览/离线合成分辨率一致性、字幕烧录与 SRT 边车、音频限幅、取消/续跑/磁盘不足/中文路径，以及 1080p30 硬件 H.264 ≥1× 实时门禁。需要 D3D11 设备；某编码器不可用时对应用例 `GTEST_SKIP`，没有硬件时 H.265 的“禁用并说明原因”仍会执行。
+- `app_qml_tests`（CTest 名 `TimelineQml`）加载 `Main.qml` 并通过真实 Qt Quick 事件链验证拖拽、裁切等交互；`export_qml_tests`（CTest 名 `ExportQml`）校验导出入口、预设/高级选项布局与 H.265 禁用原因。
 - `preview_*` 为端到端预览自检：打开各格式素材，在 Qt Quick 窗口中呈现首帧后退出。成功时通过 `qInfo` 打印 `SELFTEST_FRAME_OK`；GUI 子系统构建中该日志可能不会出现在终端，应以退出码 0 为准。它们需要交互式桌面会话与可用的 D3D11 设备；无桌面会话时通常由应用内部的 15 秒定时器以退出码 2 结束，而不是 CTest 的 30 秒超时。
 - `preview_selftest` 是 `h264.mp4` 的原有自检；`preview_h264` 为同一素材的格式自检别名。
 - `timeline_selftest`（`VideoEditor --selftest-timeline`）用测试素材构造 1920×1080 的 3 视频轨 + 2 音频轨 + 1 字幕轨工程，播放并在呈现 30 帧后以 0 退出，内部 15 秒超时以 2 退出。
 - `timeline_perf`（`VideoEditor --selftest-perf`，仅 Release，标签 `gpu;performance`）对同一工程预热 1 秒后统计 5 秒内实际呈现的帧数，打印 `TIMELINE_FPS=...` 与命中 3 层的帧数，低于 24 fps 或不足 90% 的帧包含全部 3 个视频层时以 3 退出；内部 20 秒超时以 4 退出。性能工程的视频源是真实原生 1920×1080 `perf1080.mp4`（三条视频轨各两次放置），不是从 640×360 素材放大。
 - 两者都需要交互式桌面会话与 D3D11。设置 `QT_ASSUME_STDERR_HAS_CONSOLE=1` 可在终端看到 GUI 程序打印的 `TIMELINE_FPS`、帧数、层数与工程统计。
+- `export_selftest`（`VideoEditor --selftest-export`，标签 `gpu;performance`，超时 180 秒）构造同一 3 视频轨 + 2 音频轨 + 1 字幕轨工程，改为 640×360p30 后依次用 MPEG-4 Part 2、H.264 与 H.265（有硬件时）导出到临时目录并校验成片，打印 `EXPORT_SELFTEST_OK codecs=... maxAvDiffUs=...`，任何编码失败或音画时差超过一帧时以 5 退出；无对应硬件时打印 `EXPORT_SELFTEST_SKIP` 并跳过该编码。该自检不创建 QML 窗口，但仍需要可用的 D3D11 设备；编码器探测与导出在独立 MTA 线程执行，与正式导出的线程模型一致。
+
+```bash
+# 只跑导出自检与导出相关测试（gtest 用例名以 Export 开头）
+ctest --preset windows-x64-release -R "export_selftest|Export" --output-on-failure
+```
 
 ## 测试素材
 

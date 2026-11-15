@@ -253,6 +253,21 @@ ExportTiming computeExportTiming(int64_t durationUs, const Rational &fps,
     timing.segmentSamples = aacFrames * 1024;
     timing.segmentCount = clampToInt(
         (timing.totalSamples + timing.segmentSamples - 1) / timing.segmentSamples);
+    // An audio tail shorter than one video frame can push the last sample
+    // boundary past the last frame PTS (for example a 10.032 s MP3 under a
+    // 10 s video at 30 fps lives 26.7 ms into its own segment). Such a
+    // trailing segment contains no video frame and can never produce a part.
+    // Fold empty trailing segments into the previous one; the audio track is
+    // encoded continuously from totalSamples and is unaffected.
+    while (timing.segmentCount > 1) {
+        int64_t begin = 0;
+        int64_t end = 0;
+        videoFrameRangeForSegment(timing, fps, timing.segmentCount - 1, &begin,
+                                  &end);
+        if (end > begin)
+            break;
+        --timing.segmentCount;
+    }
     return timing;
 }
 
@@ -266,7 +281,14 @@ void audioSampleRangeForSegment(const ExportTiming &timing, int segmentIndex,
                                 int64_t *sampleBegin, int64_t *sampleEnd)
 {
     const int64_t begin = int64_t(segmentIndex) * timing.segmentSamples;
-    const int64_t end = std::min(timing.totalSamples, begin + timing.segmentSamples);
+    // The final segment owns the whole remaining audio tail, including any
+    // samples that were folded in when an empty trailing segment was removed.
+    const bool lastSegment =
+        timing.segmentCount > 0 && segmentIndex == timing.segmentCount - 1;
+    const int64_t end =
+        lastSegment ? timing.totalSamples
+                    : std::min(timing.totalSamples,
+                               begin + timing.segmentSamples);
     if (sampleBegin)
         *sampleBegin = begin;
     if (sampleEnd)

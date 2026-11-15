@@ -113,6 +113,41 @@ TEST(ExportSettings, OneFrameTimelineStillHasOneFrameAndOneSegment)
     EXPECT_EQ(se, timing.totalSamples);
 }
 
+// A BGM file is often a few milliseconds longer than the last video frame
+// (MP3 padding). At 30 fps with one-second segments that tail can start a
+// segment after the final frame PTS; such a segment has no video and must be
+// folded into its predecessor instead of failing the export.
+TEST(ExportSettings, SubFrameAudioTailHasNoEmptyTrailingSegment)
+{
+    const Rational fps{30, 1};
+    const ExportTiming timing =
+        computeExportTiming(10'032'000, fps, 48000, 1'000'000);
+    ASSERT_EQ(timing.totalFrames, 301);
+    ASSERT_EQ(timing.totalSamples, 481'600);
+    EXPECT_EQ(timing.segmentCount, 10);
+    int64_t expected = 0;
+    for (int i = 0; i < timing.segmentCount; ++i) {
+        int64_t begin = 0;
+        int64_t end = 0;
+        videoFrameRangeForSegment(timing, fps, i, &begin, &end);
+        EXPECT_EQ(begin, expected) << "segment " << i;
+        EXPECT_GT(end, begin) << "segment " << i;
+        expected = end;
+    }
+    EXPECT_EQ(expected, timing.totalFrames);
+    // Audio still tiles the full timeline, with the folded tail in the last
+    // segment.
+    int64_t sample = 0;
+    for (int i = 0; i < timing.segmentCount; ++i) {
+        int64_t begin = 0;
+        int64_t end = 0;
+        audioSampleRangeForSegment(timing, i, &begin, &end);
+        EXPECT_EQ(begin, sample) << "segment " << i;
+        sample = end;
+    }
+    EXPECT_EQ(sample, timing.totalSamples);
+}
+
 TEST(ExportSettings, FirstFrameAtOrAfterUsesRoundedFramePts)
 {
     const Rational fps{30000, 1001};
