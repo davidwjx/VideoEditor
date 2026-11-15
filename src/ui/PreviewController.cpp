@@ -479,6 +479,7 @@ void PreviewController::onFrameReady(int slot, const QSize &size, int rotation,
 void PreviewController::onTimelineFrameReady(int slot, const QSize &size,
                                              qint64 timelineUs, quintptr h0,
                                              quintptr h1, quintptr h2,
+                                             int layerCount,
                                              quint64 generation)
 {
     if (generation != m_generation || m_mode != Mode::Timeline) {
@@ -506,6 +507,7 @@ void PreviewController::onTimelineFrameReady(int slot, const QSize &size,
 
     if (m_item) {
         m_lastTimelineSubmittedUs = timelineUs;
+        m_lastTimelineLayerCount = layerCount;
         m_item->setSharedHandles({h0, h1, h2});
         m_item->submitFrame(slot, size, 0, timelineUs);
     }
@@ -530,8 +532,12 @@ void PreviewController::onTimelineFrameSkipped(qint64 timelineUs,
 void PreviewController::onFramePresented(qint64 pts)
 {
     m_framePending = false;
-    if (m_mode == Mode::Timeline && pts == m_lastTimelineSubmittedUs)
-        emit timelineFramePresented(pts);
+    if (m_mode != Mode::Timeline || pts != m_lastTimelineSubmittedUs)
+        return;
+    emit timelineFramePresented(pts);
+    // Paired with the presented-frame signal so a self-test can assert that
+    // the frame rate was not achieved by presenting empty composites.
+    emit timelineFrameLayersPresented(m_lastTimelineLayerCount);
 }
 
 void PreviewController::onFinished()

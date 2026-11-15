@@ -42,8 +42,12 @@ public slots:
     void close();
 
 signals:
+    // layerCount is the number of video layers actually decoded and drawn into
+    // this frame; the self-tests use it to catch a black composite that still
+    // presents at a healthy frame rate.
     void frameReady(int slot, QSize size, qint64 timelineUs, quintptr handle0,
-                    quintptr handle1, quintptr handle2, quint64 generation);
+                    quintptr handle1, quintptr handle2, int layerCount,
+                    quint64 generation);
     // The ring slot is still held by the scene graph; the request was dropped
     // so the controller can release its single-in-flight gate.
     void frameSkipped(qint64 timelineUs, quint64 generation);

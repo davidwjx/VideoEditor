@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <memory>
+
 #include <QDir>
 #include <QFileInfo>
 #include <QTemporaryDir>
 #include <QUrl>
 
 #include "AppController.h"
+#include "AudioEngine.h"
+#include "AudioSink.h"
 #include "ProjectDocument.h"
 #include "ProjectSerializer.h"
 #include "TimelineController.h"
@@ -20,11 +24,20 @@ QString fixture(const QString &name)
     return QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR)).filePath(name);
 }
 
+// Keep integration tests off the real WASAPI device.
+AudioEngine::SinkFactory nullSinkFactory()
+{
+    return [](int sampleRate, int channels, QString *) {
+        return std::unique_ptr<IAudioSink>(
+            new NullAudioSink(sampleRate, channels));
+    };
+}
+
 } // namespace
 
 TEST(TimelineIntegration, EditsSurviveSaveAndReload)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     const QString video = fixture(QStringLiteral("h264.mp4"));
     const QString audio = fixture(QStringLiteral("bgm.mp3"));
     if (!QFileInfo::exists(video) || !QFileInfo::exists(audio))
@@ -87,7 +100,7 @@ TEST(TimelineIntegration, EditsSurviveSaveAndReload)
 
 TEST(TimelineIntegration, UndoHistoryDepthIsAtLeastOneHundred)
 {
-    AppController controller;
+    AppController controller(nullptr, {}, nullSinkFactory());
     const QString video = fixture(QStringLiteral("h264.mp4"));
     if (!QFileInfo::exists(video))
         GTEST_SKIP() << "missing h264.mp4";

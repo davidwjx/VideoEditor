@@ -80,7 +80,11 @@ TEST(AppController, ImportsAudioOnlyAsset)
 
 TEST(AppController, SelftestTimelineBuildsThreeVideoTwoAudioOneSubtitleProject)
 {
-    const QString video = fixture(QStringLiteral("h264.mp4"));
+    constexpr qint64 kPerfSourceDurationUs = 5'000'000;
+    constexpr int kVideoTracks = 3;
+    constexpr int kAudioTracks = 2;
+    constexpr int kClipsPerVideoTrack = 2;
+    const QString video = fixture(QStringLiteral("perf1080.mp4"));
     const QString tone = fixture(QStringLiteral("tone.wav"));
     const QString bgm = fixture(QStringLiteral("bgm.mp3"));
     if (!QFileInfo::exists(video) || !QFileInfo::exists(tone)
@@ -105,10 +109,13 @@ TEST(AppController, SelftestTimelineBuildsThreeVideoTwoAudioOneSubtitleProject)
         case TrackType::Video:
             ++videoTracks;
             videoClips += int(track.clips.size());
-            // Each video track repeats the two-second fixture so the perf gate
-            // never measures empty gaps with no video layers active.
-            for (const Clip &clip : track.clips)
+            // Each video track repeats the five-second 1080p fixture so the
+            // perf gate never measures empty gaps with no video layers active.
+            for (const Clip &clip : track.clips) {
+                EXPECT_EQ(clip.sourceOutUs - clip.sourceInUs,
+                          kPerfSourceDurationUs);
                 videoCoverageEndUs = qMax(videoCoverageEndUs, clip.timelineEndUs());
+            }
             break;
         case TrackType::Audio:
             ++audioTracks;
@@ -120,12 +127,12 @@ TEST(AppController, SelftestTimelineBuildsThreeVideoTwoAudioOneSubtitleProject)
         }
     }
 
-    EXPECT_EQ(videoTracks, 3);
-    EXPECT_EQ(audioTracks, 2);
+    EXPECT_EQ(videoTracks, kVideoTracks);
+    EXPECT_EQ(audioTracks, kAudioTracks);
     EXPECT_EQ(subtitleTracks, 1);
-    EXPECT_EQ(videoClips, 9);
-    EXPECT_GE(audioClips, 3);
-    EXPECT_GE(videoCoverageEndUs, 6'000'000);
+    EXPECT_EQ(videoClips, kVideoTracks * kClipsPerVideoTrack);
+    EXPECT_EQ(audioClips, kAudioTracks);
+    EXPECT_GE(videoCoverageEndUs, kClipsPerVideoTrack * kPerfSourceDurationUs);
     const Track *subtitle =
         controller.document()->trackById(QStringLiteral("track-s1"));
     ASSERT_NE(subtitle, nullptr);

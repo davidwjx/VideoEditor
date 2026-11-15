@@ -33,8 +33,9 @@ int main(int argc, char *argv[])
                         "30 presented frames")});
     parser.addOption(
         {QStringLiteral("selftest-perf"),
-         QStringLiteral("Measure presented timeline frames per second for five "
-                        "seconds; exit 0 when at least 24 fps")});
+         QStringLiteral("Measure presented timeline frames and their video "
+                        "layer count for five seconds; exit 0 at >=24 fps "
+                        "with all three layers")});
     parser.process(app);
 
     VideoEditor::AppController controller;

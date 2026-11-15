@@ -90,6 +90,9 @@ signals:
     void projectChanged();
     void selftestFramePresented();
     void timelineFramePresented();
+    // Number of video layers actually drawn into the timeline frame that was
+    // just presented. Used by --selftest-perf to reject empty composites.
+    void timelineFrameLayersPresented(int layerCount);
 
 private:
     void setLastError(const QString &message);
@@ -111,9 +114,14 @@ private:
     // Coalesces rapid edits into one preview/audio snapshot update so a drag
     // release or command burst does not queue a recomposition per command.
     QTimer m_timelineUpdateTimer;
-    // --selftest-perf counts presented timeline frames while the clock runs.
+    // --selftest-perf counts presented timeline frames while the clock runs,
+    // plus the layer content of those frames.
     QElapsedTimer m_perfClock;
     int m_perfFrames = 0;
+    int m_perfLayerSamples = 0;
+    int m_perfFullLayerFrames = 0;
+    int m_perfMinLayers = 0;
+    int m_perfExpectedLayers = 0;
     QString m_lastError;
     QString m_currentAssetId;
     bool m_recoveryAvailable = false;

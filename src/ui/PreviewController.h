@@ -85,6 +85,10 @@ signals:
     // Emitted after a timeline-composited frame has been presented by the
     // scene graph, for self-tests and performance gates.
     void timelineFramePresented(qint64 timelineUs);
+    // Presented-frame content evidence: how many video layers were actually
+    // decoded and drawn into the frame that was just presented. Test-only;
+    // no QML binding depends on it.
+    void timelineFrameLayersPresented(int layerCount);
     void error(QString message);
 
 private:
@@ -101,7 +105,7 @@ private:
 
     void onTimelineFrameReady(int slot, const QSize &size, qint64 timelineUs,
                               quintptr h0, quintptr h1, quintptr h2,
-                              quint64 generation);
+                              int layerCount, quint64 generation);
     void onTimelineError(const QString &message);
     void onTimelineFrameSkipped(qint64 timelineUs, quint64 generation);
     void onTimelineTick();
@@ -137,6 +141,7 @@ private:
     int64_t m_playStartUs = 0;
     int64_t m_lastTimelineFrame = -1;
     qint64 m_lastTimelineSubmittedUs = -1;
+    int m_lastTimelineLayerCount = 0;
     // Newest position requested from the compositor. Older completions must
     // not pull the paused playhead backwards after a seek/edit.
     qint64 m_requestedTimelineUs = -1;

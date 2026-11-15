@@ -64,6 +64,12 @@ if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE whi
   -c:v libx264 -pix_fmt yuv420p (Join-Path $out "highres.mp4")
 if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating highres.mp4: $ffmpeg" }
 
+# Native 1080p source for the M2 3V/2A/1S performance gate.
+& $ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=1920x1080:rate=30:duration=5" `
+  -c:v libx264 -preset medium -crf 32 -pix_fmt yuv420p -movflags +faststart `
+  (Join-Path $out "perf1080.mp4")
+if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed with exit code $LASTEXITCODE while generating perf1080.mp4: $ffmpeg" }
+
 Copy-Item (Join-Path $out "h264.mp4") (Join-Path $out "中文 文件名.mp4") -Force
 Set-Content -Path (Join-Path $out "corrupt.mp4") -Value "this is not a video" -Encoding Ascii
 

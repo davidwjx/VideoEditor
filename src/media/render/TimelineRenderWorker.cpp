@@ -223,6 +223,7 @@ void TimelineRenderWorker::renderFrame(qint64 timelineUs, quint64 generation)
     m_compositor->begin(m_ring->rtv(slot), true);
 
     QSet<QString> usedThisFrame;
+    int drawnLayers = 0;
     for (const VideoLayer &layer : frame.video) {
         // Missing assets become gaps/black, never a crash: the evaluator may
         // reference an asset that was removed or never resolved.
@@ -249,10 +250,10 @@ void TimelineRenderWorker::renderFrame(qint64 timelineUs, quint64 generation)
                          m_width, m_height);
         const float opacity =
             std::clamp(layer.transform.opacityMilli / 1000.0f, 0.0f, 1.0f);
-        if (!m_compositor->drawFrame(*decoded, rect, opacity, &error)
-            && !error.isEmpty()) {
+        if (m_compositor->drawFrame(*decoded, rect, opacity, &error))
+            ++drawnLayers;
+        else if (!error.isEmpty())
             reportOnce(QStringLiteral("draw:") + layer.clipId, error);
-        }
     }
 
     // No decoder may accumulate for clips that are no longer on screen.
@@ -290,7 +291,7 @@ void TimelineRenderWorker::renderFrame(qint64 timelineUs, quint64 generation)
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(0)),
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(1)),
                     reinterpret_cast<quintptr>(m_ring->sharedHandle(2)),
-                    m_generation);
+                    drawnLayers, m_generation);
 }
 
 } // namespace VideoEditor

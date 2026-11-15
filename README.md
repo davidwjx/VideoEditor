@@ -1,6 +1,6 @@
 # VideoEditor
 
-Windows 桌面视频编辑器（M2 多轨编辑、音频与字幕）。M1 提供媒体探测、工程模型与撤销/保存/崩溃恢复、D3D11 硬件解码与软件回退、Qt Quick 预览播放与高分辨率代理；M2 在此基础上加入多轨时间线编辑、原声/BGM 混音与波形、字幕轨与 SRT 双向导入导出、片段变速，以及 3 视频轨 + 2 音频轨 + 1 字幕轨的 1080p 实时预览性能门禁。导出与 AI 功能属于后续里程碑。
+Windows 桌面视频编辑器（M2 多轨编辑、音频与字幕）。M1 提供媒体探测、工程模型与撤销/保存/崩溃恢复、D3D11 硬件解码与软件回退、Qt Quick 预览播放与高分辨率代理；M2 在此基础上加入多轨时间线编辑、原声/BGM 混音与波形、字幕轨与 SRT 双向导入导出、片段变速，以及 3 视频轨 + 2 音频轨 + 1 字幕轨的 1080p 实时预览性能门禁（三条视频轨均使用原生 1920×1080 测试源）。导出与 AI 功能属于后续里程碑。
 
 - 平台：Windows x64，D3D11（不支持 OpenGL/Vulkan 预览路径）
 - 语言/框架：C++20、Qt 6.8（Qt Quick）
@@ -95,13 +95,13 @@ build/windows-x64-release/Release/VideoEditor.exe
 ctest --preset windows-x64-release --output-on-failure
 ```
 
-- `core_tests`、`media_tests`、`app_tests`、`ui_tests`、`render_tests` 为 GoogleTest 单元/集成测试，不需要桌面会话；`TimelineIntegration` 覆盖保存/重载、100 步撤销与多轨自检工程结构。
+- `core_tests`、`media_tests`、`app_tests`、`ui_tests`、`render_tests` 为 GoogleTest 单元/集成测试，不需要桌面会话；`TimelineIntegration` 覆盖保存/重载与 100 步撤销，`AppController.SelftestTimelineBuildsThreeVideoTwoAudioOneSubtitleProject` 校验多轨自检工程结构。
 - `app_qml_tests`（CTest 名 `TimelineQml`）加载 `Main.qml` 并通过真实 Qt Quick 事件链验证拖拽、裁切等交互。
 - `preview_*` 为端到端预览自检：打开各格式素材，在 Qt Quick 窗口中呈现首帧后退出。成功时通过 `qInfo` 打印 `SELFTEST_FRAME_OK`；GUI 子系统构建中该日志可能不会出现在终端，应以退出码 0 为准。它们需要交互式桌面会话与可用的 D3D11 设备；无桌面会话时通常由应用内部的 15 秒定时器以退出码 2 结束，而不是 CTest 的 30 秒超时。
 - `preview_selftest` 是 `h264.mp4` 的原有自检；`preview_h264` 为同一素材的格式自检别名。
 - `timeline_selftest`（`VideoEditor --selftest-timeline`）用测试素材构造 1920×1080 的 3 视频轨 + 2 音频轨 + 1 字幕轨工程，播放并在呈现 30 帧后以 0 退出，内部 15 秒超时以 2 退出。
-- `timeline_perf`（`VideoEditor --selftest-perf`，仅 Release，标签 `gpu;performance`）对同一工程统计 5 秒内实际呈现的帧数，打印 `TIMELINE_FPS=...`，低于 24 fps 以 3 退出。两者都需要交互式桌面会话与 D3D11。
-- 设置 `QT_ASSUME_STDERR_HAS_CONSOLE=1` 可在终端看到 GUI 程序打印的 `TIMELINE_FPS`、帧数与工程统计。
+- `timeline_perf`（`VideoEditor --selftest-perf`，仅 Release，标签 `gpu;performance`）对同一工程预热 1 秒后统计 5 秒内实际呈现的帧数，打印 `TIMELINE_FPS=...` 与命中 3 层的帧数，低于 24 fps 或不足 90% 的帧包含全部 3 个视频层时以 3 退出；内部 20 秒超时以 4 退出。性能工程的视频源是真实原生 1920×1080 `perf1080.mp4`（三条视频轨各两次放置），不是从 640×360 素材放大。
+- 两者都需要交互式桌面会话与 D3D11。设置 `QT_ASSUME_STDERR_HAS_CONSOLE=1` 可在终端看到 GUI 程序打印的 `TIMELINE_FPS`、帧数、层数与工程统计。
 
 ## 测试素材
 
@@ -125,10 +125,10 @@ VC-1 自动测试使用 WMV2 容器样本；如拿到真实 VC-1 素材，可放
 
 - 变速使用 20 ms Hann 窗、50% 重叠的 OLA 时域伸缩，属于实时预览质量；强瞬态素材可能有轻微梳状感。M3 导出会替换为更高质量的离线实现。
 - 不提供速度曲线与光流插帧；变速为片段级 0.25–4x。
-- 音量关键帧与逐条字幕位置已进入工程模型、混音器与序列化，但 M2 界面不提供编辑入口。
+- 音量关键帧与逐条字幕位置已进入工程模型、混音器与序列化，但 M2 界面不提供编辑入口；这是 M2 的已知后续任务，不影响已有工程数据的保存与预览。
 - 音频输出为 WASAPI 共享模式；无设备或设备被独占时静音预览，不能自动切换到其他设备。
 - 硬件解码路径只接受 NV12 8-bit；P010/10-bit 自动回退软件解码并转换为 8-bit 预览。
-- 时间码为非丢帧时间码；不做丢帧时间码显示。
+- 时间码由 `TimelineController` 按工程 FPS 生成，并遵循 `dropFrameTimecode` 工程设置；M2 界面暂不提供丢帧时间码开关。
 - WMV/VC-1 解码由 FFmpeg 提供；自动测试使用 WMV2 容器样本，VC-1 需用真实样本（`tests/fixtures/manual/vc1.wmv`）验证。
 - 代理使用 MJPEG 全帧内编码，存放在本地缓存目录，可删除重建；目前不提供代理保留/清理策略。
 - 应用随包分发 LGPL 版 `ffmpeg.exe` 与 FFmpeg DLL，用于代理生成；该构建不含 libx264/libx265，素材生成需另行使用 GPL FFmpeg CLI。
@@ -136,13 +136,13 @@ VC-1 自动测试使用 WMV2 容器样本；如拿到真实 VC-1 素材，可放
 
 ## 手动验收清单（spec §11.2）
 
-以下项目需要交互式桌面会话与真实音频设备，自动化测试只能覆盖其模型/引擎部分：
+以下项目需要交互式桌面会话、人工目视/听音与硬件操作。**Task 12 未执行这六项人工检查**，只完成了自动化等价覆盖（见任务报告）：
 
 1. 用 `h264.mp4` + `bgm.mp3` 做 3 轨片段，播放 60 秒；肉眼与逐帧检查无黑帧、无音画漂移。
 2. 对同一片段分别设 0.25x 与 4x，各做一次裁切、分割、撤销；确认时长与画面正常。
 3. BGM 设音量 200%、淡入 2 秒、淡出 2 秒、声像 -50；确认无削波（检查器/日志峰值 ≤ 0.98）。
 4. 导入 `tests/fixtures` 外的真实 SRT（含中文、CRLF、BOM），导出后用播放器打开，确认时间轴一致。
-5. 保存工程、重启应用、重新打开，确认轨道、片段、字幕、变速与音量关键帧全部保留。
+5. 保存工程、重启应用、重新打开，确认轨道、片段、字幕与变速参数全部保留。（音量关键帧在 M2 界面不可创建，只需确认已有工程中的关键帧数据保存后仍在。）
 6. 拔掉音频设备（或禁用默认输出）后播放，确认提示“无音频输出，静音预览”且预览继续。
 
 ## 缓存与恢复文件位置

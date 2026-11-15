@@ -89,6 +89,17 @@ AppController::AppController(QObject *parent, QString recoveryPath,
                 if (m_perfClock.isValid())
                     ++m_perfFrames;
             });
+    connect(m_preview, &PreviewController::timelineFrameLayersPresented, this,
+            [this](int layerCount) {
+                emit timelineFrameLayersPresented(layerCount);
+                if (!m_perfClock.isValid())
+                    return;
+                ++m_perfLayerSamples;
+                if (layerCount >= m_perfExpectedLayers)
+                    ++m_perfFullLayerFrames;
+                if (m_perfLayerSamples == 1 || layerCount < m_perfMinLayers)
+                    m_perfMinLayers = layerCount;
+            });
     connect(m_preview, &PreviewController::error, this,
             &AppController::setLastError);
     // The preview clock is the timeline playhead while playing. seekUs() only
@@ -425,7 +436,10 @@ void AppController::requestWaveforms()
 void AppController::buildTimelineSelftestProject()
 {
     const QString root = QStringLiteral(VIDEOEDITOR_FIXTURE_DIR);
-    importUrls({QUrl::fromLocalFile(QDir(root).filePath(QStringLiteral("h264.mp4"))),
+    // Native 1080p source so the performance gate stresses real decode load,
+    // not only 1080p compositing of upscaled 640x360 material.
+    importUrls({QUrl::fromLocalFile(
+                    QDir(root).filePath(QStringLiteral("perf1080.mp4"))),
                 QUrl::fromLocalFile(QDir(root).filePath(QStringLiteral("tone.wav"))),
                 QUrl::fromLocalFile(QDir(root).filePath(QStringLiteral("bgm.mp3")))});
     if (m_document->project().assets.size() < 3) {
@@ -457,19 +471,20 @@ void AppController::buildTimelineSelftestProject()
             subtitleTrackId = track.id;
     }
 
-    // h264.mp4 is two seconds long. Repeat the source on every video track so
-    // all three layers stay active for the whole five-second perf window; a
-    // gate that only sees three layers for two seconds could average a bad
-    // three-layer frame rate away with fast empty frames.
-    const auto addVideoClip = [this, &videoId](const QString &trackId,
-                                               const QString &id, int index,
-                                               int scaleMilli, int offsetX) {
+    // perf1080.mp4 is five seconds long. Place it twice on every video track
+    // so all three layers stay active for the whole warm-up + measurement
+    // window (1 s + 5 s); a gate that only saw three layers briefly could
+    // average a bad three-layer frame rate away with fast empty frames.
+    const qint64 videoDurationUs = m_document->project().assets.at(0).info.durationUs;
+    const auto addVideoClip = [this, &videoId, videoDurationUs](
+                                  const QString &trackId, const QString &id,
+                                  int index, int scaleMilli, int offsetX) {
         Clip clip;
         clip.id = id;
         clip.assetId = videoId;
         clip.sourceInUs = 0;
-        clip.sourceOutUs = 2'000'000;
-        clip.timelineStartUs = index * 2'000'000;
+        clip.sourceOutUs = videoDurationUs;
+        clip.timelineStartUs = qint64(index) * videoDurationUs;
         clip.transform.scaleMilli = scaleMilli;
         clip.transform.offsetXPermille = offsetX;
         m_timeline->addClipForTest(trackId, clip);
@@ -479,16 +494,14 @@ void AppController::buildTimelineSelftestProject()
         const QString v1 = videoTracks.at(videoTracks.size() - 3);
         const QString v2 = videoTracks.at(videoTracks.size() - 2);
         const QString v3 = videoTracks.last();
-        for (int i = 1; i < 3; ++i)
-            addVideoClip(v1, QStringLiteral("perf-v1-%1").arg(i), i, 1000, 0);
-        for (int i = 0; i < 3; ++i) {
+        addVideoClip(v1, QStringLiteral("perf-v1-1"), 1, 1000, 0);
+        for (int i = 0; i < 2; ++i) {
             addVideoClip(v2, QStringLiteral("perf-v2-%1").arg(i), i, 500, 300);
             addVideoClip(v3, QStringLiteral("perf-v3-%1").arg(i), i, 500, -300);
         }
     }
 
-    // A1 carries the original h264 audio (linked by addAssetToTimeline) plus
-    // the tone fixture; A2 carries the BGM so both can be mixed independently.
+    // Two audio tracks: tone on A1, BGM on A2, so both are mixed independently.
     m_timeline->addAssetToTimeline(toneId, QStringLiteral("track-a1"), 0);
     if (audioTracks.size() >= 2)
         m_timeline->addAssetToTimeline(bgmId, audioTracks.last(), 0);
@@ -554,25 +567,64 @@ void AppController::selftestTimeline()
 void AppController::selftestPerf()
 {
     // Same 3V/2A/1S project as --selftest-timeline. The gate counts frames the
-    // scene graph actually presented over five seconds; compositor throughput,
+    // scene graph actually presented over five seconds and checks that those
+    // frames really contain the expected video layers; compositor throughput,
     // decode and audio mixing all run for real.
     m_perfFrames = 0;
+    m_perfLayerSamples = 0;
+    m_perfFullLayerFrames = 0;
+    m_perfMinLayers = 0;
+    m_perfExpectedLayers = 0;
+    m_perfClock.invalidate();
     selftestTimeline();
     if (m_document->project().assets.size() < 3) {
         qCritical("TIMELINE_PERF_MISSING_FIXTURES");
         QCoreApplication::exit(3);
         return;
     }
+    for (const Track &track : m_document->project().tracks) {
+        if (track.type == TrackType::Video)
+            ++m_perfExpectedLayers;
+    }
 
-    m_perfClock.start();
-    QTimer::singleShot(5000, this, [this] {
-        const qint64 elapsedMs = m_perfClock.elapsed();
-        m_perfClock.invalidate();
-        const double seconds = elapsedMs > 0 ? elapsedMs / 1000.0 : 0.0;
-        const double fps = seconds > 0.0 ? m_perfFrames / seconds : 0.0;
-        qInfo("TIMELINE_FPS=%.1f FRAMES=%d ELAPSED_MS=%lld", fps, m_perfFrames,
-              static_cast<long long>(elapsedMs));
-        QCoreApplication::exit(fps >= 24.0 ? 0 : 3);
+    // Guard against a stalled event loop or a renderer that never presents:
+    // the normal path exits well before this.
+    QTimer::singleShot(20000, this, [this] {
+        qCritical("TIMELINE_PERF_TIMEOUT");
+        QCoreApplication::exit(4);
+    });
+
+    // Warm up for one second so decoder pools, the D3D11 device and the
+    // presentation timer reach steady state before measurement starts.
+    QTimer::singleShot(1000, this, [this] {
+        m_perfFrames = 0;
+        m_perfLayerSamples = 0;
+        m_perfFullLayerFrames = 0;
+        m_perfMinLayers = 0;
+        m_perfClock.start();
+        QTimer::singleShot(5000, this, [this] {
+            const qint64 elapsedMs = m_perfClock.elapsed();
+            m_perfClock.invalidate();
+            const double seconds = elapsedMs > 0 ? elapsedMs / 1000.0 : 0.0;
+            const double fps = seconds > 0.0 ? m_perfFrames / seconds : 0.0;
+            const bool fpsOk = fps >= 24.0;
+            // Every presented frame must carry layer-count evidence, and at
+            // least 90% of measured frames must contain all expected layers.
+            const bool samplesOk = m_perfFrames > 0
+                                   && m_perfLayerSamples == m_perfFrames;
+            const bool contentOk =
+                samplesOk && m_perfFullLayerFrames * 10 >= m_perfFrames * 9;
+            qInfo("TIMELINE_FPS=%.1f FRAMES=%d ELAPSED_MS=%lld "
+                  "LAYER_SAMPLES=%d FULL_LAYER_FRAMES=%d EXPECTED_LAYERS=%d "
+                  "MIN_LAYERS=%d",
+                  fps, m_perfFrames, static_cast<long long>(elapsedMs),
+                  m_perfLayerSamples, m_perfFullLayerFrames,
+                  m_perfExpectedLayers, m_perfMinLayers);
+            qInfo("TIMELINE_PERF_%s fps=%.1f content=%s",
+                  fpsOk && contentOk ? "OK" : "FAILED", fps,
+                  contentOk ? "ok" : "failed");
+            QCoreApplication::exit(fpsOk && contentOk ? 0 : 3);
+        });
     });
 }
 
