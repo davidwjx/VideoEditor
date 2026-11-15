@@ -24,6 +24,9 @@ add_executable(core_tests
   core/ExportSettingsTest.cpp
   core/RemovalSerializerTest.cpp
   core/RemovalCommandTest.cpp
+  core/MaskCodecTest.cpp
+  core/MaskSidecarStoreTest.cpp
+  core/RemovalCacheKeyTest.cpp
 )
 target_include_directories(core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(core_tests PRIVATE videoeditor_core GTest::gtest_main Qt6::Core)
@@ -47,6 +50,7 @@ add_executable(media_tests
   media/ExportSegmentTest.cpp
   media/ExportDiskSpaceTest.cpp
   media/ExportPipelineTest.cpp
+  media/RemovalCacheTest.cpp
   TestMain.cpp)
 target_include_directories(media_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(media_tests PRIVATE

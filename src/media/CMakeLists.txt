@@ -36,6 +36,8 @@ add_library(videoeditor_media STATIC
   proxy/ProxyService.cpp
   cache/CacheStore.h
   cache/CacheStore.cpp
+  cache/RemovalCache.h
+  cache/RemovalCache.cpp
   audio/AudioBuffer.h
   audio/AudioClock.h
   audio/AudioSink.h

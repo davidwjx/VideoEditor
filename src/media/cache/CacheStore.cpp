@@ -35,6 +35,37 @@ bool CacheStore::ensureProxyDir(QString *error) const
     return true;
 }
 
+QString CacheStore::removalRoot() const
+{
+    return QDir(m_root).filePath(QStringLiteral("removal"));
+}
+
+QString CacheStore::removalPath(const QString &cacheKey) const
+{
+    return QDir(removalRoot()).filePath(cacheKey);
+}
+
+bool CacheStore::ensureRemovalDir(QString *error) const
+{
+    if (!QDir().mkpath(removalRoot())) {
+        setError(error, QStringLiteral("无法创建 AI 消除缓存目录。"));
+        return false;
+    }
+    return true;
+}
+
+bool CacheStore::clearRemoval(QString *error) const
+{
+    QDir dir(removalRoot());
+    if (!dir.exists())
+        return true;
+    if (!dir.removeRecursively()) {
+        setError(error, QStringLiteral("无法清理 AI 消除缓存目录。"));
+        return false;
+    }
+    return true;
+}
+
 qint64 CacheStore::sizeOnDisk(QString *error) const
 {
     Q_UNUSED(error);

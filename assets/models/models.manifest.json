@@ -140,6 +140,68 @@
       "notes": "fp16 bundle. memory_attention requires explicit memory-bank shapes; with the default dynamic dimensions the graph fails at a Reshape. DML parity is 2.6e-3 to 2.35e-2, above the 1e-3 gate."
     },
     {
+      "id": "efficienttam-ti-512-fp32",
+      "family": "tracking",
+      "version": "0.8.0-fp32",
+      "codeLicense": "Apache-2.0",
+      "weightsLicense": "Apache-2.0",
+      "trainingData": [
+        "SA-V",
+        "SA-1B"
+      ],
+      "commercialApproved": false,
+      "technicalStatus": "session_create_pass; parity_pass; offline_cpu_keyframe",
+      "sourceUrl": "https://huggingface.co/egordm/efficienttam-ti-512",
+      "sourceRevision": "ef8a773fc653fc46a2e87dd182cac0f8ef980cc1",
+      "recommendedDeployment": "CPU fp32 keyframes; 45 ms/keyframe (~22 fps), 0.879 mask IoU vs SAM 2 1024²",
+      "files": {
+        "image_encoder": {
+          "path": "efficienttam_ti_512_fp32/image_encoder.onnx",
+          "sha256": "174545be260d1946e1a547216e6cd5174431ae8a6c34c33cb53f84e5902af1f7"
+        },
+        "prompt_encoder": {
+          "path": "efficienttam_ti_512_fp32/prompt_encoder.onnx",
+          "sha256": "6391ae753283ec36c73904dff41eea0c35d57f142dcb73e512a785b8994d6517"
+        },
+        "mask_decoder": {
+          "path": "efficienttam_ti_512_fp32/mask_decoder.onnx",
+          "sha256": "70fb9990d612161efeacbc6bd834d5ec2cee7a98f4f000dc1a2d4620ac95c1a2"
+        },
+        "memory_attention": {
+          "path": "efficienttam_ti_512_fp32/memory_attention.onnx",
+          "sha256": "e94c24ee72ed05ec97bf6c26f250d91f5a56cc49ffd51e5fed5ee4119d242308"
+        },
+        "memory_encoder": {
+          "path": "efficienttam_ti_512_fp32/memory_encoder.onnx",
+          "sha256": "7f635bbfffcffbc0862a2fb4ef30edcbd2d717ebf93362388211d6b18c9e8420"
+        },
+        "bundle": {
+          "path": "efficienttam_ti_512_fp32/bundle.toml",
+          "sha256": "fef4423f1791650f38a8982398e99b50e8331b8e29328f7641b525b0b5fb0a92"
+        },
+        "maskmem_tpos_enc": {
+          "path": "efficienttam_ti_512_fp32/maskmem_tpos_enc.npy",
+          "sha256": "eb408427700661f19dca81119ad71b19d088dacdb27c824cf3a407365579be57"
+        },
+        "no_obj_ptr": {
+          "path": "efficienttam_ti_512_fp32/no_obj_ptr.npy",
+          "sha256": "189c46a46ecd991ab8ee797c05ef019555c23fab2cba40b658222e5ece0ed7b9"
+        }
+      },
+      "io": {
+        "imageInput": "image",
+        "imageEmbedding": "vision_features",
+        "imagePosEmbedding": "vision_pos_enc",
+        "maskLogits": "masks",
+        "iouScore": "iou_pred",
+        "objectScore": "object_score_logits",
+        "promptEncoder": "prompt_encoder",
+        "memoryAttentionMemory": "spatial_memory",
+        "memoryAttentionPointers": "obj_ptr"
+      },
+      "notes": "fp32 bundle from the same repository as the rejected fp16 bundle. All five components pass parity (worst mask_decoder 3.1e-4). fp16 must not be used. memory_attention memory bank is static at 7168 tokens. Restricted to CPU keyframe segmentation in the offline scope."
+    },
+    {
       "id": "migan-512",
       "family": "inpainting",
       "version": "2.0.0",
@@ -210,6 +272,41 @@
         "note": "Channels 0-2 RGB 0-1 with the hole zeroed; channel 3 is the binary mask. Fixed 512x512."
       },
       "notes": "DirectML cannot initialise this graph on the tested AMD iGPU (E_INVALIDARG). CPU is 1.63 fps with the preferred graph, below the 2 fps quality gate."
+    },
+    {
+      "id": "lama-512-int8-allowzero0",
+      "family": "inpainting",
+      "version": "1.0.0-int8-allowzero0",
+      "codeLicense": "Apache-2.0",
+      "weightsLicense": "Apache-2.0",
+      "trainingData": [
+        "Places2"
+      ],
+      "commercialApproved": false,
+      "technicalStatus": "session_create_pass; cpu_speed_ok; recommended_offline_cpu",
+      "sourceUrl": "https://huggingface.co/g-ronimo/lama",
+      "sourceRevision": "386a67cedf9b8bb4fe76798c10c8d77abc0a5cc8",
+      "recommendedDeployment": "CPU int8 quality path; 532.6 ms (~1.88 fps), PSNR within 0.2 dB of fp32",
+      "files": {
+        "model": {
+          "path": "lama_512/lama_512_int8_allowzero0.onnx",
+          "sha256": "2a875d42de7b31779de731cb390903cf3ba29b7615a2b23f5f6976c293e21407"
+        }
+      },
+      "evaluationVariants": [
+        {
+          "path": "lama_512/lama_512_fp32_allowzero0.onnx",
+          "sha256": "793c6b49f47e192abebfdf52a17def9e630895c37241aa7bb731f84e812e18d6",
+          "result": "cpu_p50_541.8ms; fp32 reference variant"
+        }
+      ],
+      "io": {
+        "imageInput": "input",
+        "output": "output",
+        "inputChannels": 4,
+        "note": "Channels 0-2 RGB 0-1 with the hole zeroed; channel 3 is the binary mask. Fixed 512x512."
+      },
+      "notes": "LaMa graph with the 72 Reshape nodes patched from allowzero=1 to 0, which is bit-identical on CPU (maxRel = 0) and lets DirectML initialise. DML still runs slower than CPU (1422 ms int8), so the recommended offline quality path is int8 CPU at 62 MB. The mask contract is 1 = hole, 0 = known, with the hole zeroed in the image."
     }
   ],
   "notEvaluated": [

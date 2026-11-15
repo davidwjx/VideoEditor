@@ -14,6 +14,14 @@ add_library(videoeditor_core STATIC
   Project.cpp
   Removal.h
   Removal.cpp
+  MaskCodec.h
+  MaskCodec.cpp
+  MaskEditor.h
+  MaskEditor.cpp
+  MaskSidecarStore.h
+  MaskSidecarStore.cpp
+  RemovalCacheKey.h
+  RemovalCacheKey.cpp
   ProjectSerializer.h
   ProjectSerializer.cpp
   ProjectStore.h
