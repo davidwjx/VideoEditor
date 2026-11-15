@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <QByteArray>
 #include <QString>
+#include <QtGlobal>
 
 #include "ExportEncoderCatalog.h"
 
@@ -97,4 +99,82 @@ TEST(ExportEncoder, EncoderKeysDistinguishHardwareAndSoftwareMf)
     EXPECT_TRUE(catalog.findByKey(hardware.key())->hardware);
     ASSERT_NE(catalog.findByKey(software.key()), nullptr);
     EXPECT_FALSE(catalog.findByKey(software.key())->hardware);
+}
+
+TEST(ExportEncoder, OpenH264IsNotASoftwareFallbackWithoutOverride)
+{
+    // Licensing: OpenH264 may only be used after an explicit opt-in.
+    const QByteArray original = qgetenv("VIDEOEDITOR_H264_SOFTWARE");
+    qunsetenv("VIDEOEDITOR_H264_SOFTWARE");
+
+    EncoderCatalog catalog;
+    EncoderDescriptor openh264;
+    openh264.id = QStringLiteral("libopenh264");
+    openh264.codec = ExportVideoCodec::H264;
+    openh264.hardware = false;
+    openh264.available = true;
+    catalog.encoders = {openh264};
+
+    bool isHardware = true;
+    QString reason;
+    EXPECT_TRUE(catalog.selectEncoder(ExportVideoCodec::H264, false,
+                                      &isHardware, &reason)
+                    .isEmpty());
+    EXPECT_FALSE(isHardware);
+    EXPECT_FALSE(reason.isEmpty());
+    EXPECT_NE(reason.indexOf(QStringLiteral("OpenH264")), -1);
+    // Hardware preference must not silently fall back to OpenH264 either.
+    EXPECT_TRUE(catalog.selectEncoder(ExportVideoCodec::H264, true,
+                                      &isHardware, &reason)
+                    .isEmpty());
+    EXPECT_FALSE(isHardware);
+
+    qputenv("VIDEOEDITOR_H264_SOFTWARE", QByteArrayLiteral("openh264"));
+    EXPECT_EQ(catalog.selectEncoder(ExportVideoCodec::H264, false, &isHardware,
+                                    &reason),
+              QStringLiteral("libopenh264"));
+    EXPECT_FALSE(isHardware);
+
+    if (original.isNull()) {
+        qunsetenv("VIDEOEDITOR_H264_SOFTWARE");
+    } else {
+        qputenv("VIDEOEDITOR_H264_SOFTWARE", original);
+    }
+}
+
+TEST(ExportEncoder, HasHardwareReflectsOnlyAvailableHardwareRows)
+{
+    EncoderCatalog catalog = EncoderCatalog::withoutHardwareForTest();
+    EXPECT_FALSE(catalog.hasHardware(ExportVideoCodec::H264));
+    EXPECT_TRUE(catalog.hasAny(ExportVideoCodec::H264));
+    EXPECT_FALSE(catalog.hasHardware(ExportVideoCodec::H265));
+    EXPECT_FALSE(catalog.hasAny(ExportVideoCodec::H265));
+
+    EncoderDescriptor hardware;
+    hardware.id = QStringLiteral("h264_amf");
+    hardware.codec = ExportVideoCodec::H264;
+    hardware.hardware = true;
+    hardware.available = true;
+    catalog.encoders.prepend(hardware);
+    EXPECT_TRUE(catalog.hasHardware(ExportVideoCodec::H264));
+    EXPECT_TRUE(catalog.hasAny(ExportVideoCodec::H264));
+}
+
+TEST(ExportEncoder, DetectionIsCachedAndForceReprobeMatches)
+{
+    resetEncoderProbeCacheForTest();
+    const EncoderCatalog first = detectEncoders(320, 180, Rational{30, 1});
+    const EncoderCatalog cached = detectEncoders(320, 180, Rational{30, 1});
+    const EncoderCatalog reprobed
+        = detectEncoders(320, 180, Rational{30, 1}, true);
+
+    ASSERT_EQ(first.encoders.size(), cached.encoders.size());
+    ASSERT_EQ(first.encoders.size(), reprobed.encoders.size());
+    for (int i = 0; i < first.encoders.size(); ++i) {
+        EXPECT_EQ(first.encoders[i].key(), cached.encoders[i].key());
+        EXPECT_EQ(first.encoders[i].available, cached.encoders[i].available);
+        EXPECT_EQ(first.encoders[i].available, reprobed.encoders[i].available);
+        EXPECT_EQ(first.encoders[i].displayName,
+                  reprobed.encoders[i].displayName);
+    }
 }

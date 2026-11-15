@@ -61,17 +61,21 @@ QString probeCacheKey(const QString &id, bool hardware, int w, int h,
         .arg(fps.den);
 }
 
-// The user can force the H.264 software path via VIDEOEDITOR_H264_SOFTWARE.
-// Media Foundation is the licensed-by-Windows default; OpenH264 is only
-// preferred when explicitly requested.
+// Licensing decision: Media Foundation software H.264 is the default because
+// Windows licenses it. OpenH264 is only enabled when the operator explicitly
+// opts in via VIDEOEDITOR_H264_SOFTWARE=openh264 after confirming the Cisco
+// patent terms for the distributed binary; it is never a silent fallback.
+bool openH264Allowed()
+{
+    return qEnvironmentVariable("VIDEOEDITOR_H264_SOFTWARE")
+               .compare(QStringLiteral("openh264"), Qt::CaseInsensitive)
+           == 0;
+}
+
 QString preferredSoftwareH264Key()
 {
-    if (qEnvironmentVariable("VIDEOEDITOR_H264_SOFTWARE")
-            .compare(QStringLiteral("openh264"), Qt::CaseInsensitive)
-        == 0) {
-        return QStringLiteral("libopenh264@sw");
-    }
-    return QStringLiteral("h264_mf@sw");
+    return openH264Allowed() ? QStringLiteral("libopenh264@sw")
+                             : QStringLiteral("h264_mf@sw");
 }
 
 EncoderDescriptor descriptorFromCandidate(const Candidate &candidate)
@@ -112,9 +116,8 @@ void applyEncoderOptions(AVCodecContext *ctx, const EncoderDescriptor &encoder)
         av_opt_set_int(ctx->priv_data, "hw_encoding", encoder.hardware ? 1 : 0,
                        0);
     }
-    // CFR export uses zero B-frames so every frame yields exactly one packet.
-    // Encoders that do not know the option simply ignore the failed set.
-    av_opt_set_int(ctx->priv_data, "bf", 0, 0);
+    // Zero B-frames come from AVCodecContext::max_b_frames, which the caller
+    // sets; no private "bf" option is needed.
 }
 
 bool probeEncoder(const QString &encoderId, ExportVideoCodec codec,
@@ -159,7 +162,8 @@ bool probeEncoder(const QString &encoderId, ExportVideoCodec codec,
     int ret = avcodec_open2(ctx, codecPtr, nullptr);
     if (ret < 0) {
         if (error) {
-            *error = ffmpegErrorString(ret);
+            *error = QStringLiteral("编码器 %1 打开失败：%2")
+                         .arg(encoderId, ffmpegErrorString(ret));
         }
         avcodec_free_context(&ctx);
         return false;
@@ -179,7 +183,8 @@ bool probeEncoder(const QString &encoderId, ExportVideoCodec codec,
     ret = av_frame_get_buffer(frame, 0);
     if (ret < 0) {
         if (error) {
-            *error = ffmpegErrorString(ret);
+            *error = QStringLiteral("无法为编码器 %1 分配测试帧：%2")
+                         .arg(encoderId, ffmpegErrorString(ret));
         }
         av_frame_free(&frame);
         avcodec_free_context(&ctx);
@@ -216,7 +221,8 @@ bool probeEncoder(const QString &encoderId, ExportVideoCodec codec,
         ret = avcodec_send_frame(ctx, frame);
         if (ret < 0) {
             if (error) {
-                *error = ffmpegErrorString(ret);
+                *error = QStringLiteral("编码器 %1 提交测试帧失败：%2")
+                             .arg(encoderId, ffmpegErrorString(ret));
             }
             break;
         }
@@ -226,7 +232,8 @@ bool probeEncoder(const QString &encoderId, ExportVideoCodec codec,
             av_packet_unref(packet);
         } else if (ret != AVERROR(EAGAIN)) {
             if (error) {
-                *error = ffmpegErrorString(ret);
+                *error = QStringLiteral("编码器 %1 读取测试 packet 失败：%2")
+                             .arg(encoderId, ffmpegErrorString(ret));
             }
             break;
         }
@@ -302,11 +309,22 @@ QString EncoderCatalog::selectEncoder(ExportVideoCodec codec,
         reason->clear();
     }
 
+    const bool allowOpenH264 = openH264Allowed();
     QList<const EncoderDescriptor *> available;
+    bool gatedOpenH264 = false;
     for (const EncoderDescriptor &encoder : encoders) {
-        if (encoder.codec == codec && encoder.available) {
-            available.append(&encoder);
+        if (encoder.codec != codec || !encoder.available) {
+            continue;
         }
+        // OpenH264 is never auto-selected. Keep it out of the candidate list
+        // unless the operator explicitly opted in (licensing decision).
+        if (encoder.id == QStringLiteral("libopenh264")) {
+            if (!allowOpenH264) {
+                gatedOpenH264 = true;
+                continue;
+            }
+        }
+        available.append(&encoder);
     }
 
     // H.265 is hardware-only: a software encoder never satisfies the gate.
@@ -362,8 +380,17 @@ QString EncoderCatalog::selectEncoder(ExportVideoCodec codec,
 
     if (!chosen) {
         if (reason) {
-            *reason = QStringLiteral("没有可用的 %1 编码器。")
-                          .arg(exportCodecDisplayName(codec));
+            if (codec == ExportVideoCodec::H264 && gatedOpenH264) {
+                *reason = QStringLiteral(
+                    "当前系统没有可用的 H.264 软件编码器"
+                    "（Media Foundation 软件编码不可用）。"
+                    "OpenH264 仅在显式设置环境变量 "
+                    "VIDEOEDITOR_H264_SOFTWARE=openh264 时启用；"
+                    "启用前请确认已获得 Cisco 专利授权。");
+            } else {
+                *reason = QStringLiteral("没有可用的 %1 编码器。")
+                              .arg(exportCodecDisplayName(codec));
+            }
         }
         return {};
     }

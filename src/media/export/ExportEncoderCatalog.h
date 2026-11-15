@@ -49,7 +49,8 @@ public:
 
 // Probes every candidate at `width`x`height`/`fps`, caching the result for the
 // lifetime of the process (per encoder path and target format). `forceReprobe`
-// clears the cache first.
+// clears the cache first. The first call opens all candidates (about 0.5 s),
+// so callers should not run it on the UI thread; later calls are cache hits.
 EncoderCatalog detectEncoders(int width, int height, const Rational &fps,
                               bool forceReprobe = false);
 
@@ -65,8 +66,9 @@ bool probeEncoder(const QString &encoderId, ExportVideoCodec codec,
 AVPixelFormat encoderPixelFormat(const EncoderDescriptor &encoder);
 
 // Applies per-encoder options that cannot be expressed through
-// AVCodecContext fields alone (Media Foundation `hw_encoding`, zero B-frames).
-// Failed option sets are ignored; the probe/encode test is the source of truth.
+// AVCodecContext fields alone (Media Foundation `hw_encoding`). Zero B-frames
+// are requested through AVCodecContext::max_b_frames. Failed option sets are
+// ignored; the probe/encode test is the source of truth.
 void applyEncoderOptions(AVCodecContext *ctx, const EncoderDescriptor &encoder);
 
 void resetEncoderProbeCacheForTest();
