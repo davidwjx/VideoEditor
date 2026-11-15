@@ -42,6 +42,8 @@ add_executable(media_tests
   media/VideoEncoderTest.cpp
   media/AudioEncoderTest.cpp
   media/ExportSegmentTest.cpp
+  media/ExportDiskSpaceTest.cpp
+  media/ExportPipelineTest.cpp
   TestMain.cpp)
 target_link_libraries(media_tests PRIVATE
   videoeditor_media GTest::gtest Qt6::Core Qt6::Gui Qt6::Test d3d11 dxgi d3dcompiler)

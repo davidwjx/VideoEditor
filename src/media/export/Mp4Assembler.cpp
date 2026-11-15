@@ -50,6 +50,58 @@ bool Mp4Assembler::assemble(const QString &partsDir,
         return false;
     }
 
+    // Every part must carry identical encoder parameters. Re-muxing parts with
+    // different SPS/PPS would produce a stream no decoder can follow. Part 0's
+    // extradata is kept: after a round trip through MP4 it is already in the
+    // container's native format (avcC/hvcC), which is exactly what the packets
+    // read back from the parts are describing. Reusing the live encoder's
+    // Annex B extradata here would make movenc treat the already
+    // length-prefixed packets as Annex B and rewrite them as 1-byte samples.
+    std::vector<uint8_t> referenceExtradata;
+    for (int i = 0; i < timing.segmentCount; ++i) {
+        AVFormatContext *in = nullptr;
+        const QString path = segmentPath(partsDir, i);
+        if (avformat_open_input(&in, path.toUtf8().constData(), nullptr,
+                                nullptr)
+            < 0) {
+            if (error)
+                *error = QStringLiteral("无法读取分段：%1").arg(path);
+            return false;
+        }
+        const int vi = av_find_best_stream(in, AVMEDIA_TYPE_VIDEO, -1, -1,
+                                           nullptr, 0);
+        if (vi < 0) {
+            avformat_close_input(&in);
+            if (error)
+                *error = QStringLiteral("分段缺少视频流：%1").arg(path);
+            return false;
+        }
+        AVCodecParameters *par = in->streams[vi]->codecpar;
+        if (i == 0) {
+            if (par->extradata_size > 0 && par->extradata) {
+                referenceExtradata.assign(par->extradata,
+                                          par->extradata + par->extradata_size);
+            } else {
+                referenceExtradata.clear();
+            }
+        } else {
+            const bool differs =
+                referenceExtradata.size() != size_t(par->extradata_size)
+                || (referenceExtradata.size() > 0
+                    && memcmp(referenceExtradata.data(), par->extradata,
+                              referenceExtradata.size())
+                           != 0);
+            if (differs) {
+                avformat_close_input(&in);
+                if (error)
+                    *error = QStringLiteral(
+                        "分段编码参数不一致（SPS/PPS 不同），无法合并为单个 MP4。");
+                return false;
+            }
+        }
+        avformat_close_input(&in);
+    }
+
     AVFormatContext *out = nullptr;
     bool headerWritten = false;
     const auto fail = [&](const QString &message) -> bool {
@@ -83,6 +135,21 @@ bool Mp4Assembler::assemble(const QString &partsDir,
     if (avcodec_parameters_from_context(outVideo->codecpar, video) < 0
         || avcodec_parameters_from_context(outAudio->codecpar, audio) < 0) {
         return fail(QStringLiteral("无法复制最终文件的编码参数。"));
+    }
+    // Use the part's container-native extradata (avcC/hvcC for H.264/H.265)
+    // rather than the encoder's Annex B copy. The packets below are copied out
+    // of MP4 parts, so they are already length-prefixed; feeding movenc Annex B
+    // extradata makes it run the Annex B parser over them and emit 1-byte
+    // samples.
+    if (!referenceExtradata.empty()) {
+        av_freep(&outVideo->codecpar->extradata);
+        outVideo->codecpar->extradata = static_cast<uint8_t *>(av_mallocz(
+            referenceExtradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (!outVideo->codecpar->extradata)
+            return fail(QStringLiteral("无法复制最终文件的编码参数。"));
+        memcpy(outVideo->codecpar->extradata, referenceExtradata.data(),
+               referenceExtradata.size());
+        outVideo->codecpar->extradata_size = int(referenceExtradata.size());
     }
     if (video->codec_id == AV_CODEC_ID_HEVC)
         outVideo->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
@@ -118,47 +185,6 @@ bool Mp4Assembler::assemble(const QString &partsDir,
     const int64_t audioEnd =
         av_rescale_q(timing.totalSamples, AVRational{1, timing.sampleRate},
                      outAudioTb);
-
-    // 1) Every part must carry identical encoder parameters. Re-muxing parts
-    //    with different SPS/PPS would produce a stream no decoder can follow.
-    std::vector<uint8_t> referenceExtradata;
-    for (int i = 0; i < timing.segmentCount; ++i) {
-        AVFormatContext *in = nullptr;
-        const QString path = segmentPath(partsDir, i);
-        if (avformat_open_input(&in, path.toUtf8().constData(), nullptr,
-                                nullptr)
-            < 0) {
-            return fail(QStringLiteral("无法读取分段：%1").arg(path));
-        }
-        const int vi = av_find_best_stream(in, AVMEDIA_TYPE_VIDEO, -1, -1,
-                                           nullptr, 0);
-        if (vi < 0) {
-            avformat_close_input(&in);
-            return fail(QStringLiteral("分段缺少视频流：%1").arg(path));
-        }
-        AVCodecParameters *par = in->streams[vi]->codecpar;
-        if (i == 0) {
-            if (par->extradata_size > 0 && par->extradata) {
-                referenceExtradata.assign(par->extradata,
-                                          par->extradata + par->extradata_size);
-            } else {
-                referenceExtradata.clear();
-            }
-        } else {
-            const bool differs =
-                referenceExtradata.size() != size_t(par->extradata_size)
-                || (referenceExtradata.size() > 0
-                    && memcmp(referenceExtradata.data(), par->extradata,
-                              referenceExtradata.size())
-                           != 0);
-            if (differs) {
-                avformat_close_input(&in);
-                return fail(QStringLiteral(
-                    "分段编码参数不一致（SPS/PPS 不同），无法合并为单个 MP4。"));
-            }
-        }
-        avformat_close_input(&in);
-    }
 
     // 2) Video: read each part separately and rewrite packets at their exact
     //    global frame offset, so the joined stream is CFR with no gaps.

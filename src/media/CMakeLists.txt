@@ -91,6 +91,15 @@ add_library(videoeditor_media STATIC
   export/AudioTrackWriter.cpp
   export/Mp4Assembler.h
   export/Mp4Assembler.cpp
+  export/ExportProgress.h
+  export/ExportDiskSpace.h
+  export/ExportDiskSpace.cpp
+  export/ExportValidator.h
+  export/ExportValidator.cpp
+  export/ExportPipeline.h
+  export/ExportPipeline.cpp
+  export/ExportWorker.h
+  export/ExportWorker.cpp
 )
 # Accept both "probe/MediaProbe.h" and "MediaProbe.h" from consumers, and the
 # same for the decode, proxy/cache, audio and render headers.
