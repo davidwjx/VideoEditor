@@ -117,6 +117,11 @@ gtest_discover_tests(export_tests PROPERTIES
   DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
   LABELS "gpu")
 
+# Subprocess fixture for LocalAiTransport protocol tests. It is built next to
+# app_tests so the end-to-end transport test can never silently skip.
+add_executable(fake_ai_engine app/FakeAiEngineMain.cpp)
+target_link_libraries(fake_ai_engine PRIVATE Qt6::Core Qt6::Network)
+
 add_executable(app_tests
   app/AiJobManagerTest.cpp
   app/AppControllerTest.cpp
@@ -127,6 +132,16 @@ target_include_directories(app_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(app_tests PRIVATE videoeditor_app GTest::gtest Qt6::Core Qt6::Gui Qt6::Test)
 target_compile_definitions(app_tests PRIVATE
   VIDEOEDITOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
+if(TARGET VisionAiEngine)
+  add_dependencies(app_tests VisionAiEngine)
+  add_custom_command(TARGET app_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:VisionAiEngine>" "$<TARGET_FILE_DIR:app_tests>")
+endif()
+add_dependencies(app_tests fake_ai_engine)
+if(TARGET videoeditor_models_copy)
+  add_dependencies(app_tests videoeditor_models_copy)
+endif()
 gtest_discover_tests(app_tests PROPERTIES ENVIRONMENT_MODIFICATION "${TEST_ENV_MOD}"
                           DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30)
 

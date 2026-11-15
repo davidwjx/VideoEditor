@@ -55,6 +55,9 @@ public:
     bool verifyFiles(QString *error = nullptr) const;
     bool featureEnabled(QString *reason = nullptr) const;
     const AiModelRecord *model(const QString &id) const;
+    // Returns the record only when it is commercially approved, so engine
+    // callers can never load an unapproved id while the gate is enabled.
+    const AiModelRecord *approvedModel(const QString &id) const;
     const AiModelRecord *defaultTrackingModel() const;
     const AiModelRecord *defaultInpaintModel(const QString &mode) const;
     QString manifestPath() const { return m_manifestPath; }

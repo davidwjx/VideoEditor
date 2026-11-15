@@ -33,6 +33,8 @@ int main(int argc, char *argv[])
         QJsonDocument::fromJson(jobFile.readAll()).object(), &error);
     if (!spec)
         return 2;
+    if (!VideoEditor::AiProtocol::validateJobSpec(*spec, &error))
+        return 2;
 
     QLocalSocket socket;
     socket.connectToServer(socketName);

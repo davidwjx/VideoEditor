@@ -16,6 +16,9 @@ namespace {
 
 QString enginePath()
 {
+    const QString override = qEnvironmentVariable("VIDEOEDITOR_AI_ENGINE");
+    if (!override.isEmpty())
+        return override;
     return QDir(QCoreApplication::applicationDirPath())
         .filePath(QStringLiteral("VisionAiEngine.exe"));
 }
@@ -54,12 +57,21 @@ LocalAiTransport::LocalAiTransport(QObject *parent)
 
 LocalAiTransport::~LocalAiTransport()
 {
+    // Killing the child makes QProcess emit finished(); never let that run
+    // through this object during destruction.
+    m_finishedEmitted = true;
+    blockSignals(true);
     if (m_cancelTimer)
         m_cancelTimer->stop();
-    if (m_process && m_process->state() != QProcess::NotRunning) {
-        m_process->kill();
-        m_process->waitForFinished(1000);
+    if (m_process) {
+        QObject::disconnect(m_process, nullptr, this, nullptr);
+        if (m_process->state() != QProcess::NotRunning) {
+            m_process->kill();
+            m_process->waitForFinished(1000);
+        }
     }
+    if (m_socket)
+        QObject::disconnect(m_socket, nullptr, this, nullptr);
     if (m_server)
         m_server->close();
     if (!keepTempFiles() && !m_jobPath.isEmpty())
@@ -88,7 +100,7 @@ bool LocalAiTransport::start(const AiJobSpec &spec, QString *error)
                                   .arg(QUuid::createUuid().toString(
                                       QUuid::WithoutBraces)));
     QFile jobFile(jobPath);
-    if (!jobFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    if (!jobFile.open(QIODevice::WriteOnly | QIODevice::NewOnly))
         return fail(QStringLiteral("无法写入 AI 任务文件：%1。")
                         .arg(jobFile.errorString()));
     const QByteArray payload =
@@ -111,6 +123,9 @@ bool LocalAiTransport::start(const AiJobSpec &spec, QString *error)
         m_server->close();
     }
     QLocalServer::removeServer(m_serverName);
+    // Windows ignores the access option, but it keeps the socket private to
+    // the current user on platforms that honour it.
+    m_server->setSocketOptions(QLocalServer::UserAccessOption);
     if (!m_server->listen(m_serverName)) {
         const QString listenError = m_server->errorString();
         cleanup(true);
@@ -223,8 +238,12 @@ void LocalAiTransport::onProcessFinished(int exitCode,
     // lines and exit before the parent event loop dispatches newConnection.
     // Accept the pending connection and drain the pipe before tearing down,
     // otherwise the trailing done/error would be lost.
-    if (!m_socket && m_server && m_server->hasPendingConnections())
-        onNewConnection();
+    if (!m_socket && m_server) {
+        if (!m_server->hasPendingConnections())
+            m_server->waitForNewConnection(250);
+        if (m_server->hasPendingConnections())
+            onNewConnection();
+    }
     if (m_socket) {
         QElapsedTimer drainClock;
         drainClock.start();

@@ -5,19 +5,8 @@
 #include <QDebug>
 #include <QJsonValue>
 #include <QMetaType>
-#include <QRegularExpression>
 
 namespace VideoEditor {
-
-namespace {
-
-bool isLowerHex64(const QString &text)
-{
-    static const QRegularExpression pattern(QStringLiteral("^[0-9a-f]{64}$"));
-    return pattern.match(text).hasMatch();
-}
-
-} // namespace
 
 AiJobManager::AiJobManager(AiFeatureGate &gate, QObject *parent)
     : QObject(parent)
@@ -27,7 +16,18 @@ AiJobManager::AiJobManager(AiFeatureGate &gate, QObject *parent)
     qRegisterMetaType<VideoEditor::AiJobResult>("VideoEditor::AiJobResult");
 }
 
-AiJobManager::~AiJobManager() = default;
+AiJobManager::~AiJobManager()
+{
+    // A transport being destroyed may emit finished() (LocalAiTransport kills
+    // and waits for its child). Detach it first so the manager never emits
+    // jobFinished() while its own members are being torn down.
+    m_destroying = true;
+    m_running = false;
+    if (m_transport) {
+        QObject::disconnect(m_transport.get(), nullptr, this, nullptr);
+        m_transport.reset();
+    }
+}
 
 void AiJobManager::setTransportFactoryForTest(
     std::function<std::unique_ptr<AiTransport>()> factory)
@@ -47,8 +47,9 @@ bool AiJobManager::start(const AiJobSpec &spec, QString *error)
         return fail(m_gate.disabledReason());
     if (m_running)
         return fail(QStringLiteral("已有 AI 任务在运行。"));
-    if (!isLowerHex64(spec.cacheKey))
-        return fail(QStringLiteral("AI 任务参数无效。"));
+    QString specError;
+    if (!AiProtocol::validateJobSpec(spec, &specError))
+        return fail(specError);
 
     m_running = true;
     m_paused = false;
@@ -82,7 +83,9 @@ bool AiJobManager::start(const AiJobSpec &spec, QString *error)
     QString startError;
     if (!m_transport->start(spec, &startError)) {
         if (m_transport) {
-            AiTransport *failed = m_transport.release();
+            AiTransport *failed = m_transport.get();
+            QObject::disconnect(failed, nullptr, this, nullptr);
+            m_transport.release();
             failed->deleteLater();
         }
         m_running = false;
@@ -137,7 +140,12 @@ void AiJobManager::resume()
 
 void AiJobManager::handleMessage(const QJsonObject &message)
 {
-    if (!m_running)
+    if (m_destroying || !m_running)
+        return;
+    // Only the transport belonging to the active job may drive this manager.
+    // A superseded transport's trailing signals must not abort a job started
+    // synchronously from jobFinished().
+    if (sender() && sender() != m_transport.get())
         return;
 
     const QJsonValue jobIdValue = message.value(QStringLiteral("jobId"));
@@ -194,9 +202,24 @@ void AiJobManager::handleMessage(const QJsonObject &message)
             message.value(QStringLiteral("message")).toString();
         finish(result);
     } else if (event == QLatin1String("done")) {
+        const QJsonValue cacheValue =
+            message.value(QStringLiteral("cacheKey"));
+        if (!cacheValue.isUndefined()
+            && (!cacheValue.isString()
+                || cacheValue.toString() != m_cacheKey)) {
+            // Never let an engine-chosen string become the result cache key.
+            AiJobResult result;
+            result.ok = false;
+            result.cacheKey = m_cacheKey;
+            result.errorCode = QStringLiteral("protocol");
+            result.errorMessage =
+                QStringLiteral("AI 任务结果与当前任务不匹配。");
+            finish(result);
+            return;
+        }
+
         AiJobResult result;
-        result.cacheKey = message.value(QStringLiteral("cacheKey"))
-                              .toString(m_cacheKey);
+        result.cacheKey = m_cacheKey;
         result.completedFrames =
             message.value(QStringLiteral("completedFrames")).toInt();
         result.confidenceHash =
@@ -226,7 +249,9 @@ void AiJobManager::handleMessage(const QJsonObject &message)
 void AiJobManager::handleTransportFinished(int exitCode,
                                            QProcess::ExitStatus status)
 {
-    if (!m_running)
+    if (m_destroying || !m_running)
+        return;
+    if (sender() && sender() != m_transport.get())
         return;
 
     AiJobResult result;
@@ -235,6 +260,17 @@ void AiJobManager::handleTransportFinished(int exitCode,
         result.ok = false;
         result.cancelled = true;
         result.errorCode = m_errorCode;
+        result.errorMessage = m_errorMessage;
+    } else if (!m_errorCode.isEmpty()) {
+        // A protocol/engine error was already reported. Do not overwrite it
+        // with the generic crash text when the child is killed after the
+        // error (kill() makes QProcess report CrashExit).
+        result.ok = false;
+        result.errorCode = m_errorCode;
+        result.errorMessage = m_errorMessage;
+    } else if (!m_errorMessage.isEmpty()) {
+        result.ok = false;
+        result.errorCode = QStringLiteral("engine");
         result.errorMessage = m_errorMessage;
     } else if (status == QProcess::CrashExit) {
         result.ok = false;
@@ -245,16 +281,14 @@ void AiJobManager::handleTransportFinished(int exitCode,
         result.ok = false;
         result.errorCode = QStringLiteral("engine");
         result.errorMessage =
-            !m_errorMessage.isEmpty()
-                ? m_errorMessage
-                : QStringLiteral("AI 任务失败（退出码 %1）。").arg(exitCode);
+            QStringLiteral("AI 任务失败（退出码 %1）。").arg(exitCode);
     }
     finish(result);
 }
 
 void AiJobManager::finish(const AiJobResult &result)
 {
-    if (!m_running)
+    if (m_destroying || !m_running)
         return;
     m_running = false;
     m_paused = false;
@@ -262,10 +296,13 @@ void AiJobManager::finish(const AiJobResult &result)
     if (result.ok)
         m_progress = 100.0;
 
-    // The transport is emitting its own signal when finish() runs, so defer
-    // its deletion instead of destroying it inside the callback.
+    // The transport is emitting its own signal when finish() runs. Detach it
+    // before deferring deletion so a trailing done/finished from the old
+    // transport can never touch the next job.
     if (m_transport) {
-        AiTransport *transport = m_transport.release();
+        AiTransport *transport = m_transport.get();
+        QObject::disconnect(transport, nullptr, this, nullptr);
+        m_transport.release();
         transport->deleteLater();
     }
     m_activeJobId.clear();

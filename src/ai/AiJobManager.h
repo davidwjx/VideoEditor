@@ -69,6 +69,7 @@ private:
     bool m_running = false;
     bool m_paused = false;
     bool m_cancelRequested = false;
+    bool m_destroying = false;
     double m_progress = 0.0;
     QString m_stageText;
     QString m_etaText;

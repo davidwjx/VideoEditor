@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QRegularExpression>
+#include <QSet>
 
 namespace VideoEditor {
 
@@ -34,28 +35,48 @@ bool isSafeRelativePath(const QString &path)
                                                Qt::SkipEmptyParts);
     if (parts.isEmpty())
         return false;
+    static const QSet<QString> reservedNames = {
+        QStringLiteral("CON"),  QStringLiteral("PRN"),
+        QStringLiteral("AUX"),  QStringLiteral("NUL"),
+        QStringLiteral("COM1"), QStringLiteral("COM2"),
+        QStringLiteral("COM3"), QStringLiteral("COM4"),
+        QStringLiteral("COM5"), QStringLiteral("COM6"),
+        QStringLiteral("COM7"), QStringLiteral("COM8"),
+        QStringLiteral("COM9"), QStringLiteral("LPT1"),
+        QStringLiteral("LPT2"), QStringLiteral("LPT3"),
+        QStringLiteral("LPT4"), QStringLiteral("LPT5"),
+        QStringLiteral("LPT6"), QStringLiteral("LPT7"),
+        QStringLiteral("LPT8"), QStringLiteral("LPT9"),
+    };
     for (const QString &part : parts) {
         if (part.isEmpty() || part == QLatin1String(".")
             || part == QLatin1String(".."))
             return false;
         if (part.contains(QLatin1Char(':')))
             return false;
+        // Windows treats CON.txt and CON as the same device.
+        const QString base =
+            part.section(QLatin1Char('.'), 0, 0).trimmed().toUpper();
+        if (reservedNames.contains(base))
+            return false;
     }
     return true;
 }
 
-bool isUnderRoot(const QString &rootDir, const QString &absolutePath)
+// Both paths must already be canonical. The candidate must be strictly below
+// the root, so a junction/symlink that resolves outside is rejected.
+bool isCanonicalUnder(const QString &root, const QString &candidate)
 {
-    if (rootDir.isEmpty())
+    if (root.isEmpty() || candidate.isEmpty())
         return false;
-    const QString root =
-        QDir::cleanPath(QFileInfo(rootDir).absoluteFilePath());
-    const QString candidate = QDir::cleanPath(absolutePath);
-    if (candidate.compare(root, Qt::CaseInsensitive) == 0)
+    const QString cleanRoot = QDir::cleanPath(root);
+    const QString cleanCandidate = QDir::cleanPath(candidate);
+    if (cleanCandidate.compare(cleanRoot, Qt::CaseInsensitive) == 0)
         return false;
-    return candidate.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive)
-           || candidate.startsWith(root + QLatin1Char('\\'),
-                                   Qt::CaseInsensitive);
+    return cleanCandidate.startsWith(cleanRoot + QLatin1Char('/'),
+                                     Qt::CaseInsensitive)
+           || cleanCandidate.startsWith(cleanRoot + QLatin1Char('\\'),
+                                        Qt::CaseInsensitive);
 }
 
 bool parseModel(const QJsonObject &json, AiModelRecord *model, QString *error)
@@ -231,6 +252,11 @@ bool ModelRegistry::verifyFiles(QString *error) const
         return false;
     };
 
+    const QString rootCanonical =
+        QFileInfo(m_rootDir).canonicalFilePath();
+    if (rootCanonical.isEmpty())
+        return fail(QStringLiteral("模型根目录无法解析"));
+
     for (const AiModelRecord &model : m_manifest.models) {
         if (model.files.isEmpty())
             return fail(QStringLiteral("%1 缺少文件清单").arg(model.id));
@@ -241,10 +267,17 @@ bool ModelRegistry::verifyFiles(QString *error) const
                 return fail(QStringLiteral("%1/%2 路径不安全")
                                 .arg(model.id, it.key()));
             const QString resolved = QDir(m_rootDir).filePath(file.path);
-            if (!isUnderRoot(m_rootDir, QFileInfo(resolved).absoluteFilePath()))
+            // canonicalFilePath() is empty for a missing file and resolves
+            // junctions/symlinks; requiring both makes the check fail closed.
+            const QString canonical =
+                QFileInfo(resolved).canonicalFilePath();
+            if (canonical.isEmpty())
+                return fail(QStringLiteral("%1/%2 文件缺失或无法解析")
+                                .arg(model.id, it.key()));
+            if (!isCanonicalUnder(rootCanonical, canonical))
                 return fail(QStringLiteral("%1/%2 路径越界")
                                 .arg(model.id, it.key()));
-            QFile handle(resolved);
+            QFile handle(canonical);
             if (!handle.open(QIODevice::ReadOnly))
                 return fail(QStringLiteral("%1/%2 文件缺失")
                                 .arg(model.id, it.key()));
@@ -277,9 +310,9 @@ bool ModelRegistry::featureEnabled(QString *reason) const
                                    "（schemaVersion）。"));
 
     if (!m_manifest.commercialApproved
-        || m_manifest.legalSignOffBy.isEmpty()
-        || m_manifest.legalSignOffDate.isEmpty()
-        || m_manifest.legalScope.isEmpty()) {
+        || m_manifest.legalSignOffBy.trimmed().isEmpty()
+        || m_manifest.legalSignOffDate.trimmed().isEmpty()
+        || m_manifest.legalScope.trimmed().isEmpty()) {
         return deny(QStringLiteral("AI 消除功能未启用：缺少模型许可证审批。"));
     }
 
@@ -324,6 +357,15 @@ const AiModelRecord *ModelRegistry::model(const QString &id) const
     for (const AiModelRecord &record : m_manifest.models) {
         if (record.id == id)
             return &record;
+    }
+    return nullptr;
+}
+
+const AiModelRecord *ModelRegistry::approvedModel(const QString &id) const
+{
+    for (const AiModelRecord &record : m_manifest.models) {
+        if (record.id == id)
+            return record.commercialApproved ? &record : nullptr;
     }
     return nullptr;
 }

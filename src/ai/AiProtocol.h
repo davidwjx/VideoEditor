@@ -42,6 +42,8 @@ struct AiJobSpec {
 };
 
 QJsonObject aiJobSpecToJson(const AiJobSpec &spec);
+// Missing fields keep their defaults; present fields with the wrong JSON type
+// (or non-integral/out-of-range numbers) are rejected.
 std::optional<AiJobSpec> aiJobSpecFromJson(const QJsonObject &json,
                                            QString *error = nullptr);
 
@@ -60,12 +62,16 @@ struct AiJobResult {
 
 // Newline-delimited JSON framing shared by both sides of the local socket.
 // encodeLine appends '\n'; parseLine strips trailing CR/LF and rejects empty,
-// oversized, non-object and event-less/cmd-less messages.
+// oversized, non-object, fieldless and non-string event/cmd messages.
 class AiProtocol {
 public:
     static QByteArray encodeLine(const QJsonObject &object);
     static bool parseLine(const QByteArray &line, QJsonObject *out,
                           QString *error = nullptr);
+    // Shared parent/child guard. Rejects an incomplete or unsafe spec before
+    // any socket or process is created. Errors are prefixed with
+    // "AI 任务参数无效：".
+    static bool validateJobSpec(const AiJobSpec &spec, QString *error = nullptr);
     static constexpr int kMaxLineBytes = 1024 * 1024;
 };
 

@@ -51,8 +51,11 @@ if(TARGET VisionAiEngine)
             "$<TARGET_FILE:VisionAiEngine>" "$<TARGET_FILE_DIR:VideoEditor>")
 endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/assets/models")
-  add_custom_command(TARGET VideoEditor POST_BUILD
+  # Refresh every build, not only when VideoEditor relinks, so the test
+  # executables in the same directory always see the current manifest.
+  add_custom_target(videoeditor_models_copy ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_SOURCE_DIR}/assets/models"
-            "$<TARGET_FILE_DIR:VideoEditor>/models")
+            "$<TARGET_FILE_DIR:VideoEditor>/models"
+    COMMENT "Refreshing models manifest in the build tree")
 endif()
