@@ -1092,6 +1092,12 @@ void AppController::selftestRemoval()
         is1080p = fullSize;
         found = true;
     };
+    const QString softVideo = QDir(acceptance).filePath(
+        QStringLiteral("static_logo_soft_1080p_10s.mp4"));
+    const QString softMask = QDir(acceptance).filePath(
+        QStringLiteral("static_logo_soft_mask_1080p_10s.mp4"));
+    const QString softClean = QDir(acceptance).filePath(
+        QStringLiteral("clean_soft_1080p_10s.mp4"));
     const QString smoothVideo =
         QDir(acceptance).filePath(QStringLiteral("static_logo_smooth_1080p_10s.mp4"));
     const QString smoothMask = QDir(acceptance).filePath(
@@ -1112,7 +1118,14 @@ void AppController::selftestRemoval()
     } else if (forced == QLatin1String("smooth")) {
         trySet(QStringLiteral("smooth-1080p"), smoothVideo, smoothMask,
                smoothClean, true);
+    } else if (forced == QLatin1String("soft")) {
+        trySet(QStringLiteral("soft-1080p"), softVideo, softMask, softClean,
+               true);
     } else {
+        // Preference: fair low-frequency soft plate, then smooth gradient,
+        // then the legacy high-frequency testsrc2 plate.
+        trySet(QStringLiteral("soft-1080p"), softVideo, softMask, softClean,
+               true);
         trySet(QStringLiteral("smooth-1080p"), smoothVideo, smoothMask,
                smoothClean, true);
         trySet(QStringLiteral("legacy-1080p"), legacyVideo, legacyMask,

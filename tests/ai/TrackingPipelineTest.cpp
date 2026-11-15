@@ -179,7 +179,8 @@ TEST(TrackingPipeline, EfficientTamSegmentsSyntheticRectangle)
     const QImage image = makeFrame(kWidth, kHeight, 0, 0);
     const BinaryMask groundTruth = makeMask(objectRect(0, 0), kWidth, kHeight);
     const TrackingPrompt prompt = Sam2Tracker::promptFromMask(groundTruth);
-    ASSERT_EQ(prompt.points.size(), 3);
+    ASSERT_EQ(prompt.points.size(), 2);
+    ASSERT_EQ(prompt.labels, (QList<int>{2, 3}));
 
     QElapsedTimer clock;
     clock.start();
@@ -603,9 +604,9 @@ TEST(TrackingPipeline, EfficientTamMatchesAuthoredMaskOnFixture)
                         "missing";
     const QString fixtures =
         QStringLiteral(VIDEOEDITOR_FIXTURE_DIR) + QStringLiteral("/removal");
-    const QString video = fixtures + QStringLiteral("/static_logo.mp4");
+    const QString video = fixtures + QStringLiteral("/static_logo_smooth.mp4");
     const QString maskVideo =
-        fixtures + QStringLiteral("/static_logo_mask.mp4");
+        fixtures + QStringLiteral("/static_logo_smooth_mask.mp4");
     if (!QFileInfo::exists(video) || !QFileInfo::exists(maskVideo))
         GTEST_SKIP() << "removal fixtures missing; run generate_fixtures.ps1";
 

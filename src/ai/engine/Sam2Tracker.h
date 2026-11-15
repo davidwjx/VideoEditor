@@ -62,8 +62,9 @@ public:
     QString provider() const;
     bool usingCpuFallback() const;
 
-    // Bounding-box corners + centroid, all label 1 (the 3 sparse tokens the
-    // EfficientTAM mask_decoder expects).
+    // SAM-style box prompt: top-left label 2, bottom-right label 3. The prompt
+    // encoder turns these two points into exactly three sparse tokens
+    // (two real + padding), which the EfficientTAM mask_decoder consumes as-is.
     static TrackingPrompt promptFromMask(const BinaryMask &mask);
 
 private:

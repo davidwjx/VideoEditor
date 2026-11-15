@@ -243,9 +243,6 @@ TrackingPrompt Sam2Tracker::promptFromMask(const BinaryMask &mask)
     int minY = mask.height;
     int maxX = -1;
     int maxY = -1;
-    int64_t sumX = 0;
-    int64_t sumY = 0;
-    int area = 0;
     for (int y = 0; y < mask.height; ++y) {
         for (int x = 0; x < mask.width; ++x) {
             if (!mask.at(x, y))
@@ -254,12 +251,9 @@ TrackingPrompt Sam2Tracker::promptFromMask(const BinaryMask &mask)
             minY = std::min(minY, y);
             maxX = std::max(maxX, x);
             maxY = std::max(maxY, y);
-            sumX += x;
-            sumY += y;
-            ++area;
         }
     }
-    if (area <= 0)
+    if (maxX < minX || maxY < minY)
         return prompt;
 
     const double width = double(mask.width);
@@ -269,11 +263,12 @@ TrackingPrompt Sam2Tracker::promptFromMask(const BinaryMask &mask)
     const double right = double(maxX + 1) / width;
     const double bottom = double(maxY + 1) / height;
     prompt.box = QRectF(left, top, right - left, bottom - top);
+    // SAM box prompt: two corner points with labels 2 (top-left) and 3
+    // (bottom-right). Do not append a centroid: the prompt encoder emits the
+    // three sparse tokens the decoder expects from these two points.
     prompt.points.append(QPointF(left, top));
     prompt.points.append(QPointF(right, bottom));
-    prompt.points.append(QPointF(double(sumX) / area / width,
-                                 double(sumY) / area / height));
-    prompt.labels = {1, 1, 1};
+    prompt.labels = {2, 3};
     return prompt;
 }
 
@@ -300,21 +295,28 @@ std::optional<TrackingFrameResult> Sam2Tracker::segment(
                         ? *error
                         : QStringLiteral("跟踪输入预处理失败。"));
 
-    // Resolve the 3-point prompt. Efficiency matters more than a variable
-    // token count here, so always emit exactly three sparse tokens.
+    // Resolve a SAM-style prompt: a 2-point box (labels 2/3) is preferred; a
+    // legacy 3-point foreground prompt is still accepted. Cap at three input
+    // points so the prompt encoder emits at most four sparse tokens.
     QList<QPointF> points = prompt.points;
-    if (points.size() < 3) {
+    QList<int> labels = prompt.labels;
+    if (points.size() < 2) {
         points.clear();
+        labels.clear();
         if (prompt.box.isValid()) {
             points.append(prompt.box.topLeft());
             points.append(prompt.box.bottomRight());
-            points.append(prompt.box.center());
+            labels = {2, 3};
         }
     }
-    if (points.size() < 3)
+    if (points.size() < 2)
         return fail(QStringLiteral("跟踪提示为空。"));
-    while (points.size() > 3)
-        points.removeLast();
+    if (points.size() > 3)
+        points = points.mid(0, 3);
+    while (labels.size() < points.size()) {
+        // Default labels: a 2-point prompt without labels is a box prompt.
+        labels.append(points.size() == 2 ? (labels.isEmpty() ? 2 : 3) : 1);
+    }
 
     const QString imageInputName = impl.resolveName(
         QStringLiteral("image_encoder"), true, impl.imageInput,
@@ -349,19 +351,20 @@ std::optional<TrackingFrameResult> Sam2Tracker::segment(
         return fail(QString::fromUtf8(kShapeMismatch));
     }
 
+    const int pointCount = points.size();
     OnnxTensor pointCoords;
-    pointCoords.shape = {1, 3, 2};
-    pointCoords.floatData.resize(6);
+    pointCoords.shape = {1, pointCount, 2};
+    pointCoords.floatData.resize(size_t(pointCount) * 2);
     OnnxTensor pointLabels;
     pointLabels.type = OnnxTensor::DataType::Int32;
-    pointLabels.shape = {1, 3};
-    pointLabels.int32Data.resize(3);
-    for (int i = 0; i < 3; ++i) {
+    pointLabels.shape = {1, pointCount};
+    pointLabels.int32Data.resize(pointCount);
+    for (int i = 0; i < pointCount; ++i) {
         const QPointF &point = points.at(i);
         pointCoords.floatData[i * 2] = Impl::toInputX(pre, point.x());
         pointCoords.floatData[i * 2 + 1] = Impl::toInputY(pre, point.y());
-        const int label = prompt.labels.size() > i ? prompt.labels.at(i) : 1;
-        pointLabels.int32Data[i] = label == 0 ? 0 : 1;
+        // Preserve SAM's box labels 2/3; foreground point prompts use 1.
+        pointLabels.int32Data[i] = labels.at(i);
     }
     OnnxTensor maskInput;
     maskInput.shape = {1, 1, 128, 128};
@@ -390,9 +393,10 @@ std::optional<TrackingFrameResult> Sam2Tracker::segment(
     }
     const OnnxOutput &sparse =
         promptOutputs[QStringLiteral("sparse_prompt_embeddings")];
-    // The prompt encoder appends its padding token, so 3 input points produce
-    // [1,4,256]. The mask_decoder consumes exactly 3 sparse tokens, therefore
-    // keep the 3 real point tokens and drop the trailing padding token.
+    // A 2-point box prompt encodes to exactly three sparse tokens (two real +
+    // padding) and is used as-is. A legacy 3-point prompt encodes to
+    // [1,4,256]; the decoder consumes exactly three, so the trailing padding
+    // token is dropped. Both cases therefore take the first three tokens.
     if (sparse.shape.size() != 3 || sparse.shape.at(1) < 3
         || sparse.shape.at(2) <= 0 || sparse.floatData.empty()) {
         return fail(QString::fromUtf8(kShapeMismatch));

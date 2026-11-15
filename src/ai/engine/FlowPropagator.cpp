@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -41,11 +43,32 @@ int maskArea(const BinaryMask &mask)
 
 struct FlowPropagator::Impl {
     cv::Ptr<cv::optflow::DISOpticalFlow> dis;
+    // Cached (x, y) pixel grid reused by every propagation at a given size, so
+    // the per-frame map construction is one vectorized add instead of a scalar
+    // loop.
+    cv::Mat baseGrid;
+    cv::Size baseSize;
 
     Impl()
     {
+        // PRESET_FAST keeps the K=5 propagation IoU above the 0.90 gate while
+        // reducing the 1080p DIS cost; verified by TrackingPipelineTest.
         dis = cv::optflow::createOptFlow_DIS(
-            cv::optflow::DISOpticalFlow::PRESET_MEDIUM);
+            cv::optflow::DISOpticalFlow::PRESET_FAST);
+    }
+
+    const cv::Mat &gridFor(cv::Size size)
+    {
+        if (baseSize != size || baseGrid.empty()) {
+            baseGrid.create(size.height, size.width, CV_32FC2);
+            for (int y = 0; y < size.height; ++y) {
+                cv::Vec2f *row = baseGrid.ptr<cv::Vec2f>(y);
+                for (int x = 0; x < size.width; ++x)
+                    row[x] = cv::Vec2f(float(x), float(y));
+            }
+            baseSize = size;
+        }
+        return baseGrid;
     }
 };
 
@@ -63,60 +86,48 @@ namespace {
 // inverse field is an adequate proxy for confidence gating.
 FlowPropagationResult warpWithFlow(const QImage &destination,
                                    const BinaryMask &sourceMask,
-                                   const cv::Mat &flow)
+                                   const cv::Mat &flow,
+                                   const cv::Mat &baseGrid)
 {
     FlowPropagationResult result;
-    cv::Mat mapX(destination.height(), destination.width(), CV_32FC1);
-    cv::Mat mapY(destination.height(), destination.width(), CV_32FC1);
-    for (int y = 0; y < flow.rows; ++y) {
-        const cv::Vec2f *row = flow.ptr<cv::Vec2f>(y);
-        float *mapXRow = mapX.ptr<float>(y);
-        float *mapYRow = mapY.ptr<float>(y);
-        for (int x = 0; x < flow.cols; ++x) {
-            mapXRow[x] = float(x) + row[x][0];
-            mapYRow[x] = float(y) + row[x][1];
-        }
-    }
 
+    // (x,y) + flow in one vectorized pass, then a single CV_32FC2 remap.
+    cv::Mat map;
+    cv::add(flow, baseGrid, map);
     const cv::Mat source = maskMat(sourceMask);
     cv::Mat warped;
-    cv::remap(source, warped, mapX, mapY, cv::INTER_LINEAR,
+    cv::remap(source, warped, map, cv::noArray(), cv::INTER_LINEAR,
               cv::BORDER_CONSTANT, cv::Scalar(0));
+
+    // Threshold the whole warp at once, then copy the 0/255 bytes directly.
+    cv::Mat binary;
+    cv::compare(warped, 128, binary, cv::CMP_GE);
+    const int area = cv::countNonZero(binary);
 
     BinaryMask mask;
     mask.width = destination.width();
     mask.height = destination.height();
     mask.bits.assign(size_t(mask.width) * size_t(mask.height), 0);
-    int area = 0;
-    for (int y = 0; y < warped.rows; ++y) {
-        const uchar *row = warped.ptr<uchar>(y);
-        uint8_t *out = mask.bits.data() + size_t(y) * mask.width;
-        for (int x = 0; x < warped.cols; ++x) {
-            if (row[x] >= 128) {
-                out[x] = 255;
-                ++area;
-            }
-        }
+    for (int y = 0; y < binary.rows; ++y) {
+        std::memcpy(mask.bits.data() + size_t(y) * size_t(mask.width),
+                    binary.ptr<uchar>(y), size_t(mask.width));
     }
 
-    double sumMagnitude = 0.0;
+    // Flow magnitude metrics without a per-pixel sqrt loop.
+    std::vector<cv::Mat> channels;
+    cv::split(flow, channels);
+    cv::Mat magnitude;
+    cv::magnitude(channels[0], channels[1], magnitude);
+    cv::Scalar mean;
+    cv::Scalar stddev;
+    cv::meanStdDev(magnitude, mean, stddev);
     double maxMagnitude = 0.0;
+    cv::minMaxLoc(magnitude, nullptr, &maxMagnitude);
     const int pixels = flow.rows * flow.cols;
-    for (int y = 0; y < flow.rows; ++y) {
-        const cv::Vec2f *row = flow.ptr<cv::Vec2f>(y);
-        for (int x = 0; x < flow.cols; ++x) {
-            const double magnitude =
-                std::sqrt(double(row[x][0]) * row[x][0]
-                          + double(row[x][1]) * row[x][1]);
-            sumMagnitude += magnitude;
-            maxMagnitude = std::max(maxMagnitude, magnitude);
-        }
-    }
 
     result.ok = true;
     result.mask = std::move(mask);
-    result.meanFlowPx =
-        pixels > 0 ? float(sumMagnitude / double(pixels)) : 0.0f;
+    result.meanFlowPx = pixels > 0 ? float(mean[0]) : 0.0f;
     result.maxFlowPx = float(maxMagnitude);
     result.areaPx = area;
     result.areaChangePercent = areaChangePercent(area, maskArea(sourceMask));
@@ -157,7 +168,8 @@ FlowPropagationResult FlowPropagator::propagate(const QImage &previous,
         // (x + flow) warps it forward onto the current frame.
         cv::Mat flow;
         m_impl->dis->calc(currentGray, previousGray, flow);
-        return warpWithFlow(current, previousMask, flow);
+        return warpWithFlow(current, previousMask, flow,
+                            m_impl->gridFor(flow.size()));
     } catch (const cv::Exception &exception) {
         result.error = QStringLiteral("光流传播失败：%1")
                            .arg(QString::fromUtf8(exception.what()));
@@ -196,7 +208,8 @@ FlowPropagationResult FlowPropagator::propagateBackward(
         // (x + flow) warps it backward onto the previous frame.
         cv::Mat flow;
         m_impl->dis->calc(previousGray, currentGray, flow);
-        return warpWithFlow(previous, currentMask, flow);
+        return warpWithFlow(previous, currentMask, flow,
+                            m_impl->gridFor(flow.size()));
     } catch (const cv::Exception &exception) {
         result.error = QStringLiteral("光流传播失败：%1")
                            .arg(QString::fromUtf8(exception.what()));

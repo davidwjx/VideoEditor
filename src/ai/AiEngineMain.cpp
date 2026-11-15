@@ -661,6 +661,18 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
             // write, so transparent pixels stay (0,0,0,0) and PNG compresses.
             for (QImage &image : patchImages)
                 clearRgbWhereTransparent(image);
+            // Trim each patch to its alpha>0 bounds and rebase its crop so the
+            // compositor/RepairFrameSource mapping stays exact while the cache
+            // no longer carries an all-transparent margin.
+            for (int i = 0; i < patchImages.size(); ++i) {
+                const QRect bounds = alphaBounds(patchImages[i]);
+                if (bounds.isEmpty() || bounds == patchImages[i].rect())
+                    continue;
+                patchImages[i] = patchImages[i].copy(bounds);
+                crops[i] = QRect(crops[i].x() + bounds.x(),
+                                 crops[i].y() + bounds.y(), bounds.width(),
+                                 bounds.height());
+            }
         }
 
         // A chunk with no holes is still written (with an empty frame list) so
