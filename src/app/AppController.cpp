@@ -288,7 +288,7 @@ AppController::AppController(QObject *parent, QString recoveryPath,
                 m_removal->notifyLivePreviewReady();
                 // A paused preview only re-composes when asked; coalesce the
                 // burst of prefetch completions into one request.
-                if (!m_preview->playing())
+                if (!m_preview->playing() && !m_liveRefreshTimer.isActive())
                     m_liveRefreshTimer.start();
             });
     m_removal->setLivePreviewStarter(

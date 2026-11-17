@@ -333,8 +333,15 @@ int TimelineCompositor::drawFrame(int64_t timelineUs,
             LiveRepairPatch live;
             if (m_liveRepair->patchFor(removal->id, layer.sourceTimeUs, &live)
                 && !live.image.isNull()) {
+                if (live.crop.isEmpty()
+                    || live.sourceWidth <= 0 || live.sourceHeight <= 0
+                    || !live.image.rect().contains(live.crop)) {
+                    // A provider must not stretch a malformed patch over the
+                    // whole layer; fall through to the cache/original.
+                    continue;
+                }
                 const LayerRect liveRect = insetLayerRectForCrop(
-                    rect, live.crop, source->width(), source->height());
+                    rect, live.crop, live.sourceWidth, live.sourceHeight);
                 if (m_compare == RemovalCompareMode::SplitWipe) {
                     RECT left{0, 0, LONG(m_width * m_splitPermille / 1000),
                               LONG(m_height)};

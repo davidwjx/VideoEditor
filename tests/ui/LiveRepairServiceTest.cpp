@@ -215,9 +215,11 @@ TEST(LiveRepairService, MissingMaskStopsWithChineseError)
 
     QTemporaryDir cacheDir;
     ASSERT_TRUE(cacheDir.isValid());
-    // Configure() only needs one mask to accept the cache; the worker then
-    // hits the missing target mask and must stop instead of showing original.
-    ASSERT_TRUE(writeMaskFor(cacheDir.path(), 0));
+    // Configure accepts a complete tracking cache; deleting the target mask
+    // afterwards simulates a cache that becomes incomplete while live preview
+    // is running. The worker must stop instead of showing the original.
+    for (int frame = 0; frame < fixture.frameCount; ++frame)
+        ASSERT_TRUE(writeMaskFor(cacheDir.path(), frame)) << frame;
 
     LiveRepairSpec spec = specFor(fixture, cacheDir.path());
     const int targetFrame = qMin(5, fixture.frameCount - 1);
@@ -229,6 +231,7 @@ TEST(LiveRepairService, MissingMaskStopsWithChineseError)
     service.setInpainterForTest(std::make_unique<SolidInpainter>());
     QString error;
     ASSERT_TRUE(service.configure(spec, &error)) << error.toStdString();
+    ASSERT_TRUE(QFile::remove(maskPathFor(cacheDir.path(), targetFrame)));
 
     QSignalSpy errors(&service, &LiveRepairService::error);
     service.setTarget(targetUs);

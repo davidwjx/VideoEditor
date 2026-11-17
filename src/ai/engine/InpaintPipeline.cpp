@@ -141,9 +141,8 @@ Inpainter *InpaintPipeline::activeInpainter(RepairMode mode, QString *error)
                 *error = QStringLiteral("未配置 LaMa 模型路径。");
             return nullptr;
         }
-        auto inpainter =
-            std::make_unique<LamaInpainter>(m_config.lamaPath,
-                                            m_config.deviceIndex);
+        auto inpainter = std::make_unique<LamaInpainter>(
+            m_config.lamaPath, m_config.deviceIndex, m_config.allowDml);
         if (!inpainter->isReady()) {
             if (error)
                 *error = inpainter->lastError();

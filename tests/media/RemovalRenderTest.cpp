@@ -205,6 +205,8 @@ public:
         image.fill(color);
         patch->image = image;
         patch->crop = crop;
+        patch->sourceWidth = kWidth;
+        patch->sourceHeight = kHeight;
         return true;
     }
 };

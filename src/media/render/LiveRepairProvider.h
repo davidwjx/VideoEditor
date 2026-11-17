@@ -16,6 +16,10 @@ namespace VideoEditor {
 struct LiveRepairPatch {
     QImage image;
     QRect crop;
+    // Display-sized source frame the crop refers to (asset display geometry,
+    // not the proxy size). The compositor maps the crop with these.
+    int sourceWidth = 0;
+    int sourceHeight = 0;
 };
 
 // Read-only view the compositor consults before the on-disk repair cache. The

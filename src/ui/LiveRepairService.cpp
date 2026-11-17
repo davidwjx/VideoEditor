@@ -147,6 +147,12 @@ bool LiveRepairService::configure(const LiveRepairSpec &spec, QString *error)
     }
     if (reader->frameCount() <= 0)
         return fail(QStringLiteral("实时预览帧数为零。"));
+    if (maskFiles.size() < reader->frameCount()) {
+        return fail(QStringLiteral("AI 跟踪尚未完成（遮罩 %1/%2）。"
+                                   "请先完成跟踪，再开启实时预览。")
+                        .arg(maskFiles.size())
+                        .arg(reader->frameCount()));
+    }
 
     auto pipeline = std::make_unique<InpaintPipeline>();
     if (injected) {
@@ -337,7 +343,9 @@ bool LiveRepairService::processFrame(int frame)
     }
 
     const PatchResult &result = patches->first();
-    storePatch(frame, LiveRepairPatch{result.rgba, result.crop});
+    storePatch(frame, LiveRepairPatch{result.rgba, result.crop,
+                                              spec.displaySize.width(),
+                                              spec.displaySize.height()});
     emit frameReady(frame);
     return true;
 }
@@ -345,10 +353,13 @@ bool LiveRepairService::processFrame(int frame)
 void LiveRepairService::run()
 {
     while (!m_stop.load()) {
+        // Read the serial before the target: setTarget() stores the target and
+        // then bumps the serial, so this order cannot pair a new serial with a
+        // stale target.
+        const quint64 serial = m_targetSerial.load();
         const int target = frameForSourceUs(m_targetUs.load());
         if (target < 0)
             break;
-        const quint64 serial = m_targetSerial.load();
 
         if (!processFrame(target))
             break;
