@@ -171,7 +171,7 @@ build/windows-x64-release/Release/VideoEditor.exe
   1. 将模型目录放到 `VIDEOEDITOR_M4_MODELS`（或应用目录 `models/`），其中包含 `models.manifest.json` 与已校验的 ONNX 文件；
   2. 设置 `VIDEOEDITOR_M4_TECHNICAL=1`，界面显示“内部技术预览”免责声明；
   3. 未设置时功能保持禁用，并显示门禁原因。
-- 验收（详见 `docs/superpowers/research/2026-11-15-m4-acceptance.md`）：在 RTX 5060 Ti 16 GB 上，1080p30/10 秒单目标 **43.4 秒**完成，峰值显存 **1.5 GB**；MI-GAN DML 38 fps、LaMa DML 20 fps、关键帧分割约 7 ms、DIS 1080p 26.6 fps、关键帧 IoU 0.945、K=5 传播 IoU 0.960。**洞内 PSNR 8.71–13.53 dB 未达 28 dB**、小源文件缓存比约 14.6×，仍为模型/格式限制。
+- 验收（详见 `docs/superpowers/research/2026-11-15-m4-acceptance.md`）：在 RTX 5060 Ti 16 GB 上，1080p30/10 秒单目标 **48.8 秒**完成（三套语料 46–66 秒），峰值显存 **1.5 GB**；MI-GAN DML 38 fps、LaMa DML 20 fps、关键帧分割约 7 ms、DIS 1080p 26.6 fps、关键帧 IoU 0.945、K=5 传播 IoU 0.960。**洞内 PSNR 11.87–13.95 dB 未达 28 dB**、小源文件缓存比约 15–17×，仍为模型/格式限制。
 - 已知限制：仅 1080p SDR、恒定帧率（VFR 会被明确拒绝）；一个片段一个消除目标；快速运动/大遮挡/反射效果有限；修复是离线任务而非实时预览；模型分发与法务结论仍是发布前置条件。
 
 ## 测试

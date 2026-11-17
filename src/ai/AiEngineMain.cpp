@@ -649,19 +649,12 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
                     patchImages, crops, centroids,
                     spec.parameters.stabilizationStrength);
             }
-            // Second colour match after stabilization so the median blend
-            // cannot introduce a global tint.
-            for (int i = 0; i < patchImages.size(); ++i) {
-                const QImage sourceCrop =
-                    frames.at(patchIndices.at(i)).copy(crops.at(i));
-                const BinaryMask maskCrop =
-                    cropBinaryMask(masks.at(patchIndices.at(i)), crops.at(i));
-                InpaintPipeline::colorMatch(sourceCrop, &patchImages[i],
-                                            maskCrop);
-            }
-            // The stabilizer and the second colour match can write RGB back
-            // under alpha == 0. Clear it last, immediately before the cache
-            // write, so transparent pixels stay (0,0,0,0) and PNG compresses.
+            // No second colour match here: InpaintPipeline has already
+            // matched the ring and cleared RGB under alpha == 0, so a second
+            // ring match would read the cleared margin as black and add the
+            // source ring again (doubling the fill colour).
+            // The stabilizer can write RGB back under alpha == 0; clear it
+            // last, immediately before the cache write.
             for (QImage &image : patchImages)
                 clearRgbWhereTransparent(image);
             // Trim each patch to its alpha>0 bounds and rebase its crop so the

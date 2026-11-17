@@ -26,6 +26,28 @@ int maskArea(const BinaryMask &mask)
                              [](uint8_t value) { return value != 0; }));
 }
 
+// Guard against a segmentation refinement that jumps to a different object or
+// a different part of the frame. Area alone is not enough: a same-sized mask
+// can jump far away and still look plausible.
+float maskIou(const BinaryMask &a, const BinaryMask &b)
+{
+    if (!a.isValid() || !b.isValid() || a.width != b.width
+        || a.height != b.height) {
+        return 0.0f;
+    }
+    int64_t intersection = 0;
+    int64_t unions = 0;
+    for (size_t i = 0; i < a.bits.size(); ++i) {
+        const bool inA = a.bits[i] != 0;
+        const bool inB = b.bits[i] != 0;
+        if (inA && inB)
+            ++intersection;
+        if (inA || inB)
+            ++unions;
+    }
+    return unions > 0 ? float(intersection) / float(unions) : 1.0f;
+}
+
 
 } // namespace
 

@@ -392,22 +392,22 @@ unchanged because they are model/format limits, not speed limits.
 
 ```
 REMOVAL_SELFTEST_FAIL threshold set=soft-1080p
-  psnr=8.71 psnrThreshold=28.00 seconds=43.4 timingThreshold=300
-  cacheBytes=13227347 cacheBudget=1805744 sourceBytes=902872
+  psnr=11.87 psnrThreshold=28.00 seconds=48.8 timingThreshold=300
+  cacheBytes=13950077 cacheBudget=1805744 sourceBytes=902872
   completedFrames=300 frames=300 provider=tracker=dml;inpaint=dml
 ```
 
 | Metric | iGPU (2026-11-15) | RTX 5060 Ti (2026-11-18) | Verdict |
 |---|---|---|---|
-| Job time (1080p30 10 s) | 164.1 s | **43.4 s** | PASS (target 156–186 s not met; ≤300 s met) |
+| Job time (1080p30 10 s) | 164.1 s | **48.8 s** (soft; 46–66 s across sets) | PASS (target 156–186 s not met; ≤300 s met) |
 | Provider | tracker=cpu;inpaint=dml | **tracker=dml;inpaint=dml** | — |
 | Peak VRAM (nvidia-smi sampling, 0.2 s) | not measured | **1,533 MiB** | PASS (≤4 GB) |
 | DIS 1080p | 26.6 fps | 26.6 fps (CPU DIS) | PASS |
 | MI-GAN warm | 2.26 fps | **38 fps** | PASS (≥10 fps interactive gate) |
 | LaMa int8 DML | not run (CPU 1.68 fps) | **20 fps** | PASS (≥2 fps gate) |
 | Keyframe segmentation | 66–72 ms | **≈7 ms** | PASS (≤100 ms) |
-| Hole PSNR (soft GT) | 8.71 dB | **8.71 dB** | **FAIL** (28 dB), unchanged model quality |
-| Cache/source (soft) | 14.65× | **14.65×** | **FAIL** (2×), unchanged format/source-size limit |
+| Hole PSNR (soft GT) | 8.71 dB | **11.87 dB** | **FAIL** (28 dB), model quality |
+| Cache/source (soft) | 14.65× | **15.45×** | **FAIL** (2×), format/source-size limit |
 
 VRAM methodology: the selftest ran while `nvidia-smi
 --query-gpu=memory.used --format=csv,noheader,nounits` was sampled every 0.2 s;
@@ -427,10 +427,15 @@ in-process counter; a product-grade VRAM sampler is still M5 work.
   repair mode is now an M5 UX decision, not a hardware blocker.
 - **VRAM is no longer a SKIP:** 1.5 GB peak on a 16 GB card is well inside the
   4 GB gate.
-- **Quality did not improve:** PSNR and the small-source cache ratio are
-  independent of GPU speed. The generative fill remains the limiting factor;
-  licensing remains release-blocked; the 3-reviewer subjective review remains
-  not performed.
+- **Quality improved only marginally:** removing a double colour-match bug
+  (the engine re-ran the ring match after RGB under alpha==0 had been cleared,
+  which read black and added the source ring again) raised soft/smooth PSNR
+  from 8.71/13.53 to **11.87/13.95 dB**, still below 28 dB. The generative fill
+  and the small-source cache ratio remain the limiting factors; licensing
+  remains release-blocked; the 3-reviewer subjective review remains not
+  performed. A diffusion hybrid for smooth boundaries was prototyped and
+  measured but not kept: it improved some frames yet produced inconsistent
+  per-frame results, so it is M5 work.
 
 ### 11.4 Reproduce
 
