@@ -405,6 +405,10 @@ void RemovalController::setLivePreview(bool enabled)
 
 void RemovalController::notifySelectionChanged()
 {
+    // The always-visible layer switch outside mask mode must reflect the
+    // selected clip's layer, not a value cached while mask mode was open.
+    if (const RemovalLayer *layer = activeRemovalLayer())
+        m_layerEnabled = layer->enabled;
     emit layerChanged();
     notifyAnalysisChanged();
 }
@@ -1082,6 +1086,8 @@ void RemovalController::endMask()
     m_maskMode = false;
     m_activeClipId.clear();
     m_layerEnabled = true;
+    if (const RemovalLayer *layer = activeRemovalLayer())
+        m_layerEnabled = layer->enabled;
     m_boxMode = false;
     m_eraseMode = false;
 
@@ -1507,8 +1513,11 @@ void RemovalController::updateOverlay()
 
 void RemovalController::refreshFromDocument()
 {
-    if (!m_maskMode)
+    if (!m_maskMode) {
+        if (const RemovalLayer *layer = activeRemovalLayer())
+            m_layerEnabled = layer->enabled;
         return;
+    }
     // The masked clip can disappear through delete/split/ripple edits. Leaving
     // mask mode on would keep a full-preview click blocker with no panel.
     if (!activeClip()) {

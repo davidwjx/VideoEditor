@@ -112,6 +112,9 @@ private:
     std::atomic<bool> m_stop{false};
     std::atomic<int64_t> m_targetUs{0};
     std::atomic<quint64> m_targetSerial{0};
+    // Worker-only: the last serial whose target frame was announced, so the
+    // idle 500 ms loop does not keep re-emitting targetReady.
+    quint64 m_announcedSerial = 0;
 
     LiveRepairSpec m_spec;
     int m_frameCount = 0;

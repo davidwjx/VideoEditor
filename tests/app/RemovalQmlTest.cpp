@@ -318,7 +318,9 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     EXPECT_TRUE(controller.removal()->currentMaskEmpty());
     EXPECT_FALSE(addKeyframe->isEnabled());
     EXPECT_TRUE(firstRunHint->isVisible());
-    EXPECT_TRUE(actionReason->isVisible());
+    // The disabled-reason label is only needed when an action is blocked (gate
+    // closed); in the technical-preview run there are keyframes and no reason.
+    EXPECT_EQ(actionReason->isVisible(), !controller.aiFeatureEnabled());
     EXPECT_EQ(trackingState->property("text").toString(),
               QStringLiteral("跟踪：完成"));
 

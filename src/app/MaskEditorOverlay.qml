@@ -15,12 +15,19 @@ Item {
     property var removal: (typeof Removal !== "undefined") ? Removal : null
 
     readonly property bool editing: removal !== null && removal.maskMode
-    readonly property rect content: (previewItem !== null
-                                     && previewItem !== undefined
-                                     && previewItem.contentRect !== undefined)
-                                    ? previewItem.mapRectToItem(overlay,
-                                                                previewItem.contentRect)
-                                    : Qt.rect(0, 0, width, height)
+    readonly property rect content: {
+        if (previewItem === null || previewItem === undefined
+            || previewItem.contentRect === undefined)
+            return Qt.rect(0, 0, width, height)
+        const r = previewItem.contentRect
+        const topLeft = previewItem.mapToItem(overlay, r.x, r.y)
+        const bottomRight = previewItem.mapToItem(overlay,
+                                                  r.x + r.width,
+                                                  r.y + r.height)
+        return Qt.rect(topLeft.x, topLeft.y,
+                       bottomRight.x - topLeft.x,
+                       bottomRight.y - topLeft.y)
+    }
 
     property point boxStart: Qt.point(0, 0)
     property point lastPoint: Qt.point(0, 0)

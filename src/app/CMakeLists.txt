@@ -30,6 +30,9 @@ qt_add_qml_module(VideoEditor
     ExportDialog.qml
 )
 target_link_libraries(VideoEditor PRIVATE Qt6::Quick Qt6::QuickControls2 videoeditor_app)
+if(WIN32)
+  target_link_libraries(VideoEditor PRIVATE winmm)
+endif()
 
 if(WIN32 AND FFMPEG_ROOT)
   file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")

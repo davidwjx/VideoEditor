@@ -77,6 +77,31 @@ TEST(RemovalController, StrokeCreatesOneUndoCommandAndUndoRestoresMask)
     EXPECT_NE(controller.currentMaskHash(), before);
 }
 
+TEST(RemovalController, DisabledLayerStateSurvivesLeavingMaskMode)
+{
+    QTemporaryDir dir;
+    ProjectDocument doc;
+    Project project = projectWithClip();
+    RemovalLayer layer = sampleLayer();
+    layer.enabled = false;
+    project.removalLayers.append(layer);
+    project.tracks[0].clips[0].removalLayerId = layer.id;
+    doc.setProject(project);
+
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    RemovalController controller(doc, sidecars);
+    controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    controller.beginMask(QStringLiteral("clip-1"));
+    EXPECT_FALSE(controller.layerEnabled());
+    controller.endMask();
+    EXPECT_FALSE(controller.layerEnabled())
+        << "leaving mask mode must not resurrect the disabled layer";
+    controller.notifySelectionChanged();
+    EXPECT_FALSE(controller.layerEnabled());
+}
+
 TEST(RemovalController, FeatherChangeDoesNotChangeMaskHash)
 {
     QTemporaryDir dir;

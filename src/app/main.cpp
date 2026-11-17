@@ -6,6 +6,7 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <QTimer>
+#include <cstring>
 
 #include "AppController.h"
 #include "AppInfo.h"
@@ -18,11 +19,32 @@
 #include "VideoPreviewItem.h"
 #include "WaveformImageProvider.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <mmsystem.h>
+#endif
+
 int main(int argc, char *argv[])
 {
+    // The performance self-test measures composition throughput, not the
+    // refresh rate of a remote/virtual display. Keep the normal app vsynced.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--selftest-perf") == 0) {
+            qputenv("QSG_NO_VSYNC", "1");
+            break;
+        }
+    }
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
 
     QGuiApplication app(argc, argv);
+#ifdef _WIN32
+    // Media playback needs the 1 ms timer resolution; without it Windows rounds
+    // a 33 ms QTimer up to 46.9 ms (~21 fps) on machines where no other process
+    // has raised the resolution.
+    timeBeginPeriod(1);
+#endif
     QGuiApplication::setOrganizationName(QStringLiteral("VideoEditor"));
     QGuiApplication::setApplicationName(QStringLiteral("VideoEditor"));
 
@@ -103,6 +125,7 @@ int main(int argc, char *argv[])
     if (engine.rootObjects().isEmpty())
         return -1;
 
+
     if (parser.isSet(QStringLiteral("selftest"))) {
         QObject::connect(&controller,
                          &VideoEditor::AppController::selftestFramePresented,
@@ -147,5 +170,9 @@ int main(int argc, char *argv[])
         });
     }
 
-    return app.exec();
+    const int code = app.exec();
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
+    return code;
 }

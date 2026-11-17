@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <memory>
+#include <thread>
 #include <optional>
 
 #include <QColor>
@@ -49,6 +52,29 @@ public:
                                       const BinaryMask &maskCrop,
                                       QString *) override
     {
+        QImage out = crop.convertToFormat(QImage::Format_ARGB32);
+        for (int y = 0; y < out.height(); ++y)
+            for (int x = 0; x < out.width(); ++x)
+                if (maskCrop.at(x, y))
+                    out.setPixelColor(x, y, QColor(200, 30, 30, 255));
+        return PatchResult{out, QRect()};
+    }
+
+    QString provider() const override { return QStringLiteral("cpu"); }
+};
+
+class BlockingInpainter : public Inpainter {
+public:
+    std::atomic<bool> started{false};
+    std::atomic<bool> release{false};
+
+    std::optional<PatchResult> repair(const QImage &crop,
+                                      const BinaryMask &maskCrop,
+                                      QString *) override
+    {
+        started.store(true);
+        while (!release.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         QImage out = crop.convertToFormat(QImage::Format_ARGB32);
         for (int y = 0; y < out.height(); ++y)
             for (int x = 0; x < out.width(); ++x)
@@ -231,6 +257,39 @@ TEST(LiveRepairService, RepairsTargetFirstMapsTimesAndBoundsCache)
                  "LIVE_REPAIR_SERVICE_METRICS targetLatencyMs=%lld "
                  "frameCount=%d\n",
                  static_cast<long long>(targetLatencyMs), fixture.frameCount);
+}
+
+TEST(LiveRepairService, TargetChangedDuringRepairDoesNotAnnounceStaleFrame)
+{
+    Fixture fixture;
+    if (!makeFixture(&fixture))
+        GTEST_SKIP() << "h264.mp4 could not be opened";
+
+    QTemporaryDir cacheDir;
+    ASSERT_TRUE(cacheDir.isValid());
+    for (int frame = 0; frame < fixture.frameCount; ++frame)
+        ASSERT_TRUE(writeMaskFor(cacheDir.path(), frame)) << frame;
+
+    LiveRepairSpec spec = specFor(fixture, cacheDir.path());
+    auto *inpainter = new BlockingInpainter;
+    LiveRepairService service;
+    service.setInpainterForTest(std::unique_ptr<Inpainter>(inpainter));
+    QString error;
+    ASSERT_TRUE(service.configure(spec, &error)) << error.toStdString();
+
+    QSignalSpy targetReady(&service, &LiveRepairService::targetReady);
+    service.setTarget(targetUsFor(0, fixture.fps));
+    service.start();
+    ASSERT_TRUE(waitUntil([&] { return inpainter->started.load(); }, 5000));
+
+    // Scrub while the old target is still inside the fake inpainter. The old
+    // serial must not announce "ready"; only the new target may.
+    const int newTarget = qMin(3, fixture.frameCount - 1);
+    service.setTarget(targetUsFor(newTarget, fixture.fps));
+    inpainter->release.store(true);
+    ASSERT_TRUE(waitUntil([&] { return targetReady.count() > 0; }, 10000));
+    EXPECT_EQ(targetReady.first().at(0).toInt(), newTarget);
+    service.stop();
 }
 
 TEST(LiveRepairService, MissingMaskStopsWithChineseError)

@@ -295,8 +295,6 @@ bool LiveRepairService::processFrame(int frame, bool targetFrame)
     if (alreadyDone) {
         // A prefetched frame can become the new playhead target. It is ready
         // immediately, so the status must not hang on "正在修复当前帧…".
-        if (targetFrame && frameForSourceUs(m_targetUs.load()) == frame)
-            emit targetReady(frame);
         return true;
     }
 
@@ -352,8 +350,6 @@ bool LiveRepairService::processFrame(int frame, bool targetFrame)
             std::lock_guard<std::mutex> lock(m_stateMutex);
             m_emptyFrames.insert(frame);
         }
-        if (targetFrame && frameForSourceUs(m_targetUs.load()) == frame)
-            emit targetReady(frame);
         return true;
     }
 
@@ -363,10 +359,6 @@ bool LiveRepairService::processFrame(int frame, bool targetFrame)
                                               spec.displaySize.height()});
     publishBackend();
     emit frameReady(frame);
-    // Prefetch completions must not claim the playhead is ready: only emit
-    // when the frame being published is still the current target.
-    if (targetFrame && frameForSourceUs(m_targetUs.load()) == frame)
-        emit targetReady(frame);
     return true;
 }
 
@@ -399,6 +391,12 @@ void LiveRepairService::run()
 
         if (!processFrame(target, /*targetFrame=*/true))
             break;
+        // The target may have moved while the frame was being repaired; only
+        // announce when the serial that was processed is still current.
+        if (m_targetSerial.load() == serial && m_announcedSerial != serial) {
+            m_announcedSerial = serial;
+            emit targetReady(target);
+        }
 
         // Prefetch the window sequentially in each direction: FrameReader
         // decodes forward cheaply, while every backwards step seeks to a

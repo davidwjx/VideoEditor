@@ -25,7 +25,7 @@ ColumnLayout {
             return removal.featureDisabledReason
         if (removal.generating)
             return "AI 任务运行中，请等待完成或取消。"
-        if (!hasKeyframes || removal.currentMaskEmpty)
+        if (!hasKeyframes)
             return "请先在画面上涂抹要消除的物体；第一笔会自动创建关键帧。"
         return ""
     }
