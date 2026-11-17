@@ -555,3 +555,53 @@ TEST(RemovalPreflight, IncompleteTrackingBlocksButLowConfidenceOnlyWarns)
     EXPECT_TRUE(result.message.contains(QStringLiteral("置信度较低")))
         << result.message.toStdString();
 }
+
+TEST(RemovalPreflight, ReportsFirstFailingClipByFilenameAndTimelineTime)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    RemovalCache cache(dir.path());
+    const ModelRegistry registry = ModelRegistry::forTest(approvedManifest());
+
+    Project project;
+    RemovalLayer firstLayer;
+    const QString firstKey =
+        projectWithRemovalLayer(registry, &project, &firstLayer);
+    const RemovalKeyInput firstInput = RemovalPreflight::keyInputFor(
+        project, project.tracks[0].clips[0], firstLayer, registry);
+    writeCompleteCache(dir.path(), firstKey, firstInput);
+    project.removalLayers[0].cacheKey = firstKey;
+    project.removalLayers[0].cachePath = QStringLiteral("removal/") + firstKey;
+
+    // Second clip on the same asset starts at 2 s and has no valid cache.
+    Clip second = project.tracks[0].clips[0];
+    second.id = QStringLiteral("clip-2");
+    second.timelineStartUs = 2'000'000;
+    second.sourceInUs = 0;
+    second.sourceOutUs = 2'000'000;
+    second.removalLayerId = QStringLiteral("rl-2");
+    project.tracks[0].clips.append(second);
+
+    RemovalLayer secondLayer = sampleLayer();
+    secondLayer.id = QStringLiteral("rl-2");
+    secondLayer.clipId = QStringLiteral("clip-2");
+    secondLayer.cacheKey = QString(64, QLatin1Char('f'));
+    secondLayer.cachePath = QStringLiteral("removal/") + secondLayer.cacheKey;
+    project.removalLayers.append(secondLayer);
+
+    const RemovalPreflightResult result =
+        RemovalPreflight::check(project, cache, registry);
+    EXPECT_FALSE(result.ok);
+    ASSERT_EQ(result.issues.size(), 1);
+    EXPECT_EQ(result.issues.first().clipId, QStringLiteral("clip-2"))
+        << "the first failing clip must be the one the prompt targets";
+    EXPECT_TRUE(result.issues.first().reason.contains(
+        QStringLiteral("示例.mp4")))
+        << result.issues.first().reason.toStdString();
+    EXPECT_TRUE(result.message.contains(QStringLiteral("示例.mp4")))
+        << result.message.toStdString();
+    EXPECT_TRUE(result.message.contains(QStringLiteral("00:00:02.000")))
+        << result.message.toStdString();
+    EXPECT_FALSE(result.message.contains(QStringLiteral("clip-2")))
+        << "internal UUIDs must not leak into user-facing messages";
+}

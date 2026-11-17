@@ -83,16 +83,23 @@ Item {
                 color: modelData.color
             }
         }
+    }
 
-        MouseArea {
-            anchors.fill: parent
-            onClicked: (mouse) => {
-                if (root.removal === null || root.band.length === 0)
-                    return
-                const idx = root.indexAtX(mouse.x)
-                if (idx >= 0)
-                    root.removal.jumpToConfidence(idx)
-            }
+    // Larger, transparent hit target: the visual strip stays 6 px but the
+    // clickable band is 20 px tall for touch and mouse.
+    MouseArea {
+        id: hitArea
+        objectName: "confidence-band-hit-area"
+        anchors.left: bar.left
+        anchors.right: bar.right
+        anchors.verticalCenter: bar.verticalCenter
+        height: 20
+        onClicked: (mouse) => {
+            if (root.removal === null || root.band.length === 0)
+                return
+            const idx = root.indexAtX(mouse.x)
+            if (idx >= 0)
+                root.removal.jumpToConfidence(idx)
         }
     }
 
@@ -102,7 +109,7 @@ Item {
         anchors.top: bar.bottom
         anchors.topMargin: 4
         visible: root.lowCount > 0
-        text: "第 " + root.lowCount + " 段低置信，跳到该帧"
+        text: "有 " + root.lowCount + " 帧低置信，跳到第一处"
         font.pixelSize: 10
         padding: 2
         onClicked: {

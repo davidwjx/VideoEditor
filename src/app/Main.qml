@@ -35,6 +35,10 @@ ApplicationWindow {
                                              || recoveryDialog.opened
                                              || App.openPopupCount > 0
     readonly property bool shortcutsEnabled: !textEditing && !shortcutsBlocked
+    // Mask authoring owns the preview: destructive timeline shortcuts stay
+    // disarmed until the user leaves mask mode.
+    readonly property bool removalMaskMode: (typeof Removal !== "undefined")
+                                            && Removal.maskMode
 
     readonly property bool hasTimelineContent: Timeline.durationUs > 0
     readonly property bool clipSelected: Timeline.selectedClipId !== ""
@@ -371,7 +375,10 @@ ApplicationWindow {
 
                 Timer {
                     id: errorToastTimer
-                    interval: 4000
+                    objectName: "error-toast-timer"
+                    // Long enough to read an actionable Chinese error; a click
+                    // on the toast dismisses it immediately.
+                    interval: 8000
                     repeat: false
                     onTriggered: App.clearError()
                 }
@@ -670,18 +677,23 @@ ApplicationWindow {
         onActivated: App.redo()
     }
     Shortcut {
+        objectName: "shortcut-split"
         sequence: "Ctrl+B"
-        enabled: root.shortcutsEnabled
+        // Mask mode owns the preview and these destructive timeline commands
+        // must not fire while the user is painting a removal mask.
+        enabled: root.shortcutsEnabled && !root.removalMaskMode
         onActivated: Timeline.splitAtPlayhead()
     }
     Shortcut {
+        objectName: "shortcut-delete"
         sequence: "Delete"
-        enabled: root.shortcutsEnabled
+        enabled: root.shortcutsEnabled && !root.removalMaskMode
         onActivated: Timeline.deleteSelection(root.rippleMode)
     }
     Shortcut {
+        objectName: "shortcut-ripple-delete"
         sequence: "Shift+Delete"
-        enabled: root.shortcutsEnabled
+        enabled: root.shortcutsEnabled && !root.removalMaskMode
         onActivated: Timeline.deleteSelection(true)
     }
     Shortcut {
@@ -730,8 +742,9 @@ ApplicationWindow {
         onActivated: Timeline.copySelected()
     }
     Shortcut {
+        objectName: "shortcut-paste"
         sequence: "Ctrl+V"
-        enabled: root.shortcutsEnabled
+        enabled: root.shortcutsEnabled && !root.removalMaskMode
         onActivated: Timeline.pasteAtPlayhead()
     }
 

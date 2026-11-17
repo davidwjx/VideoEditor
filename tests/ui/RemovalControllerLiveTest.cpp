@@ -135,7 +135,9 @@ TEST(RemovalControllerLive, BuildsSpecAndTogglesService)
     controller.setLivePreview(true);
     EXPECT_TRUE(controller.livePreview());
     EXPECT_TRUE(started);
-    EXPECT_EQ(controller.livePreviewStatus(), QStringLiteral("实时预览运行中"));
+    // A freshly started paused preview has not repaired its target yet.
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("正在修复当前帧…"));
     EXPECT_EQ(captured.layerId, layer.id);
     EXPECT_EQ(captured.assetPath, document.project().assets.first().path);
     EXPECT_EQ(captured.cacheDir, cache.cacheDir(layer.cacheKey));
@@ -246,5 +248,115 @@ TEST(RemovalControllerLive, RequiresTrackingMasksBeforeStarting)
         QStringLiteral("跟踪")))
         << controller.livePreviewStatus().toStdString();
     EXPECT_TRUE(controller.error().contains(QStringLiteral("请先运行 AI 跟踪")))
+        << controller.error().toStdString();
+}
+
+TEST(RemovalControllerLive, StatusIsTargetSpecificAndShowsBackend)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ProjectDocument document;
+    document.setProject(projectWithLiveLayer());
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    RemovalController controller(document, sidecars);
+
+    AiFeatureGate gate;
+    gate.setEnabledForTest(true);
+    gate.setRegistryForTest(ModelRegistry::forTest(liveManifest(), dir.path()));
+    RemovalCache cache(dir.path());
+    controller.setFeatureGate(&gate);
+    controller.setCache(&cache);
+    controller.setSelectedClipProvider([] { return QStringLiteral("clip-1"); });
+    writeTrackingMask(cache.cacheDir(
+        document.project().removalLayers.first().cacheKey));
+
+    bool playing = false;
+    controller.setPlaybackStateProvider([&] { return playing; });
+    bool started = false;
+    controller.setLivePreviewStarter(
+        [&](const LiveRepairSpec &, QString *) {
+            started = true;
+            return true;
+        });
+    controller.setLivePreviewStopper([] {});
+
+    ASSERT_TRUE(controller.livePreviewAvailable());
+    controller.setLivePreview(true);
+    ASSERT_TRUE(controller.livePreview());
+    ASSERT_TRUE(started);
+
+    // Paused start: no frame is ready yet.
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("正在修复当前帧…"));
+    // A playhead change resets readiness even if an old frame was ready.
+    controller.notifyLivePreviewTargetReady();
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("实时预览就绪（当前帧）"));
+    controller.notifyLivePreviewTargetChanged();
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("正在修复当前帧…"));
+
+    // Backend is reported only after the model session exists.
+    controller.setLivePreviewBackend(QStringLiteral("cpu"));
+    EXPECT_EQ(controller.livePreviewBackend(), QStringLiteral("CPU，较慢"));
+    controller.notifyLivePreviewTargetReady();
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("实时预览就绪（当前帧，CPU，较慢）"));
+
+    // Playback status wins over per-frame readiness so the label does not
+    // flicker between "ready" and "running".
+    playing = true;
+    controller.notifyLivePreviewTargetChanged();
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("实时预览运行中（未就绪帧显示原片/缓存；CPU，较慢）"));
+    controller.notifyLivePreviewTargetReady();
+    EXPECT_EQ(controller.livePreviewStatus(),
+              QStringLiteral("实时预览运行中（未就绪帧显示原片/缓存；CPU，较慢）"));
+
+    controller.setLivePreviewBackend(QStringLiteral("dml"));
+    EXPECT_EQ(controller.livePreviewBackend(), QStringLiteral("DML"));
+    EXPECT_TRUE(controller.livePreviewStatus().contains(QStringLiteral("DML")));
+
+    controller.setLivePreview(false);
+    EXPECT_FALSE(controller.livePreview());
+}
+
+TEST(RemovalControllerLive, PartialTrackingCannotStartLivePreview)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+
+    Project project = projectWithLiveLayer();
+    project.removalLayers.first().trackingState =
+        RemovalTrackingState::Partial;
+    ProjectDocument document;
+    document.setProject(project);
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    RemovalController controller(document, sidecars);
+
+    AiFeatureGate gate;
+    gate.setEnabledForTest(true);
+    gate.setRegistryForTest(ModelRegistry::forTest(liveManifest(), dir.path()));
+    RemovalCache cache(dir.path());
+    controller.setFeatureGate(&gate);
+    controller.setCache(&cache);
+    controller.setSelectedClipProvider([] { return QStringLiteral("clip-1"); });
+    writeTrackingMask(cache.cacheDir(
+        document.project().removalLayers.first().cacheKey));
+
+    bool started = false;
+    controller.setLivePreviewStarter(
+        [&](const LiveRepairSpec &, QString *) {
+            started = true;
+            return true;
+        });
+
+    EXPECT_EQ(controller.trackingStateText(), QStringLiteral("部分"));
+    EXPECT_FALSE(controller.livePreviewAvailable())
+        << "partial tracking masks are not trustworthy enough for live preview";
+    controller.setLivePreview(true);
+    EXPECT_FALSE(controller.livePreview());
+    EXPECT_FALSE(started);
+    EXPECT_TRUE(controller.error().contains(QStringLiteral("跟踪尚未完成")))
         << controller.error().toStdString();
 }

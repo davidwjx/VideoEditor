@@ -317,3 +317,33 @@ TEST(RemovalController, RemovingActiveClipExitsMaskMode)
     EXPECT_FALSE(controller.maskMode());
     EXPECT_TRUE(controller.activeClipId().isEmpty());
 }
+
+TEST(RemovalController, EmptyMaskCannotBecomeAKeyframe)
+{
+    QTemporaryDir dir;
+    ProjectDocument doc;
+    doc.setProject(projectWithClip());
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    RemovalController controller(doc, sidecars);
+
+    controller.beginMask(QStringLiteral("clip-1"));
+    ASSERT_TRUE(controller.maskMode());
+    EXPECT_TRUE(controller.currentMaskEmpty());
+    EXPECT_FALSE(controller.maskHasPixels());
+
+    const int keyframesBefore = controller.maskKeyframes().size();
+    controller.addMaskKeyframeAtPlayhead();
+    EXPECT_EQ(controller.maskKeyframes().size(), keyframesBefore)
+        << "an all-zero mask must not be addable";
+    EXPECT_TRUE(controller.error().contains(QStringLiteral("遮罩为空")))
+        << controller.error().toStdString();
+
+    // The first stroke paints pixels and creates the first keyframe.
+    controller.clearError();
+    controller.beginStroke(10, false);
+    controller.continueStroke(QPointF(0.4, 0.4), QPointF(0.6, 0.6));
+    controller.endStroke();
+    EXPECT_TRUE(controller.maskHasPixels());
+    EXPECT_FALSE(controller.currentMaskEmpty());
+    EXPECT_FALSE(controller.maskKeyframes().isEmpty());
+}

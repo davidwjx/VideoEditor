@@ -34,6 +34,13 @@ QString newId(const QString &prefix)
     return prefix + QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
+bool hasMaskPixels(const BinaryMask &mask)
+{
+    return mask.isValid()
+        && std::any_of(mask.bits.cbegin(), mask.bits.cend(),
+                       [](uint8_t value) { return value != 0; });
+}
+
 QString confidenceColorFor(const QString &state)
 {
     if (state == QLatin1String("good"))
@@ -150,7 +157,80 @@ bool RemovalController::livePreviewAvailable() const
     if (!m_featureGate || !m_featureGate->enabled())
         return false;
     const RemovalLayer *layer = activeRemovalLayer();
-    return layer && trackingMasksPresent(*layer);
+    if (!layer)
+        return false;
+    // Partial/failed tracking can leave a few mask files behind, but those
+    // holes are not trustworthy for a live preview.
+    if (layer->trackingState != RemovalTrackingState::Complete
+        && layer->trackingState != RemovalTrackingState::LowConfidence) {
+        return false;
+    }
+    return trackingMasksPresent(*layer);
+}
+
+void RemovalController::setPlaybackStateProvider(
+    std::function<bool()> provider)
+{
+    m_playingProvider = std::move(provider);
+}
+
+QString RemovalController::livePreviewBackendSuffix() const
+{
+    if (m_livePreviewBackend.isEmpty())
+        return QString();
+    return QStringLiteral("（%1）").arg(m_livePreviewBackend);
+}
+
+void RemovalController::refreshLivePreviewStatus()
+{
+    if (!m_livePreview)
+        return;
+    const bool playing = m_playingProvider && m_playingProvider();
+    if (playing) {
+        setLivePreviewStatus(
+            QStringLiteral("实时预览运行中（未就绪帧显示原片/缓存%1）")
+                .arg(m_livePreviewBackend.isEmpty()
+                         ? QString()
+                         : QStringLiteral("；%1").arg(m_livePreviewBackend)));
+        return;
+    }
+    if (m_liveTargetReady) {
+        setLivePreviewStatus(
+            QStringLiteral("实时预览就绪（当前帧%1）")
+                .arg(m_livePreviewBackend.isEmpty()
+                         ? QString()
+                         : QStringLiteral("，%1").arg(m_livePreviewBackend)));
+        return;
+    }
+    setLivePreviewStatus(
+        QStringLiteral("正在修复当前帧…%1").arg(livePreviewBackendSuffix()));
+}
+
+void RemovalController::notifyLivePreviewTargetChanged()
+{
+    m_liveTargetReady = false;
+    refreshLivePreviewStatus();
+}
+
+void RemovalController::notifyLivePreviewTargetReady()
+{
+    m_liveTargetReady = true;
+    refreshLivePreviewStatus();
+}
+
+void RemovalController::setLivePreviewBackend(const QString &backend)
+{
+    QString label;
+    if (backend.compare(QLatin1String("dml"), Qt::CaseInsensitive) == 0)
+        label = QStringLiteral("DML");
+    else if (backend.compare(QLatin1String("cpu"), Qt::CaseInsensitive) == 0)
+        label = QStringLiteral("CPU，较慢");
+    else
+        label = backend.trimmed();
+    if (label == m_livePreviewBackend)
+        return;
+    m_livePreviewBackend = label;
+    refreshLivePreviewStatus();
 }
 
 qint64 RemovalController::liveSourceTimeUs(qint64 timelineUs) const
@@ -175,6 +255,8 @@ void RemovalController::setLivePreviewStatus(const QString &text)
 
 void RemovalController::handleLiveRepairError(const QString &message)
 {
+    m_liveTargetReady = false;
+    m_livePreviewBackend.clear();
     if (m_livePreview) {
         m_livePreview = false;
         emit livePreviewChanged();
@@ -184,13 +266,6 @@ void RemovalController::handleLiveRepairError(const QString &message)
         setLivePreviewStatus(
             QStringLiteral("实时预览失败：%1").arg(message));
     }
-}
-
-void RemovalController::notifyLivePreviewReady()
-{
-    if (!m_livePreview)
-        return;
-    setLivePreviewStatus(QStringLiteral("实时预览就绪（当前帧）"));
 }
 
 bool RemovalController::buildLiveRepairSpec(LiveRepairSpec *spec,
@@ -210,6 +285,12 @@ bool RemovalController::buildLiveRepairSpec(LiveRepairSpec *spec,
     const RemovalLayer *layer = activeRemovalLayer();
     if (!layer)
         return fail(QStringLiteral("请先选择包含消除层的视频片段。"));
+    if (layer->trackingState != RemovalTrackingState::Complete
+        && layer->trackingState != RemovalTrackingState::LowConfidence) {
+        return fail(QStringLiteral(
+            "AI 跟踪尚未完成（当前状态：%1）。请先完成跟踪，再开启实时预览。")
+                        .arg(trackingStateText()));
+    }
     if (layer->cacheKey.isEmpty() || !trackingMasksPresent(*layer))
         return fail(QStringLiteral("请先运行 AI 跟踪以生成逐帧遮罩。"));
     if (layer->sourceOutUs <= layer->sourceInUs)
@@ -276,6 +357,8 @@ void RemovalController::setLivePreview(bool enabled)
         if (wasLive && m_livePreviewStopper)
             m_livePreviewStopper();
         m_livePreview = false;
+        m_liveTargetReady = false;
+        m_livePreviewBackend.clear();
         if (wasLive) {
             setLivePreviewStatus(QStringLiteral("实时预览已关闭"));
             emit livePreviewChanged();
@@ -303,6 +386,7 @@ void RemovalController::setLivePreview(bool enabled)
         return;
     }
 
+    m_livePreviewBackend.clear();
     setLivePreviewStatus(QStringLiteral("正在准备实时预览…"));
     if (!m_livePreviewStarter(spec, &error)) {
         if (error.isEmpty())
@@ -314,7 +398,8 @@ void RemovalController::setLivePreview(bool enabled)
         return;
     }
     m_livePreview = true;
-    setLivePreviewStatus(QStringLiteral("实时预览运行中"));
+    m_liveTargetReady = false;
+    refreshLivePreviewStatus();
     emit livePreviewChanged();
 }
 
@@ -471,38 +556,83 @@ bool RemovalController::generate()
         return false;
     }
     const RemovalLayer *layer = activeRemovalLayer();
-    const Clip *clip = layer ? findClip(layer->clipId) : nullptr;
-    if (!layer || !clip) {
+    if (!layer) {
         setError(QStringLiteral("请先绘制消除遮罩。"));
         return false;
     }
+    return generateForLayer(*layer, false);
+}
+
+const RemovalLayer *RemovalController::layerForClip(const QString &clipId) const
+{
+    const Clip *clip = findClip(clipId);
+    if (!clip || clip->removalLayerId.isEmpty())
+        return nullptr;
+    return m_document.removalLayerById(clip->removalLayerId);
+}
+
+bool RemovalController::generateForLayer(const RemovalLayer &layer,
+                                         bool exportAfter)
+{
+    clearError();
+    if (exportAfter)
+        m_exportAfterGeneration = true;
+    const auto fail = [this, exportAfter](const QString &message) {
+        setError(message);
+        if (exportAfter) {
+            m_exportAfterGeneration = false;
+            setExportGenerationPending(false);
+        }
+        return false;
+    };
+
+    QString error;
+    if (!prepareLayerForJob(layer, &error))
+        return fail(error);
+    const Clip *clip = findClip(layer.clipId);
+    if (!clip)
+        return fail(QStringLiteral("未找到消除层对应的片段。"));
 
     AiJobSpec spec;
-    if (!buildJobSpec(PendingJobKind::Generate, &spec, &error)) {
-        setError(error);
-        return false;
-    }
+    if (!buildJobSpec(PendingJobKind::Generate, &spec, &error, &layer))
+        return fail(error);
 
     // Export preflight and generation use the same computed key. The layer is
     // updated exactly once when the job finishes (success, cancel or error),
     // so a failed start cannot leave a half-applied project command.
-    m_pendingLayerId = layer->id;
-    if (!startPendingJob(PendingJobKind::Generate, spec, &error)) {
-        setError(error);
-        return false;
-    }
+    m_pendingLayerId = layer.id;
+    if (!startPendingJob(PendingJobKind::Generate, spec, &error))
+        return fail(error);
+    if (exportAfter)
+        setExportGenerationPending(true);
     return true;
 }
 
 void RemovalController::generateForExport()
 {
-    m_exportAfterGeneration = true;
-    if (!generate()) {
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer) {
         m_exportAfterGeneration = false;
         setExportGenerationPending(false);
+        setError(QStringLiteral("请先绘制消除遮罩。"));
         return;
     }
-    setExportGenerationPending(true);
+    generateForLayer(*layer, true);
+}
+
+void RemovalController::generateForExportForClip(const QString &clipId)
+{
+    const RemovalLayer *layer =
+        clipId.isEmpty() ? activeRemovalLayer() : layerForClip(clipId);
+    if (!layer) {
+        m_exportAfterGeneration = false;
+        setExportGenerationPending(false);
+        setError(clipId.isEmpty()
+                     ? QStringLiteral("请先绘制消除遮罩。")
+                     : QStringLiteral("未找到该片段的消除层。"));
+        return;
+    }
+    generateForLayer(*layer, true);
 }
 
 void RemovalController::cancelExportGeneration()
@@ -745,6 +875,11 @@ QString RemovalController::currentMaskHash() const
 {
     return m_working.mask.isValid() ? MaskCodec::hash(m_working.mask)
                                     : QString();
+}
+
+bool RemovalController::maskHasPixels() const
+{
+    return hasMaskPixels(m_working.mask);
 }
 
 const Clip *RemovalController::findClip(const QString &clipId) const
@@ -1228,6 +1363,11 @@ void RemovalController::addMaskKeyframeAtSourceTime(qint64 sourceTimeUs,
         if (!maskForNew.isValid())
             maskForNew = m_working.mask.isValid() ? m_working.mask
                                                   : emptyMaskForClip(*clip);
+        if (!hasMaskPixels(maskForNew)) {
+            setError(QStringLiteral(
+                "当前遮罩为空，请在画面上涂抹要消除的物体后添加关键帧。"));
+            return;
+        }
 
         QString storedHash;
         QString error;
@@ -1287,7 +1427,9 @@ void RemovalController::removeMaskKeyframe(int index)
 
 void RemovalController::setLayerEnabled(bool enabled)
 {
-    const RemovalLayer *layer = currentLayer();
+    // activeRemovalLayer() also resolves the selected clip outside mask mode,
+    // so the layer switch remains usable while reviewing a tracked layer.
+    const RemovalLayer *layer = activeRemovalLayer();
     if (!layer || layer->enabled == enabled)
         return;
 
@@ -1437,6 +1579,9 @@ bool RemovalController::prepareForJob(QString *error) const
             *error = message;
         return false;
     };
+    // Preserve the historical validation order: an unwired job manager or a
+    // closed gate is reported before "draw a mask", which is actionable even
+    // when the project has no removal layer yet.
     if (!m_jobManager)
         return fail(QStringLiteral("AI 任务管理器未初始化。"));
     if (!m_featureGate)
@@ -1448,9 +1593,28 @@ bool RemovalController::prepareForJob(QString *error) const
     const RemovalLayer *layer = activeRemovalLayer();
     if (!layer)
         return fail(QStringLiteral("请先绘制消除遮罩。"));
-    if (layer->maskKeyframes.isEmpty())
+    return prepareLayerForJob(*layer, error);
+}
+
+bool RemovalController::prepareLayerForJob(const RemovalLayer &layer,
+                                           QString *error) const
+{
+    const auto fail = [error](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!m_jobManager)
+        return fail(QStringLiteral("AI 任务管理器未初始化。"));
+    if (!m_featureGate)
+        return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
+    if (!m_featureGate->enabled())
+        return fail(m_featureGate->disabledReason());
+    if (!m_cache)
+        return fail(QStringLiteral("AI 缓存未初始化。"));
+    if (layer.maskKeyframes.isEmpty())
         return fail(QStringLiteral("请先添加遮罩关键帧。"));
-    const Clip *clip = findClip(layer->clipId);
+    const Clip *clip = findClip(layer.clipId);
     if (!clip)
         return fail(QStringLiteral("未找到消除层对应的片段。"));
     const Asset *asset = assetForClip(*clip);
@@ -1460,7 +1624,7 @@ bool RemovalController::prepareForJob(QString *error) const
         return fail(QStringLiteral("无法确定工程旁车目录。"));
     if (!m_featureGate->registry())
         return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
-    if (layer->sourceOutUs <= layer->sourceInUs)
+    if (layer.sourceOutUs <= layer.sourceInUs)
         return fail(QStringLiteral("消除层的源区间无效。"));
     return true;
 }
@@ -1485,14 +1649,16 @@ QString RemovalController::manifestPath() const
 }
 
 bool RemovalController::buildJobSpec(PendingJobKind kind, AiJobSpec *spec,
-                                     QString *error)
+                                     QString *error,
+                                     const RemovalLayer *layerOverride)
 {
     const auto fail = [error](const QString &message) {
         if (error)
             *error = message;
         return false;
     };
-    const RemovalLayer *layer = activeRemovalLayer();
+    const RemovalLayer *layer = layerOverride ? layerOverride
+                                              : activeRemovalLayer();
     const Clip *clip = layer ? findClip(layer->clipId) : nullptr;
     const Asset *asset = clip ? assetForClip(*clip) : nullptr;
     const ModelRegistry *registry =
@@ -1750,6 +1916,28 @@ QString RemovalController::cacheStatusFor(const RemovalLayer *layer) const
 QString RemovalController::cacheStatusText() const
 {
     return cacheStatusFor(activeRemovalLayer());
+}
+
+QString RemovalController::trackingStateText() const
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer)
+        return QStringLiteral("未跟踪");
+    switch (layer->trackingState) {
+    case RemovalTrackingState::NotTracked:
+        return QStringLiteral("未跟踪");
+    case RemovalTrackingState::Tracking:
+        return QStringLiteral("跟踪中");
+    case RemovalTrackingState::Partial:
+        return QStringLiteral("部分");
+    case RemovalTrackingState::Complete:
+        return QStringLiteral("完成");
+    case RemovalTrackingState::LowConfidence:
+        return QStringLiteral("低置信");
+    case RemovalTrackingState::Failed:
+        return QStringLiteral("失败");
+    }
+    return QStringLiteral("未跟踪");
 }
 
 bool RemovalController::canContinueGeneration() const

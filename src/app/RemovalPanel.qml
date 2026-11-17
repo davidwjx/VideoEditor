@@ -18,6 +18,17 @@ ColumnLayout {
     readonly property bool ready: removal !== null && removal.featureEnabled
     readonly property bool hasKeyframes: removal !== null
                                          && removal.maskKeyframes.length > 0
+    readonly property string actionDisabledReason: {
+        if (removal === null)
+            return "AI 消除未初始化。"
+        if (!removal.featureEnabled)
+            return removal.featureDisabledReason
+        if (removal.generating)
+            return "AI 任务运行中，请等待完成或取消。"
+        if (!hasKeyframes || removal.currentMaskEmpty)
+            return "请先在画面上涂抹要消除的物体；第一笔会自动创建关键帧。"
+        return ""
+    }
     readonly property string disclaimer:
         "内部技术预览：模型未取得商业许可，仅用于内部技术验证，禁止分发。"
 
@@ -94,7 +105,7 @@ ColumnLayout {
         id: livePreviewToggle
         objectName: "removal-live-preview-toggle"
         visible: root.removal !== null
-        text: "实时预览（GPU）"
+        text: "实时预览"
         enabled: root.removal !== null
                  && (root.removal.livePreview
                      || (root.removal.featureEnabled && root.removal.hasLayer
@@ -108,8 +119,9 @@ ColumnLayout {
             when: !livePreviewToggle.pressed
         }
         ToolTip.visible: hovered
-        ToolTip.text: "需要先运行 AI 跟踪以生成逐帧遮罩。仅实时预览当前帧及附近窗口，"
+        ToolTip.text: "需要先完成 AI 跟踪。仅实时预览当前帧及附近窗口，"
                     + "不会写入磁盘缓存，不能替代“生成修复”。"
+                    + "模型可用时使用 DirectML，否则回退 CPU（较慢）。"
     }
 
     Label {
@@ -120,6 +132,36 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         font.pixelSize: 11
         Layout.fillWidth: true
+    }
+
+    // ------------------------------------------------------------------
+    // Layer enablement stays reachable outside mask mode so a tracked layer
+    // can be reviewed and toggled without re-entering the editor.
+    // ------------------------------------------------------------------
+    Label {
+        objectName: "removal-layer-disabled-chip"
+        visible: root.removal !== null && root.removal.hasLayer
+                 && !root.removal.layerEnabled
+        text: "消除层已停用"
+        color: "#e67e22"
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
+    CheckBox {
+        id: layerEnabled
+        objectName: "removal-layer-enabled"
+        visible: root.removal !== null && root.removal.hasLayer
+        text: "启用消除层"
+        enabled: root.removal !== null && root.removal.hasLayer
+        onToggled: if (root.removal !== null)
+                       root.removal.setLayerEnabled(checked)
+        Binding {
+            target: layerEnabled
+            property: "checked"
+            value: root.removal !== null && root.removal.layerEnabled
+            when: !layerEnabled.pressed
+        }
     }
 
     Label {
@@ -153,6 +195,14 @@ ColumnLayout {
         spacing: 4
         visible: root.removal !== null
         Label {
+            objectName: "removal-tracking-state"
+            visible: root.removal !== null && root.removal.hasLayer
+            text: "跟踪：" + (root.removal !== null
+                             ? root.removal.trackingStateText : "")
+            color: "#bdbdbd"
+            font.pixelSize: 11
+        }
+        Label {
             objectName: "removal-cache-status"
             text: "缓存：" + (root.removal !== null
                              ? root.removal.cacheStatusText : "")
@@ -175,11 +225,10 @@ ColumnLayout {
 
     Label {
         objectName: "removal-low-confidence-count"
-        visible: root.removal !== null
-        text: "低置信 " + (root.removal !== null
-                          ? root.removal.lowConfidenceCount : 0) + " 帧"
-        color: root.removal !== null && root.removal.lowConfidenceCount > 0
-               ? "#F44336" : "#8a8a8a"
+        visible: root.removal !== null && root.removal.lowConfidenceCount > 0
+        text: "有 " + (root.removal !== null
+                       ? root.removal.lowConfidenceCount : 0) + " 帧低置信"
+        color: "#F44336"
         font.pixelSize: 11
         Layout.fillWidth: true
     }
@@ -190,7 +239,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         spacing: 4
-        visible: root.active
+        visible: root.removal !== null && root.removal.hasLayer
 
         Label { text: "对比"; color: "#cccccc"; font.pixelSize: 11 }
         ComboBox {
@@ -227,7 +276,7 @@ ColumnLayout {
         id: splitSlider
         objectName: "removal-split-slider"
         Layout.fillWidth: true
-        visible: root.active && root.removal !== null
+        visible: root.removal !== null && root.removal.hasLayer
                  && root.removal.compareMode === "split"
         from: 0
         to: 1000
@@ -241,6 +290,14 @@ ColumnLayout {
             when: !splitSlider.pressed
         }
     }
+    Label {
+        objectName: "removal-split-value"
+        visible: splitSlider.visible
+        text: Math.round(splitSlider.value / 10) + "%"
+        color: "#9e9e9e"
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
 
     // ------------------------------------------------------------------
     // Mask mode toolbar.
@@ -249,6 +306,57 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: 5
         visible: root.active
+
+        // First-run guidance: the first stroke creates the first keyframe, so
+        // there is no dead "add keyframe" step for a new layer.
+        Label {
+            objectName: "removal-first-run-hint"
+            visible: root.removal !== null
+                     && (!root.hasKeyframes || root.removal.currentMaskEmpty)
+            text: "在预览画面上涂抹要消除的物体；第一笔会自动创建关键帧；"
+                + "移动播放头可再画一个"
+            color: "#e6c15a"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 11
+            Layout.fillWidth: true
+        }
+
+        // Compact action row stays at the top of the mask section above the
+        // brush/keyframe controls so track/generate are never below the fold.
+        RowLayout {
+            objectName: "removal-action-row"
+            Layout.fillWidth: true
+            spacing: 4
+
+            Button {
+                objectName: "removal-track-button"
+                text: "跟踪遮罩"
+                Layout.fillWidth: true
+                enabled: root.ready && root.hasKeyframes
+                         && !root.removal.generating
+                onClicked: root.removal.track()
+            }
+            Button {
+                objectName: "removal-generate-button"
+                text: root.removal !== null
+                      && root.removal.canContinueGeneration
+                      ? "继续生成修复" : "生成修复"
+                Layout.fillWidth: true
+                highlighted: true
+                enabled: root.ready && root.hasKeyframes
+                         && !root.removal.generating
+                onClicked: root.removal.generate()
+            }
+        }
+        Label {
+            objectName: "removal-action-disabled-reason"
+            visible: root.actionDisabledReason.length > 0
+            text: root.actionDisabledReason
+            color: "#e67e22"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 11
+            Layout.fillWidth: true
+        }
 
         RowLayout {
             Layout.fillWidth: true
@@ -285,7 +393,22 @@ ColumnLayout {
             }
         }
 
-        Label { text: "画笔大小"; color: "#cccccc"; font.pixelSize: 11 }
+        RowLayout {
+            Layout.fillWidth: true
+            Label {
+                text: "画笔大小"
+                color: "#cccccc"
+                font.pixelSize: 11
+                Layout.fillWidth: true
+            }
+            Label {
+                objectName: "removal-brush-value"
+                text: (root.removal !== null ? root.removal.brushSize : 24)
+                      + " px"
+                color: "#9e9e9e"
+                font.pixelSize: 11
+            }
+        }
         Slider {
             id: brushSlider
             objectName: "removal-brush-size"
@@ -303,7 +426,22 @@ ColumnLayout {
             }
         }
 
-        Label { text: "羽化（像素）"; color: "#cccccc"; font.pixelSize: 11 }
+        RowLayout {
+            Layout.fillWidth: true
+            Label {
+                text: "羽化（像素）"
+                color: "#cccccc"
+                font.pixelSize: 11
+                Layout.fillWidth: true
+            }
+            Label {
+                objectName: "removal-feather-value"
+                text: (root.removal !== null ? root.removal.featherPx : 4)
+                      + " px"
+                color: "#9e9e9e"
+                font.pixelSize: 11
+            }
+        }
         Slider {
             id: featherSlider
             objectName: "removal-feather-slider"
@@ -345,6 +483,9 @@ ColumnLayout {
             Button {
                 objectName: "removal-add-keyframe"
                 text: "添加关键帧"
+                // An all-zero mask cannot become a keyframe; the first stroke
+                // creates one automatically, so this is only for extra frames.
+                enabled: root.removal !== null && root.removal.maskHasPixels
                 onClicked: root.removal.addMaskKeyframeAtPlayhead()
             }
             Button {
@@ -409,46 +550,6 @@ ColumnLayout {
             }
         }
 
-        CheckBox {
-            id: layerEnabled
-            objectName: "removal-layer-enabled"
-            text: "启用消除层"
-            enabled: root.removal !== null && root.removal.hasLayer
-            onToggled: if (root.removal !== null)
-                           root.removal.setLayerEnabled(checked)
-            Binding {
-                target: layerEnabled
-                property: "checked"
-                value: root.removal !== null && root.removal.layerEnabled
-                when: !layerEnabled.pressed
-            }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 4
-
-            Button {
-                objectName: "removal-track-button"
-                text: "跟踪遮罩"
-                Layout.fillWidth: true
-                enabled: root.ready && root.hasKeyframes
-                         && !root.removal.generating
-                onClicked: root.removal.track()
-            }
-            Button {
-                objectName: "removal-generate-button"
-                text: root.removal !== null
-                      && root.removal.canContinueGeneration
-                      ? "继续生成修复" : "生成修复"
-                Layout.fillWidth: true
-                highlighted: true
-                enabled: root.ready && root.hasKeyframes
-                         && !root.removal.generating
-                onClicked: root.removal.generate()
-            }
-        }
-
         Button {
             objectName: "removal-redo-button"
             Layout.fillWidth: true
@@ -485,6 +586,16 @@ ColumnLayout {
         spacing: 4
         visible: root.active && root.removal !== null
                  && root.removal.advancedOpen
+
+        Label {
+            objectName: "removal-advanced-invalidation-warning"
+            text: "修改模型/分辨率/稳定化会使已生成的修复缓存失效，"
+                + "需要重新跟踪与生成。"
+            color: "#e67e22"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 11
+            Layout.fillWidth: true
+        }
 
         RowLayout {
             Layout.fillWidth: true

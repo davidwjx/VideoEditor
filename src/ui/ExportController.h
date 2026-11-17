@@ -67,6 +67,10 @@ class ExportController : public QObject {
                    NOTIFY removalMessageChanged)
     Q_PROPERTY(QString removalWarning READ removalWarning
                    NOTIFY removalWarningChanged)
+    // First clip that blocks export with a missing/expired repair. The export
+    // prompt targets this clip instead of whatever happens to be selected.
+    Q_PROPERTY(QString removalClipId READ removalClipId
+                   NOTIFY removalClipIdChanged)
 
 public:
     using ProgressCallback = std::function<void(const ExportProgress &)>;
@@ -116,6 +120,7 @@ public:
     QString removalMessage() const { return m_removalMessage; }
     // Non-blocking preflight notes (for example low-confidence tracking).
     QString removalWarning() const { return m_removalWarning; }
+    QString removalClipId() const { return m_removalClipId; }
 
     Q_INVOKABLE void applyPreset(const QString &id);
     // Re-probes encoders for the current resolution unless a catalog was
@@ -185,6 +190,7 @@ signals:
     void removalRequiredChanged();
     void removalMessageChanged();
     void removalWarningChanged();
+    void removalClipIdChanged();
     // Emitted instead of starting an export that would silently encode the
     // original in place of a required repair. Task 8 connects this to the
     // removal generation flow.
@@ -250,6 +256,7 @@ private:
     bool m_removalRequired = false;
     QString m_removalMessage;
     QString m_removalWarning;
+    QString m_removalClipId;
     // Preflight hashes model bundles and every cached patch. Cache the verdict
     // until the document changes; the export worker still runs it once.
     bool m_removalPreflightValid = false;

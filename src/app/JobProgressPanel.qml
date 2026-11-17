@@ -33,6 +33,13 @@ Rectangle {
                 Layout.fillWidth: true
             }
             Label {
+                objectName: "job-progress-paused"
+                visible: root.removal !== null && root.removal.paused
+                text: "已暂停"
+                color: "#e6c15a"
+                font.pixelSize: 10
+            }
+            Label {
                 text: root.removal !== null ? root.removal.etaText : ""
                 color: "#9a9a9a"
                 font.pixelSize: 10

@@ -80,11 +80,18 @@ public:
     void setCacheLimitForTest(int limit);
     int cachedPatchCountForTest() const;
     int frameCountForTest() const;
+    QString backendForTest() const;
 
 signals:
     // Emitted once the worker thread has started; patches follow per frame.
     void ready();
     void frameReady(int frame);
+    // Emitted only when the repaired frame is still the current target, so the
+    // UI can distinguish "the playhead frame is ready" from prefetch noise.
+    void targetReady(int frame);
+    // "dml" / "cpu" once the model session exists. Lets the UI say "CPU，较慢"
+    // instead of promising GPU inference.
+    void backendChanged(QString backend);
     void error(QString message);
 
 private:
@@ -92,7 +99,8 @@ private:
     static constexpr int kWindowSeconds = 2;
 
     void run();
-    bool processFrame(int frame);
+    bool processFrame(int frame, bool targetFrame = false);
+    void publishBackend();
     int frameForSourceUs(int64_t sourceUs) const;
     void storePatch(int frame, const LiveRepairPatch &patch);
     void clearWorkingState();
@@ -111,6 +119,7 @@ private:
     QHash<int, LiveRepairPatch> m_patches;
     mutable QList<int> m_lru; // most recently used first
     QSet<int> m_emptyFrames;  // the original frame is already correct
+    QString m_backend;        // "dml"/"cpu", guarded by m_stateMutex
 
     // Created by configure() and used only by the worker thread afterwards.
     std::unique_ptr<FrameReader> m_reader;

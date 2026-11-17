@@ -110,6 +110,15 @@ void InpaintPipeline::setConfig(const InpaintConfig &config)
     m_config = config;
 }
 
+QString InpaintPipeline::provider() const
+{
+    if (m_injected)
+        return m_injected->provider();
+    if (m_owned)
+        return m_owned->provider();
+    return QString();
+}
+
 Inpainter *InpaintPipeline::activeInpainter(RepairMode mode, QString *error)
 {
     if (m_injected)

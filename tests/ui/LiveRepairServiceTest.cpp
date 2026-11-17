@@ -56,6 +56,8 @@ public:
                     out.setPixelColor(x, y, QColor(200, 30, 30, 255));
         return PatchResult{out, QRect()};
     }
+
+    QString provider() const override { return QStringLiteral("cpu"); }
 };
 
 constexpr int kDisplay = 64;
@@ -163,6 +165,8 @@ TEST(LiveRepairService, RepairsTargetFirstMapsTimesAndBoundsCache)
     ASSERT_EQ(service.frameCountForTest(), fixture.frameCount);
 
     QSignalSpy frameReady(&service, &LiveRepairService::frameReady);
+    QSignalSpy targetReady(&service, &LiveRepairService::targetReady);
+    QSignalSpy backendChanged(&service, &LiveRepairService::backendChanged);
     service.setTarget(targetUs);
     QElapsedTimer clock;
     clock.start();
@@ -183,6 +187,28 @@ TEST(LiveRepairService, RepairsTargetFirstMapsTimesAndBoundsCache)
     // the start of the +-2 s window.
     ASSERT_TRUE(waitUntil([&] { return frameReady.count() > 0; }, 10000));
     EXPECT_EQ(frameReady.at(0).at(0).toInt(), targetFrame);
+
+    // Only the target frame may report readiness; prefetch completions must
+    // not claim the playhead is ready.
+    ASSERT_TRUE(waitUntil([&] { return targetReady.count() > 0; }, 10000));
+    EXPECT_EQ(targetReady.at(0).at(0).toInt(), targetFrame);
+    ASSERT_TRUE(waitUntil([&] { return backendChanged.count() > 0; }, 10000));
+    EXPECT_EQ(service.backendForTest(), QStringLiteral("cpu"));
+    ASSERT_TRUE(waitUntil([&] { return frameReady.count() >= 3; }, 10000));
+    EXPECT_EQ(targetReady.count(), 1)
+        << "prefetch completions must never emit targetReady";
+
+    // Jumping to an already prefetched frame is immediately ready; it must not
+    // leave the UI stuck on "正在修复当前帧…".
+    const int cachedTarget =
+        qMin(targetFrame + 1, fixture.frameCount - 1);
+    if (cachedTarget != targetFrame) {
+        const int readyBefore = targetReady.count();
+        service.setTarget(targetUsFor(cachedTarget, fixture.fps));
+        ASSERT_TRUE(waitUntil(
+            [&] { return targetReady.count() > readyBefore; }, 5000));
+        EXPECT_EQ(targetReady.last().at(0).toInt(), cachedTarget);
+    }
 
     // patchFor maps source instants to global frame indices and refuses
     // anything outside this layer.

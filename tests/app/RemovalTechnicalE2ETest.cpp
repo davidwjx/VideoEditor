@@ -165,6 +165,7 @@ TEST(RemovalTechnicalE2E, TracksAndGeneratesWithInstalledModels)
             return live->cachedPatchCountForTest() >= qMin(3, liveFrames);
         },
         180000);
+    waitUntil([&] { return !live->backendForTest().isEmpty(); }, 5000);
     const qint64 liveElapsedMs = liveClock.elapsed();
     const int livePatches = live->cachedPatchCountForTest();
     const double liveFps = liveElapsedMs > 0
@@ -173,10 +174,11 @@ TEST(RemovalTechnicalE2E, TracksAndGeneratesWithInstalledModels)
                                : 0.0;
     std::fprintf(stderr,
                  "LIVE_PREVIEW_METRICS latencyMs=%lld patches=%d frames=%d "
-                 "elapsedMs=%lld fps=%.1f prefetched=%d\n",
+                 "elapsedMs=%lld fps=%.1f prefetched=%d backend=%s\n",
                  static_cast<long long>(liveLatencyMs), livePatches, liveFrames,
                  static_cast<long long>(liveElapsedMs), liveFps,
-                 prefetched ? 1 : 0);
+                 prefetched ? 1 : 0,
+                 live->backendForTest().toUtf8().constData());
     EXPECT_TRUE(prefetched) << "the +-2 s window did not prefetch";
     removal->setLivePreview(false);
     EXPECT_FALSE(removal->livePreview());

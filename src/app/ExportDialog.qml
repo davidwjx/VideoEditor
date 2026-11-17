@@ -377,15 +377,71 @@ Dialog {
                     highlighted: true
                     enabled: root.removal !== null
                              && !root.removal.generating
-                    onClicked: if (root.removal !== null)
-                                   root.removal.generateForExport()
+                    onClicked: {
+                        if (root.removal === null)
+                            return
+                        // Generate the clip that actually blocked export; the
+                        // selected clip may be a different one.
+                        if (Export.removalClipId.length > 0)
+                            root.removal.generateForExportForClip(
+                                Export.removalClipId)
+                        else
+                            root.removal.generateForExport()
+                    }
                 }
                 Button {
                     objectName: "export-cancel-removal"
                     text: "取消"
-                    onClicked: root.removalPromptDismissed = true
+                    onClicked: {
+                        if (root.removal !== null
+                                && root.removal.generating) {
+                            root.removal.cancelExportGeneration()
+                        }
+                        root.removalPromptDismissed = true
+                    }
                 }
                 Item { Layout.fillWidth: true }
+            }
+
+            // In-place generation progress: the dialog stays open, showing
+            // stage/ETA and a real cancel action instead of a dead prompt.
+            ColumnLayout {
+                objectName: "export-removal-progress"
+                Layout.fillWidth: true
+                spacing: 4
+                visible: root.removal !== null && root.removal.generating
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label {
+                        objectName: "export-removal-stage"
+                        Layout.fillWidth: true
+                        text: root.removal !== null ? root.removal.stageText : ""
+                        color: "#cfcfcf"
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Label {
+                        objectName: "export-removal-eta"
+                        text: root.removal !== null ? root.removal.etaText : ""
+                        color: "#9a9a9a"
+                        font.pixelSize: 10
+                    }
+                }
+                ProgressBar {
+                    objectName: "export-removal-progress-bar"
+                    Layout.fillWidth: true
+                    from: 0
+                    to: 100
+                    value: root.removal !== null ? root.removal.progress : 0
+                }
+                Button {
+                    objectName: "export-removal-cancel-generation"
+                    text: "取消生成"
+                    font.pixelSize: 10
+                    padding: 3
+                    onClicked: if (root.removal !== null)
+                                   root.removal.cancelExportGeneration()
+                }
             }
         }
 

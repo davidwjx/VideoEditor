@@ -196,6 +196,44 @@ TEST(ExportController, RemovalPreflightIsCachedAndWarnsWithoutBlocking)
     EXPECT_EQ(controller.removalWarning(), warning);
 }
 
+TEST(ExportController, ExposesFirstFailingRemovalClipId)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ProjectDocument document;
+    Project project;
+    project.timeline.width = 320;
+    project.timeline.height = 180;
+    project.timeline.fps = Rational{30, 1};
+    document.setProject(project);
+
+    ExportController controller(document, QString());
+    controller.setCatalogForTest(EncoderCatalog::withoutHardwareForTest());
+    controller.refreshCapabilities();
+    controller.applyPreset(QStringLiteral("h264-720p30"));
+    controller.setOutputPath(dir.filePath(QStringLiteral("out.mp4")));
+
+    controller.setRemovalChecker([](const Project &) {
+        RemovalPreflightResult result;
+        result.ok = false;
+        RemovalPreflightIssue first;
+        first.clipId = QStringLiteral("clip-2");
+        first.reason = QStringLiteral("“a.mp4” 00:00:02.000–00:00:04.000：缺失");
+        RemovalPreflightIssue second;
+        second.clipId = QStringLiteral("clip-3");
+        second.reason = QStringLiteral("“b.mp4” 00:00:05.000–00:00:07.000：缺失");
+        result.issues = {first, second};
+        result.message = first.reason + QLatin1Char('\n') + second.reason;
+        return result;
+    });
+    EXPECT_FALSE(controller.validate().isEmpty());
+    EXPECT_TRUE(controller.removalRequired());
+    EXPECT_EQ(controller.removalClipId(), QStringLiteral("clip-2"));
+
+    controller.invalidateRemovalPreflight();
+    EXPECT_TRUE(controller.removalClipId().isEmpty());
+}
+
 TEST(ExportController, DocumentEditInvalidatesRemovalPreflightCache)
 {
     QTemporaryDir dir;

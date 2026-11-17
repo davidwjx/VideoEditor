@@ -156,6 +156,15 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     mask.set(300, 160, true);
     QString maskHash;
     ASSERT_TRUE(store.writeMask(mask, &maskHash, nullptr));
+    // The mask-mode project starts with a keyframe whose mask is all zero, so
+    // the first-run hint and the add-keyframe guard are exercised. Painting a
+    // stroke replaces it with a real mask.
+    BinaryMask emptyMask;
+    emptyMask.width = 640;
+    emptyMask.height = 360;
+    emptyMask.bits.assign(size_t(640) * size_t(360), 0);
+    QString emptyMaskHash;
+    ASSERT_TRUE(store.writeMask(emptyMask, &emptyMaskHash, nullptr));
     // Non-uniform spacing exercises the time-proportional segment mapping.
     QJsonArray frames{
         QJsonObject{{QStringLiteral("timeUs"), 0},
@@ -175,7 +184,7 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
                                             "recovery.json")),
                              nullSinkFactory(), sidecarDir.path());
     controller.document()->setProject(
-        removalProject(video, maskHash, trackingHash));
+        removalProject(video, emptyMaskHash, trackingHash));
     controller.timeline()->selectClip(QStringLiteral("clip-1"));
     controller.timeline()->seekUs(0);
     controller.removal()->beginMask(QStringLiteral("clip-1"));
@@ -229,7 +238,20 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
              QStringLiteral("removal-low-confidence-count"),
              QStringLiteral("removal-redo-button"),
              QStringLiteral("removal-live-preview-toggle"),
-             QStringLiteral("removal-live-preview-status")}) {
+             QStringLiteral("removal-live-preview-status"),
+             QStringLiteral("removal-first-run-hint"),
+             QStringLiteral("removal-action-row"),
+             QStringLiteral("removal-action-disabled-reason"),
+             QStringLiteral("removal-add-keyframe"),
+             QStringLiteral("removal-tracking-state"),
+             QStringLiteral("removal-layer-enabled"),
+             QStringLiteral("removal-layer-disabled-chip"),
+             QStringLiteral("removal-brush-value"),
+             QStringLiteral("removal-feather-value"),
+             QStringLiteral("removal-split-value"),
+             QStringLiteral("removal-advanced-invalidation-warning"),
+             QStringLiteral("confidence-band-hit-area"),
+             QStringLiteral("job-progress-paused")}) {
         EXPECT_NE(findItem(window, name), nullptr) << name.toStdString();
     }
 
@@ -260,6 +282,9 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
         << "live preview needs a gate and a tracked layer";
     EXPECT_EQ(liveStatus->property("text").toString(),
               QStringLiteral("实时预览未开启"));
+    EXPECT_EQ(liveToggle->property("text").toString(),
+              QStringLiteral("实时预览"))
+        << "the label must not promise GPU inference";
     // Force the control enabled so the programmatic toggle exercises the
     // QML -> controller path; the controller still rejects the start (no
     // tracking cache) with a Chinese explanation and updates the status.
@@ -276,6 +301,78 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
               QStringLiteral("实时预览未开启"));
     EXPECT_NE(liveStatus->property("text").toString(), statusBefore);
 
+    // First-run guidance is visible while the working mask is empty, and the
+    // add-keyframe action is disabled until the user paints.
+    QQuickItem *addKeyframe =
+        findItem(window, QStringLiteral("removal-add-keyframe"));
+    QQuickItem *firstRunHint =
+        findItem(window, QStringLiteral("removal-first-run-hint"));
+    QQuickItem *actionReason =
+        findItem(window, QStringLiteral("removal-action-disabled-reason"));
+    QQuickItem *trackingState =
+        findItem(window, QStringLiteral("removal-tracking-state"));
+    ASSERT_NE(addKeyframe, nullptr);
+    ASSERT_NE(firstRunHint, nullptr);
+    ASSERT_NE(actionReason, nullptr);
+    ASSERT_NE(trackingState, nullptr);
+    EXPECT_TRUE(controller.removal()->currentMaskEmpty());
+    EXPECT_FALSE(addKeyframe->isEnabled());
+    EXPECT_TRUE(firstRunHint->isVisible());
+    EXPECT_TRUE(actionReason->isVisible());
+    EXPECT_EQ(trackingState->property("text").toString(),
+              QStringLiteral("跟踪：完成"));
+
+    // Mask mode disarms destructive timeline shortcuts.
+    for (const QString &name : {
+             QStringLiteral("shortcut-split"),
+             QStringLiteral("shortcut-delete"),
+             QStringLiteral("shortcut-ripple-delete"),
+             QStringLiteral("shortcut-paste")}) {
+        QObject *shortcut = window->findChild<QObject *>(name);
+        ASSERT_NE(shortcut, nullptr) << name.toStdString();
+        EXPECT_FALSE(shortcut->property("enabled").toBool())
+            << name.toStdString();
+    }
+
+    // The first stroke creates a keyframe; the hint disappears and the add
+    // action becomes available for extra keyframes.
+    controller.removal()->beginStroke(20, false);
+    controller.removal()->continueStroke(QPointF(0.4, 0.4),
+                                         QPointF(0.6, 0.6));
+    controller.removal()->endStroke();
+    QTest::qWait(120);
+    EXPECT_FALSE(controller.removal()->currentMaskEmpty());
+    EXPECT_TRUE(addKeyframe->isEnabled());
+    EXPECT_FALSE(firstRunHint->isVisible());
+    // With the release gate closed the inline reason still explains why the
+    // actions are unavailable; only hide it when the gate is actually on.
+    if (controller.aiFeatureEnabled())
+        EXPECT_FALSE(actionReason->isVisible());
+
+    // Numeric slider feedback and the enlarged confidence hit target.
+    QQuickItem *brushValue =
+        findItem(window, QStringLiteral("removal-brush-value"));
+    QQuickItem *featherValue =
+        findItem(window, QStringLiteral("removal-feather-value"));
+    QQuickItem *hitArea =
+        findItem(window, QStringLiteral("confidence-band-hit-area"));
+    ASSERT_NE(brushValue, nullptr);
+    ASSERT_NE(featherValue, nullptr);
+    ASSERT_NE(hitArea, nullptr);
+    EXPECT_TRUE(brushValue->property("text").toString().endsWith("px"));
+    EXPECT_TRUE(featherValue->property("text").toString().endsWith("px"));
+    EXPECT_GE(hitArea->height(), 20.0);
+
+    QQuickItem *pausedLabel =
+        findItem(window, QStringLiteral("job-progress-paused"));
+    ASSERT_NE(pausedLabel, nullptr);
+    EXPECT_EQ(pausedLabel->property("text").toString(),
+              QStringLiteral("已暂停"));
+    QObject *toastTimer =
+        window->findChild<QObject *>(QStringLiteral("error-toast-timer"));
+    ASSERT_NE(toastTimer, nullptr);
+    EXPECT_EQ(toastTimer->property("interval").toInt(), 8000);
+
     // Mask-mode-only controls disappear after leaving mask mode.
     QQuickItem *trackButton =
         findItem(window, QStringLiteral("removal-track-button"));
@@ -291,7 +388,7 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
         findItem(window, QStringLiteral("removal-low-confidence-count"));
     ASSERT_NE(lowCount, nullptr);
     EXPECT_EQ(lowCount->property("text").toString(),
-              QStringLiteral("低置信 2 帧"));
+              QStringLiteral("有 2 帧低置信"));
     QQuickItem *band = findItem(window, QStringLiteral("confidence-band"));
     ASSERT_NE(band, nullptr);
     EXPECT_TRUE(band->isVisible());
@@ -341,12 +438,21 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     ASSERT_NE(advancedToggle, nullptr);
     ASSERT_NE(advancedPanel, nullptr);
     EXPECT_FALSE(advancedPanel->isVisible());
-    clickItem(window, advancedToggle);
+    // Invoke the button's clicked signal: the inspector may scroll this control
+    // below the fold now that the mask actions live at the top of the section.
+    ASSERT_TRUE(QMetaObject::invokeMethod(advancedToggle, "clicked"));
+    QTest::qWait(80);
     EXPECT_TRUE(advancedPanel->isVisible());
     QQuickItem *advancedMode =
         findItem(window, QStringLiteral("removal-advanced-mode"));
     ASSERT_NE(advancedMode, nullptr);
     EXPECT_TRUE(advancedMode->isEnabled());
+    QQuickItem *advancedWarning = findItem(
+        window, QStringLiteral("removal-advanced-invalidation-warning"));
+    ASSERT_NE(advancedWarning, nullptr);
+    EXPECT_TRUE(advancedWarning->isVisible());
+    EXPECT_TRUE(advancedWarning->property("text").toString()
+                    .contains(QStringLiteral("失效")));
 
     // Leaving mask mode hides the generation controls but keeps the
     // confidence band visible because the selected clip still has a layer.
@@ -355,6 +461,27 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     EXPECT_FALSE(trackButton->isVisible());
     EXPECT_FALSE(generateButton->isVisible());
     EXPECT_TRUE(band->isVisible());
+    // Compare/split and the layer switch stay available for review once the
+    // selected clip has a tracked layer, even outside mask mode.
+    EXPECT_TRUE(compare->isVisible());
+    QQuickItem *layerToggle =
+        findItem(window, QStringLiteral("removal-layer-enabled"));
+    ASSERT_NE(layerToggle, nullptr);
+    EXPECT_TRUE(layerToggle->isVisible());
+    EXPECT_TRUE(layerToggle->isEnabled());
+
+    // Disabling the layer outside mask mode shows the chip and flips the
+    // switch; re-enabling keeps the later export-preflight check meaningful.
+    controller.removal()->setLayerEnabled(false);
+    QTest::qWait(120);
+    QQuickItem *disabledChip =
+        findItem(window, QStringLiteral("removal-layer-disabled-chip"));
+    ASSERT_NE(disabledChip, nullptr);
+    EXPECT_TRUE(disabledChip->isVisible());
+    EXPECT_FALSE(layerToggle->property("checked").toBool());
+    controller.removal()->setLayerEnabled(true);
+    QTest::qWait(120);
+    EXPECT_FALSE(disabledChip->isVisible());
 
     // Export dialog content is created lazily; open it with a deterministic
     // encoder catalog and check the missing-cache prompt actions.
@@ -383,6 +510,16 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
         findItem(window, QStringLiteral("export-removal-message"));
     ASSERT_NE(promptMessage, nullptr);
     EXPECT_TRUE(promptMessage->isVisible());
+    // The prompt owns a progress/stage/ETA area and a real generation cancel
+    // action; both exist even while no generation is running.
+    for (const QString &name : {
+             QStringLiteral("export-removal-progress"),
+             QStringLiteral("export-removal-progress-bar"),
+             QStringLiteral("export-removal-stage"),
+             QStringLiteral("export-removal-eta"),
+             QStringLiteral("export-removal-cancel-generation")}) {
+        EXPECT_NE(findItem(window, name), nullptr) << name.toStdString();
+    }
 
     // Dismissing the prompt hides it; reopening the dialog shows it again.
     clickItem(window, cancelExport);

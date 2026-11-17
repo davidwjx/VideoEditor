@@ -878,3 +878,61 @@ TEST(RemovalControllerProgress, ConfidenceMappingHonoursNonUnitSpeed)
     controller.jumpToConfidence(1);
     EXPECT_EQ(sought, 1'500'000);
 }
+
+TEST(RemovalControllerProgress, ExportGenerationTargetsTheFailingClip)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ProjectDocument doc;
+    MaskSidecarStore sidecars(dir.filePath(QStringLiteral("p.veproj")));
+    AiFeatureGate gate;
+    gate.setRegistryForTest(testRegistry(dir.path()));
+    gate.setEnabledForTest(true);
+    AiJobManager manager(gate);
+    RemovalCache cache(QDir(dir.path()).filePath(QStringLiteral("cache")));
+    RemovalController controller(doc, sidecars);
+    controller.setJobManager(&manager);
+    controller.setCache(&cache);
+    controller.setFeatureGate(&gate);
+    // The selected clip is clip-1; generation must follow the failing clip.
+    controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    Project project = projectWithClip();
+    project.assets[0].info.frameRate = Rational{30, 1};
+    RemovalLayer first = sampleLayer();
+    first.id = QStringLiteral("rl-1");
+    first.clipId = QStringLiteral("clip-1");
+    project.removalLayers.append(first);
+    project.tracks[0].clips[0].removalLayerId = first.id;
+
+    Clip second = project.tracks[0].clips[0];
+    second.id = QStringLiteral("clip-2");
+    second.timelineStartUs = 2'000'000;
+    second.sourceInUs = 0;
+    second.sourceOutUs = 10'000'000;
+    second.removalLayerId = QStringLiteral("rl-2");
+    project.tracks[0].clips.append(second);
+    RemovalLayer secondLayer = sampleLayer();
+    secondLayer.id = QStringLiteral("rl-2");
+    secondLayer.clipId = second.id;
+    project.removalLayers.append(secondLayer);
+    doc.setProject(project);
+
+    AiJobSpec captured;
+    manager.setTransportFactoryForTest([&captured] {
+        return std::unique_ptr<AiTransport>(
+            new FakeTransport(FakeTransport::Mode::Silent, &captured));
+    });
+
+    controller.generateForExportForClip(QStringLiteral("clip-2"));
+    ASSERT_FALSE(captured.clipId.isEmpty())
+        << controller.error().toStdString();
+    EXPECT_EQ(captured.clipId, QStringLiteral("clip-2"))
+        << "the prompt must generate the failing clip, not the selection";
+    EXPECT_TRUE(controller.exportGenerationPending());
+    EXPECT_TRUE(manager.running());
+
+    controller.cancelExportGeneration();
+    EXPECT_FALSE(controller.exportGenerationPending());
+}

@@ -59,6 +59,7 @@ void LiveRepairService::clearWorkingState()
         m_patches.clear();
         m_lru.clear();
         m_emptyFrames.clear();
+        m_backend.clear();
     }
     m_configured = false;
 }
@@ -176,6 +177,7 @@ bool LiveRepairService::configure(const LiveRepairSpec &spec, QString *error)
         m_patches.clear();
         m_lru.clear();
         m_emptyFrames.clear();
+        m_backend.clear();
     }
     m_reader = std::move(reader);
     m_pipeline = std::move(pipeline);
@@ -278,16 +280,24 @@ void LiveRepairService::storePatch(int frame, const LiveRepairPatch &patch)
     }
 }
 
-bool LiveRepairService::processFrame(int frame)
+bool LiveRepairService::processFrame(int frame, bool targetFrame)
 {
     LiveRepairSpec spec;
+    bool alreadyDone = false;
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         if (frame < 0 || frame >= m_frameCount)
             return true;
-        if (m_patches.contains(frame) || m_emptyFrames.contains(frame))
-            return true;
-        spec = m_spec;
+        alreadyDone = m_patches.contains(frame) || m_emptyFrames.contains(frame);
+        if (!alreadyDone)
+            spec = m_spec;
+    }
+    if (alreadyDone) {
+        // A prefetched frame can become the new playhead target. It is ready
+        // immediately, so the status must not hang on "正在修复当前帧…".
+        if (targetFrame && frameForSourceUs(m_targetUs.load()) == frame)
+            emit targetReady(frame);
+        return true;
     }
 
     const QString maskPath = maskPathFor(spec.cacheDir, frame);
@@ -336,9 +346,14 @@ bool LiveRepairService::processFrame(int frame)
     }
     if (patches->isEmpty()) {
         // This frame has no hole; the original frame is the correct result and
-        // the compositor falls through to the cache/original on a miss.
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_emptyFrames.insert(frame);
+        // the compositor falls through to the cache/original on a miss. The
+        // target is still "processed", so readiness must not hang forever.
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_emptyFrames.insert(frame);
+        }
+        if (targetFrame && frameForSourceUs(m_targetUs.load()) == frame)
+            emit targetReady(frame);
         return true;
     }
 
@@ -346,8 +361,29 @@ bool LiveRepairService::processFrame(int frame)
     storePatch(frame, LiveRepairPatch{result.rgba, result.crop,
                                               spec.displaySize.width(),
                                               spec.displaySize.height()});
+    publishBackend();
     emit frameReady(frame);
+    // Prefetch completions must not claim the playhead is ready: only emit
+    // when the frame being published is still the current target.
+    if (targetFrame && frameForSourceUs(m_targetUs.load()) == frame)
+        emit targetReady(frame);
     return true;
+}
+
+void LiveRepairService::publishBackend()
+{
+    if (!m_pipeline)
+        return;
+    const QString backend = m_pipeline->provider().trimmed().toLower();
+    if (backend.isEmpty())
+        return;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        if (m_backend == backend)
+            return;
+        m_backend = backend;
+    }
+    emit backendChanged(backend);
 }
 
 void LiveRepairService::run()
@@ -361,7 +397,7 @@ void LiveRepairService::run()
         if (target < 0)
             break;
 
-        if (!processFrame(target))
+        if (!processFrame(target, /*targetFrame=*/true))
             break;
 
         // Prefetch the window sequentially in each direction: FrameReader
@@ -439,6 +475,12 @@ int LiveRepairService::frameCountForTest() const
 {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     return m_frameCount;
+}
+
+QString LiveRepairService::backendForTest() const
+{
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    return m_backend;
 }
 
 } // namespace VideoEditor

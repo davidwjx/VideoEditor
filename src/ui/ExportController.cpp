@@ -702,6 +702,10 @@ void ExportController::syncRemovalState(const RemovalPreflightResult *result)
         (result && result->ok && !result->message.isEmpty())
             ? result->message
             : QString();
+    const QString clipId =
+        required && !result->issues.isEmpty()
+            ? result->issues.first().clipId
+            : QString();
     if (required != m_removalRequired) {
         m_removalRequired = required;
         emit removalRequiredChanged();
@@ -713,6 +717,10 @@ void ExportController::syncRemovalState(const RemovalPreflightResult *result)
     if (warning != m_removalWarning) {
         m_removalWarning = warning;
         emit removalWarningChanged();
+    }
+    if (clipId != m_removalClipId) {
+        m_removalClipId = clipId;
+        emit removalClipIdChanged();
     }
 }
 

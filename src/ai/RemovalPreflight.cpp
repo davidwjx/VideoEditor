@@ -3,10 +3,12 @@
 #include <algorithm>
 
 #include <QCryptographicHash>
+#include <QFileInfo>
 #include <QSet>
 #include <QStringList>
 
 #include "AssetFingerprint.h"
+#include "TimeBase.h"
 
 namespace VideoEditor {
 
@@ -29,11 +31,25 @@ QString modelBundleHash(const AiModelRecord *record)
             .toHex());
 }
 
-QString cacheMessageFor(const QString &clipId)
+// Users identify a clip by its media filename and its place on the timeline,
+// never by the internal clip UUID. Preflight results surface this label in both
+// the per-issue reasons and the summary.
+QString clipLabel(const Project &project, const Clip &clip)
+{
+    const Asset *asset = project.assetById(clip.assetId);
+    const QString name = asset && !asset->path.isEmpty()
+                             ? QFileInfo(asset->path).fileName()
+                             : QStringLiteral("未知素材");
+    return QStringLiteral("“%1” %2–%3")
+        .arg(name, formatDuration(clip.timelineStartUs),
+             formatDuration(clip.timelineEndUs()));
+}
+
+QString cacheMessageFor(const Project &project, const Clip &clip)
 {
     return QStringLiteral(
-               "片段“%1”的 AI 修复结果缺失或已过期。请先生成修复，再导出。")
-        .arg(clipId);
+               "%1 的 AI 修复结果缺失或已过期。请先生成修复，再导出。")
+        .arg(clipLabel(project, clip));
 }
 
 struct RemovalTarget {
@@ -69,19 +85,21 @@ QList<RemovalTarget> activeRemovalTargets(const Project &project)
     return targets;
 }
 
-void addIssue(RemovalPreflightResult *result, const Clip &clip,
-              const RemovalLayer *layer, const QString &reason)
+void addIssue(const Project &project, RemovalPreflightResult *result,
+              const Clip &clip, const RemovalLayer *layer,
+              const QString &reason)
 {
     RemovalPreflightIssue issue;
     issue.clipId = clip.id;
     issue.layerId = layer ? layer->id : QString();
     issue.startUs = clip.timelineStartUs;
     issue.endUs = clip.timelineEndUs();
-    issue.reason = reason;
+    issue.reason = QStringLiteral("%1：%2").arg(clipLabel(project, clip), reason);
     result->issues.append(issue);
 }
 
-RemovalPreflightResult gateFailure(const QList<RemovalTarget> &targets,
+RemovalPreflightResult gateFailure(const Project &project,
+                                   const QList<RemovalTarget> &targets,
                                    const QString &gateReason)
 {
     RemovalPreflightResult result;
@@ -89,13 +107,13 @@ RemovalPreflightResult gateFailure(const QList<RemovalTarget> &targets,
     for (const RemovalTarget &target : targets) {
         if (!target.layer) {
             const QString reason = QStringLiteral("AI 修复层缺失。");
-            addIssue(&result, *target.clip, nullptr, reason);
-            lines.append(cacheMessageFor(target.clip->id));
+            addIssue(project, &result, *target.clip, nullptr, reason);
+            lines.append(cacheMessageFor(project, *target.clip));
             continue;
         }
-        addIssue(&result, *target.clip, target.layer, gateReason);
-        lines.append(
-            QStringLiteral("片段“%1”：%2").arg(target.clip->id, gateReason));
+        addIssue(project, &result, *target.clip, target.layer, gateReason);
+        lines.append(QStringLiteral("%1：%2")
+                         .arg(clipLabel(project, *target.clip), gateReason));
     }
     result.ok = result.issues.isEmpty();
     result.message = lines.join(QLatin1Char('\n'));
@@ -163,7 +181,7 @@ RemovalPreflightResult RemovalPreflight::check(const Project &project,
         const AiModelRecord *tracking = models.defaultTrackingModel();
         if (!tracking) {
             return gateFailure(
-                targets,
+                project, targets,
                 QStringLiteral(
                     "内部技术预览不可用：模型清单中没有可用的跟踪模型。"));
         }
@@ -183,7 +201,7 @@ RemovalPreflightResult RemovalPreflight::check(const Project &project,
             QString verifyError;
             if (!models.verifyFiles(verifyIds, &verifyError)) {
                 return gateFailure(
-                    targets,
+                    project, targets,
                     QStringLiteral(
                         "内部技术预览不可用：模型文件缺失或校验失败（%1）。")
                         .arg(verifyError));
@@ -194,7 +212,7 @@ RemovalPreflightResult RemovalPreflight::check(const Project &project,
         const bool enabled =
             models.featureEnabled(&gateReason, !modelsAlreadyVerified);
         if (!enabled)
-            return gateFailure(targets, gateReason);
+            return gateFailure(project, targets, gateReason);
     }
 
     QStringList messageLines;
@@ -202,65 +220,67 @@ RemovalPreflightResult RemovalPreflight::check(const Project &project,
         const Clip &clip = *target.clip;
         const RemovalLayer *layer = target.layer;
         if (!layer) {
-            addIssue(&result, clip, nullptr, QStringLiteral("AI 修复层缺失。"));
-            messageLines.append(cacheMessageFor(clip.id));
+            addIssue(project, &result, clip, nullptr,
+                     QStringLiteral("AI 修复层缺失。"));
+            messageLines.append(cacheMessageFor(project, clip));
             continue;
         }
 
         if (layer->trackingState == RemovalTrackingState::Tracking
             || layer->trackingState == RemovalTrackingState::Partial
             || layer->trackingState == RemovalTrackingState::Failed) {
-            addIssue(&result, clip, layer, QStringLiteral("AI 跟踪尚未完成。"));
+            addIssue(project, &result, clip, layer,
+                     QStringLiteral("AI 跟踪尚未完成。"));
             messageLines.append(
-                QStringLiteral("片段“%1”的 AI 跟踪尚未完成。"
-                               "请先生成修复，再导出。")
-                    .arg(clip.id));
+                QStringLiteral("%1 的 AI 跟踪尚未完成。请先生成修复，再导出。")
+                    .arg(clipLabel(project, clip)));
             continue;
         }
 
         const Asset *asset = project.assetById(clip.assetId);
         if (!asset) {
-            addIssue(&result, clip, layer, QStringLiteral("素材缺失"));
-            messageLines.append(cacheMessageFor(clip.id));
+            addIssue(project, &result, clip, layer,
+                     QStringLiteral("素材缺失"));
+            messageLines.append(cacheMessageFor(project, clip));
             continue;
         }
 
         // Quality must never silently fall back to MI-GAN (or an fp16 LaMa).
         // A mode with no appropriate model cannot have a valid cache.
         if (!models.preferredInpaintModel(layer->parameters.mode)) {
-            addIssue(&result, clip, layer,
+            addIssue(project, &result, clip, layer,
                      QStringLiteral("没有可用的修复模型。"));
             messageLines.append(
-                QStringLiteral("片段“%1”没有可用的修复模型，"
+                QStringLiteral("%1 没有可用的修复模型，"
                                "请安装对应的模型后再导出。")
-                    .arg(clip.id));
+                    .arg(clipLabel(project, clip)));
             continue;
         }
 
         const RemovalKeyInput input = keyInputFor(project, clip, *layer, models);
         const QString key = computeRemovalCacheKey(input);
         if (key != layer->cacheKey) {
-            addIssue(&result, clip, layer,
+            addIssue(project, &result, clip, layer,
                      QStringLiteral(
                          "AI 修复结果已过期（素材、遮罩、参数或模型已变化）。"));
-            messageLines.append(cacheMessageFor(clip.id));
+            messageLines.append(cacheMessageFor(project, clip));
             continue;
         }
 
         QString verifyError;
         if (!cache.verify(key, &verifyError)) {
-            addIssue(&result, clip, layer,
+            addIssue(project, &result, clip, layer,
                      QStringLiteral("AI 修复结果缺失或已损坏。"));
-            messageLines.append(cacheMessageFor(clip.id));
+            messageLines.append(cacheMessageFor(project, clip));
             continue;
         }
 
         if (layer->trackingState == RemovalTrackingState::LowConfidence) {
             // Low confidence is actionable but does not block export.
             messageLines.append(
-                QStringLiteral("片段“%1”的跟踪置信度较低，"
+                QStringLiteral("%1 的跟踪置信度较低，"
                                "导出前建议检查修复结果。")
-                    .arg(clip.id));
+                    .arg(clipLabel(project, clip)));
         }
     }
 
@@ -275,7 +295,7 @@ RemovalPreflightResult RemovalPreflight::checkWithoutModels(
     const QList<RemovalTarget> targets = activeRemovalTargets(project);
     if (targets.isEmpty())
         return RemovalPreflightResult{};
-    return gateFailure(targets, reason);
+    return gateFailure(project, targets, reason);
 }
 
 } // namespace VideoEditor

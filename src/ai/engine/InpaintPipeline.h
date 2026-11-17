@@ -78,6 +78,10 @@ public:
 
     bool wasCancelled() const { return m_cancelled; }
 
+    // Execution provider of the active model ("dml", "cpu") once it has been
+    // created; empty before the first repair or when the backend is unknown.
+    QString provider() const;
+
     // Largest patch size (512/384/256/128) whose working set fits the budget.
     static int chooseTileSize(int cropW, int cropH, qint64 vramBudgetBytes);
 

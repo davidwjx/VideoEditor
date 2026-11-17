@@ -150,6 +150,8 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         }
         m_liveRepair->setTarget(
             m_removal->liveSourceTimeUs(m_preview->positionMs() * 1000));
+        // The playhead moved: the previous "ready" no longer describes it.
+        m_removal->notifyLivePreviewTargetChanged();
     });
 
     // Mask sidecars live next to the .veproj. Unsaved projects use a stable
@@ -281,16 +283,29 @@ AppController::AppController(QObject *parent, QString recoveryPath,
                     m_removal->handleLiveRepairError(message);
                 setLastError(message);
             });
-    connect(m_liveRepair.get(), &LiveRepairService::frameReady, this,
+    connect(m_liveRepair.get(), &LiveRepairService::targetReady, this,
             [this](int) {
                 if (!m_removal || !m_removal->livePreview())
                     return;
-                m_removal->notifyLivePreviewReady();
+                // Only the playhead frame may claim "就绪（当前帧）"; prefetch
+                // completions arrive through frameReady and change nothing.
+                m_removal->notifyLivePreviewTargetReady();
                 // A paused preview only re-composes when asked; coalesce the
-                // burst of prefetch completions into one request.
+                // burst into one request.
                 if (!m_preview->playing() && !m_liveRefreshTimer.isActive())
                     m_liveRefreshTimer.start();
             });
+    connect(m_liveRepair.get(), &LiveRepairService::backendChanged, this,
+            [this](const QString &backend) {
+                if (m_removal)
+                    m_removal->setLivePreviewBackend(backend);
+            });
+    m_removal->setPlaybackStateProvider(
+        [this] { return m_preview && m_preview->playing(); });
+    connect(m_preview, &PreviewController::playingChanged, this, [this] {
+        if (m_removal && m_removal->livePreview())
+            m_removal->notifyLivePreviewTargetChanged();
+    });
     m_removal->setLivePreviewStarter(
         [this](const LiveRepairSpec &spec, QString *error) {
             if (!m_liveRepair)
