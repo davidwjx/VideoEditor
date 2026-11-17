@@ -30,6 +30,9 @@ void TimelineRenderWorker::reset()
 void TimelineRenderWorker::close()
 {
     reset();
+    // Release the preview-only repair source; the controller re-sends it when
+    // the timeline is opened again.
+    m_liveRepairProvider.reset();
     m_project = Project{};
     m_projectPath.clear();
     m_generation = 0;
@@ -69,6 +72,7 @@ void TimelineRenderWorker::setProject(VideoEditor::Project project,
     m_compositor->setRemovalCacheRoot(m_removalCacheRoot);
     m_compositor->setRemovalCompareMode(
         static_cast<RemovalCompareMode>(m_removalCompare), m_splitPermille);
+    m_compositor->setLiveRepairProvider(m_liveRepairProvider);
     m_width = m_compositor->width();
     m_height = m_compositor->height();
     if (!reusableRing) {
@@ -92,6 +96,14 @@ void TimelineRenderWorker::setRemovalCompare(int mode, int splitPermille)
             static_cast<RemovalCompareMode>(m_removalCompare),
             m_splitPermille);
     }
+}
+
+void TimelineRenderWorker::setLiveRepairProvider(
+    VideoEditor::LiveRepairProviderPtr provider)
+{
+    m_liveRepairProvider = std::move(provider);
+    if (m_compositor)
+        m_compositor->setLiveRepairProvider(m_liveRepairProvider);
 }
 
 void TimelineRenderWorker::setRemovalCacheRoot(QString root)

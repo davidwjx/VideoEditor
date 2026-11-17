@@ -29,6 +29,7 @@
 #include "ExportPipeline.h"
 #include "FrameReader.h"
 #include "ImageMetrics.h"
+#include "LiveRepairService.h"
 #include "MaskCodec.h"
 #include "MaskSidecarStore.h"
 #include "MediaListModel.h"
@@ -140,6 +141,16 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         m_timeline->seekUs(m_preview->positionMs() * 1000);
         m_syncingPlayhead = false;
     });
+    // The live worker repairs the source frame under the playhead first. m_removal
+    // is created later but this signal never fires during construction.
+    connect(m_preview, &PreviewController::positionChanged, this, [this] {
+        if (!m_liveRepair || !m_removal || !m_removal->livePreview()
+            || !m_liveRepair->isRunning()) {
+            return;
+        }
+        m_liveRepair->setTarget(
+            m_removal->liveSourceTimeUs(m_preview->positionMs() * 1000));
+    });
 
     // Mask sidecars live next to the .veproj. Unsaved projects use a stable
     // fallback so an in-progress mask edit survives until the first save.
@@ -248,7 +259,62 @@ AppController::AppController(QObject *parent, QString recoveryPath,
         if (m_preview)
             m_preview->setRemovalCompareMode(mode, splitPermille);
     });
+
+    // Live preview: the controller resolves the layer/spec, this object owns
+    // the worker and forwards the provider to the preview compositor only.
+    m_liveRepair = std::make_shared<LiveRepairService>();
+    m_liveRefreshTimer.setSingleShot(true);
+    m_liveRefreshTimer.setInterval(50);
+    connect(&m_liveRefreshTimer, &QTimer::timeout, this, [this] {
+        if (m_removal && m_removal->livePreview())
+            m_preview->refreshTimelineFrame();
+    });
+    connect(m_liveRepair.get(), &LiveRepairService::error, this,
+            [this](const QString &message) {
+                // A missing mask (or any repair failure) stops the worker; the
+                // panel shows the Chinese error instead of a silent original.
+                if (m_liveRepair)
+                    m_liveRepair->stop();
+                if (m_preview)
+                    m_preview->setLiveRepairProvider(LiveRepairProviderPtr{});
+                if (m_removal)
+                    m_removal->handleLiveRepairError(message);
+                setLastError(message);
+            });
+    connect(m_liveRepair.get(), &LiveRepairService::frameReady, this,
+            [this](int) {
+                if (!m_removal || !m_removal->livePreview())
+                    return;
+                m_removal->notifyLivePreviewReady();
+                // A paused preview only re-composes when asked; coalesce the
+                // burst of prefetch completions into one request.
+                if (!m_preview->playing())
+                    m_liveRefreshTimer.start();
+            });
+    m_removal->setLivePreviewStarter(
+        [this](const LiveRepairSpec &spec, QString *error) {
+            if (!m_liveRepair)
+                return false;
+            if (!m_liveRepair->configure(spec, error))
+                return false;
+            m_liveRepair->setTarget(
+                m_removal->liveSourceTimeUs(m_preview->positionMs() * 1000));
+            m_preview->setLiveRepairProvider(m_liveRepair);
+            m_liveRepair->start();
+            return true;
+        });
+    m_removal->setLivePreviewStopper([this] {
+        if (m_liveRefreshTimer.isActive())
+            m_liveRefreshTimer.stop();
+        if (m_liveRepair)
+            m_liveRepair->stop();
+        if (m_preview)
+            m_preview->setLiveRepairProvider(LiveRepairProviderPtr{});
+    });
+
     connect(m_document, &ProjectDocument::projectReplaced, this, [this] {
+        if (m_removal && m_removal->livePreview())
+            m_removal->setLivePreview(false);
         m_maskSidecars->setProjectPath(m_document->filePath(),
                                        m_sidecarFallback);
     });
@@ -256,6 +322,9 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     // the masked clip. Leaving mask mode active would let the transparent
     // overlay keep swallowing preview clicks with no visible exit control.
     connect(m_timeline, &TimelineController::selectionChanged, this, [this] {
+        // Live preview is bound to one layer and one source range.
+        if (m_removal->livePreview())
+            m_removal->setLivePreview(false);
         // The selected clip can satisfy activeRemovalLayer()/hasLayer() without
         // mask mode, so refresh the analysis bindings for every selection.
         m_removal->notifySelectionChanged();
@@ -310,6 +379,13 @@ AppController::AppController(QObject *parent, QString recoveryPath,
     // snapshot until the next unrelated edit.
     connect(m_document, &ProjectDocument::removalLayersChanged, this,
             scheduleTimelineUpdate);
+    // Editing parameters, deleting the layer or regenerating invalidates the
+    // live provider's spec and tracking masks; stop instead of drawing a stale
+    // patch. The user toggles live preview on again after the edit.
+    connect(m_document, &ProjectDocument::removalLayersChanged, this, [this] {
+        if (m_removal && m_removal->livePreview())
+            m_removal->setLivePreview(false);
+    });
 
     const QString cacheRoot = QDir(appData).filePath(QStringLiteral("cache"));
     m_proxyService = new ProxyService(cacheRoot, resolveFfmpegPath(), this);
@@ -339,11 +415,26 @@ AppController::AppController(QObject *parent, QString recoveryPath,
 
 AppController::~AppController()
 {
-    // Stop the preview first: it forwards to the audio engine, which must
-    // still be alive. AudioEngine owns its own worker thread, so shutdown()
-    // is a blocking, idempotent stop that no callback can outlive.
-    if (m_preview)
+    // Join the live preview worker and release the provider before the preview
+    // compositor is destroyed. Export never saw this provider.
+    m_liveRefreshTimer.stop();
+    if (m_removal && m_removal->livePreview())
+        m_removal->setLivePreview(false);
+    if (m_liveRepair)
+        m_liveRepair->stop();
+    // The preview's render thread holds a shared reference to the provider.
+    // Destroy the preview explicitly while this object's m_liveRepair member
+    // is still alive so the provider is released on the GUI thread, not from
+    // the render thread during deferred child cleanup. pause() first: it
+    // forwards to the audio engine, which must still be alive.
+    if (m_preview) {
         m_preview->pause();
+        m_preview->setParent(nullptr);
+        delete m_preview;
+        m_preview = nullptr;
+    }
+    // AudioEngine owns its own worker thread, so shutdown() is a blocking,
+    // idempotent stop that no callback can outlive.
     if (m_audio)
         m_audio->shutdown();
 }

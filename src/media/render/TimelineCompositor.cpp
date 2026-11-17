@@ -325,6 +325,36 @@ int TimelineCompositor::drawFrame(int64_t timelineUs,
             return -1;
         };
 
+        // GPU live preview patches are drawn exactly like cached patches. A
+        // miss falls through to the on-disk cache and finally to the original.
+        // Export (failOnMissingRemoval) never sets a provider, and ignoring it
+        // here guarantees a leaked provider could not mask a missing cache.
+        if (m_liveRepair && !m_failOnMissingRemoval) {
+            LiveRepairPatch live;
+            if (m_liveRepair->patchFor(removal->id, layer.sourceTimeUs, &live)
+                && !live.image.isNull()) {
+                const LayerRect liveRect = insetLayerRectForCrop(
+                    rect, live.crop, source->width(), source->height());
+                if (m_compare == RemovalCompareMode::SplitWipe) {
+                    RECT left{0, 0, LONG(m_width * m_splitPermille / 1000),
+                              LONG(m_height)};
+                    m_compositor->setScissorRect(&left);
+                }
+                QString liveError;
+                const bool liveDrawn = m_compositor->drawImage(
+                    live.image, liveRect, opacity, &liveError);
+                if (m_compare == RemovalCompareMode::SplitWipe)
+                    m_compositor->setScissorRect(nullptr);
+                if (liveDrawn) {
+                    ++drawnLayers;
+                } else if (!liveError.isEmpty()) {
+                    reportOnce(QStringLiteral("draw:live:") + layer.clipId,
+                               liveError);
+                }
+                continue;
+            }
+        }
+
         QString removalError;
         RepairFrameSource *repair = repairSourceFor(*removal, &removalError);
         if (!repair) {

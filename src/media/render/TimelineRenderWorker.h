@@ -8,6 +8,7 @@
 #include <QSize>
 #include <QString>
 
+#include "LiveRepairProvider.h"
 #include "Project.h"
 
 namespace VideoEditor {
@@ -37,6 +38,9 @@ public slots:
     // connection without registering a new metatype.
     void setRemovalCompare(int mode, int splitPermille);
     void setRemovalCacheRoot(QString root);
+    // Preview-only in-memory repair source. Passed as a shared pointer so the
+    // queued call keeps the provider alive across the thread boundary.
+    void setLiveRepairProvider(VideoEditor::LiveRepairProviderPtr provider);
     void close();
 
 signals:
@@ -63,6 +67,7 @@ private:
     int m_height = 1080;
     bool m_useProxy = true;
     bool m_valid = false;
+    VideoEditor::LiveRepairProviderPtr m_liveRepairProvider;
     QString m_removalCacheRoot;
     // 0=Repair, 1=Original, 2=SplitWipe. Persisted so a compositor rebuilt
     // after close() starts in the user's current comparison mode.

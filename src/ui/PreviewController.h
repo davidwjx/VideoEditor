@@ -7,6 +7,7 @@
 #include <QTimer>
 
 #include "FrameRequestCoalescer.h"
+#include "LiveRepairProvider.h"
 #include "MediaInfo.h"
 #include "Project.h"
 #include "TimeBase.h"
@@ -77,6 +78,11 @@ public:
                                            int splitPermille = 500);
     // The render worker opens repair manifests below this directory.
     void setRemovalCacheRoot(const QString &root);
+    // Preview-only GPU repair source forwarded to the render worker. nullptr
+    // removes it; export never receives this provider.
+    void setLiveRepairProvider(LiveRepairProviderPtr provider);
+    // Re-composes the paused instant (for example when a live patch arrived).
+    void refreshTimelineFrame();
 
     // Timeline mode entry point. Takes ownership of its own rendering thread;
     // the caller keeps using play()/pause()/seekFrame() as usual. useProxy is
@@ -163,6 +169,7 @@ private:
     int64_t m_playStartUs = 0;
     bool m_useProxy = true;
     QString m_removalCacheRoot;
+    LiveRepairProviderPtr m_liveRepairProvider;
     QString m_removalCompareMode = QStringLiteral("repair");
     int m_removalSplitPermille = 500;
     int64_t m_lastTimelineFrame = -1;

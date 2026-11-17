@@ -67,6 +67,8 @@ add_executable(ui_tests
   ui/TimelineControllerTest.cpp
   ui/RemovalControllerTest.cpp
   ui/RemovalControllerProgressTest.cpp
+  ui/RemovalControllerLiveTest.cpp
+  ui/LiveRepairServiceTest.cpp
   ui/WaveformImageProviderTest.cpp
   ui/ExportControllerTest.cpp
   TestGuiMain.cpp)

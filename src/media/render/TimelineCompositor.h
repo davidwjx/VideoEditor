@@ -12,6 +12,7 @@
 #include <QSet>
 #include <QString>
 
+#include "LiveRepairProvider.h"
 #include "Project.h"
 
 struct ID3D11RenderTargetView;
@@ -68,6 +69,14 @@ public:
     // into a draw error instead of silently falling back to the original.
     void setFailOnMissingRemoval(bool fail) { m_failOnMissingRemoval = fail; }
     bool failOnMissingRemoval() const { return m_failOnMissingRemoval; }
+    // Optional in-memory GPU repair source for preview. Export must never set
+    // this: when failOnMissingRemoval is true the provider is ignored
+    // unconditionally so a missing cache still aborts instead of encoding a
+    // live patch.
+    void setLiveRepairProvider(std::shared_ptr<LiveRepairProvider> provider)
+    {
+        m_liveRepair = std::move(provider);
+    }
     int removalLayerCountForTest() const { return int(m_repairSources.size()); }
     int failedRepairKeyCountForTest() const
     {
@@ -113,6 +122,7 @@ private:
     // Missing keys stay here until the next open()/cache-root change so a
     // paused preview does not re-read a manifest/index every frame.
     QSet<QString> m_failedRepairKeys;
+    std::shared_ptr<LiveRepairProvider> m_liveRepair;
     QString m_removalCacheRoot;
     RemovalCompareMode m_compare = RemovalCompareMode::Repair;
     int m_splitPermille = 500;

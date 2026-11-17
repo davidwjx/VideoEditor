@@ -85,6 +85,12 @@ RemovalController::RemovalController(ProjectDocument &document,
             [this] { notifyAnalysisChanged(); });
     connect(&m_document, &ProjectDocument::projectReplaced, this,
             [this] { notifyAnalysisChanged(); });
+    // Availability depends on the selected layer, the gate and the tracking
+    // cache; all of those already notify through these two signals.
+    connect(this, &RemovalController::layerChanged, this,
+            &RemovalController::livePreviewChanged);
+    connect(this, &RemovalController::featureEnabledChanged, this,
+            &RemovalController::livePreviewChanged);
 }
 
 void RemovalController::setPlayheadProvider(std::function<qint64()> provider)
@@ -114,6 +120,202 @@ void RemovalController::applyCompareMode()
 {
     if (m_compareSink)
         m_compareSink(m_compareMode, m_splitPermille);
+}
+
+void RemovalController::setLivePreviewStarter(
+    std::function<bool(const LiveRepairSpec &, QString *)> starter)
+{
+    m_livePreviewStarter = std::move(starter);
+}
+
+void RemovalController::setLivePreviewStopper(std::function<void()> stopper)
+{
+    m_livePreviewStopper = std::move(stopper);
+}
+
+bool RemovalController::trackingMasksPresent(const RemovalLayer &layer) const
+{
+    if (!m_cache || layer.cacheKey.isEmpty())
+        return false;
+    const QDir masks(QDir(m_cache->cacheDir(layer.cacheKey))
+                         .filePath(QStringLiteral("tracking/masks")));
+    if (!masks.exists())
+        return false;
+    return !masks.entryInfoList({QStringLiteral("frame_*.rle")}, QDir::Files)
+                .isEmpty();
+}
+
+bool RemovalController::livePreviewAvailable() const
+{
+    if (!m_featureGate || !m_featureGate->enabled())
+        return false;
+    const RemovalLayer *layer = activeRemovalLayer();
+    return layer && trackingMasksPresent(*layer);
+}
+
+qint64 RemovalController::liveSourceTimeUs(qint64 timelineUs) const
+{
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer)
+        return 0;
+    const Clip *clip = findClip(layer->clipId);
+    const qint64 sourceUs = clip ? sourceTimeAt(*clip, timelineUs)
+                                 : layer->sourceInUs;
+    return qBound(layer->sourceInUs, sourceUs,
+                  qMax(layer->sourceInUs, layer->sourceOutUs - 1));
+}
+
+void RemovalController::setLivePreviewStatus(const QString &text)
+{
+    if (text == m_livePreviewStatus)
+        return;
+    m_livePreviewStatus = text;
+    emit livePreviewStatusChanged();
+}
+
+void RemovalController::handleLiveRepairError(const QString &message)
+{
+    if (m_livePreview) {
+        m_livePreview = false;
+        emit livePreviewChanged();
+    }
+    if (!message.isEmpty()) {
+        setError(message);
+        setLivePreviewStatus(
+            QStringLiteral("实时预览失败：%1").arg(message));
+    }
+}
+
+void RemovalController::notifyLivePreviewReady()
+{
+    if (!m_livePreview)
+        return;
+    setLivePreviewStatus(QStringLiteral("实时预览就绪（当前帧）"));
+}
+
+bool RemovalController::buildLiveRepairSpec(LiveRepairSpec *spec,
+                                            QString *error) const
+{
+    const auto fail = [error](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!m_featureGate)
+        return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
+    if (!m_featureGate->enabled())
+        return fail(m_featureGate->disabledReason());
+    if (!m_cache)
+        return fail(QStringLiteral("AI 缓存未初始化。"));
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer)
+        return fail(QStringLiteral("请先选择包含消除层的视频片段。"));
+    if (layer->cacheKey.isEmpty() || !trackingMasksPresent(*layer))
+        return fail(QStringLiteral("请先运行 AI 跟踪以生成逐帧遮罩。"));
+    if (layer->sourceOutUs <= layer->sourceInUs)
+        return fail(QStringLiteral("消除层的源区间无效。"));
+    const Clip *clip = findClip(layer->clipId);
+    const Asset *asset = clip ? assetForClip(*clip) : nullptr;
+    if (!clip || !asset || !asset->info.hasVideo)
+        return fail(QStringLiteral("未找到消除层对应的视频片段。"));
+    const ModelRegistry *registry = m_featureGate->registry();
+    if (!registry)
+        return fail(QStringLiteral("AI 消除功能未启用：未加载模型清单。"));
+    const AiModelRecord *inpaint =
+        registry->preferredInpaintModel(layer->parameters.mode);
+    if (!inpaint)
+        return fail(QStringLiteral("没有可用的修复模型。"));
+    QString modelPath;
+    for (auto it = inpaint->files.constBegin(); it != inpaint->files.constEnd();
+         ++it) {
+        if (it.value().path.endsWith(QLatin1String(".onnx"),
+                                     Qt::CaseInsensitive)) {
+            modelPath = QDir(registry->rootDir()).filePath(it.value().path);
+            break;
+        }
+    }
+    if (modelPath.isEmpty())
+        return fail(QStringLiteral("修复模型缺少 ONNX 文件。"));
+
+    Rational fps = asset->info.frameRate;
+    if (!fps.isValid())
+        fps = m_document.project().timeline.fps;
+    if (!fps.isValid())
+        fps = Rational{30, 1};
+    QSize display = displaySizeForAsset(*asset);
+    if (!display.isValid() || display.isEmpty())
+        display = QSize(1920, 1080);
+
+    RemovalParameters parameters = layer->parameters;
+    if (parameters.processingWidth <= 0 || parameters.processingWidth > 8192)
+        parameters.processingWidth = display.width();
+    if (parameters.processingHeight <= 0 || parameters.processingHeight > 8192)
+        parameters.processingHeight = display.height();
+
+    const qint64 playheadSourceUs = sourceTimeAt(*clip, playheadUs());
+    const MaskKeyframe *keyframe = nearestKeyframe(*layer, playheadSourceUs);
+
+    spec->assetPath = asset->path;
+    spec->cacheDir = m_cache->cacheDir(layer->cacheKey);
+    spec->layerId = layer->id;
+    spec->sourceInUs = layer->sourceInUs;
+    spec->sourceOutUs = layer->sourceOutUs;
+    spec->fps = fps;
+    spec->displaySize = display;
+    spec->parameters = parameters;
+    spec->featherPx = qBound(0, keyframe ? keyframe->featherPx : m_featherPx, 64);
+    spec->inpainterModelPath = modelPath;
+    spec->mode = layer->parameters.mode;
+    return true;
+}
+
+void RemovalController::setLivePreview(bool enabled)
+{
+    if (!enabled) {
+        const bool wasLive = m_livePreview;
+        if (wasLive && m_livePreviewStopper)
+            m_livePreviewStopper();
+        m_livePreview = false;
+        if (wasLive) {
+            setLivePreviewStatus(QStringLiteral("实时预览已关闭"));
+            emit livePreviewChanged();
+        }
+        return;
+    }
+    if (m_livePreview)
+        return;
+
+    QString error;
+    LiveRepairSpec spec;
+    if (!buildLiveRepairSpec(&spec, &error)) {
+        setError(error);
+        setLivePreviewStatus(QStringLiteral("实时预览失败：%1").arg(error));
+        m_livePreview = false;
+        emit livePreviewChanged();
+        return;
+    }
+    if (!m_livePreviewStarter) {
+        error = QStringLiteral("实时预览服务未初始化。");
+        setError(error);
+        setLivePreviewStatus(QStringLiteral("实时预览失败：%1").arg(error));
+        m_livePreview = false;
+        emit livePreviewChanged();
+        return;
+    }
+
+    setLivePreviewStatus(QStringLiteral("正在准备实时预览…"));
+    if (!m_livePreviewStarter(spec, &error)) {
+        if (error.isEmpty())
+            error = QStringLiteral("无法启动实时预览。");
+        setError(error);
+        setLivePreviewStatus(QStringLiteral("实时预览失败：%1").arg(error));
+        m_livePreview = false;
+        emit livePreviewChanged();
+        return;
+    }
+    m_livePreview = true;
+    setLivePreviewStatus(QStringLiteral("实时预览运行中"));
+    emit livePreviewChanged();
 }
 
 void RemovalController::notifySelectionChanged()
@@ -154,6 +356,7 @@ void RemovalController::setCache(RemovalCache *cache)
 {
     m_cache = cache;
     emit cacheStatusChanged();
+    emit livePreviewChanged();
 }
 
 void RemovalController::setFeatureGate(AiFeatureGate *gate)

@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 
 #include "D3D11Context.h"
+#include "LiveRepairProvider.h"
 #include "MediaProbe.h"
 #include "Project.h"
 #include "RemovalCache.h"
@@ -180,6 +181,34 @@ bool isRed(const std::array<int, 3> &p)
     return p[0] > 150 && p[2] < 100 && p[1] < 100;
 }
 
+bool isGreen(const std::array<int, 3> &p)
+{
+    return p[1] > 150 && p[0] < 100 && p[2] < 100;
+}
+
+// Preview-only provider used to exercise the compositor path without a model.
+class FakeLiveProvider : public LiveRepairProvider {
+public:
+    bool hit = true;
+    QString layerId = QStringLiteral("rl-1");
+    QColor color = QColor(0, 0, 255);
+    QRect crop{0, 0, kWidth, kHeight};
+    mutable int queries = 0;
+
+    bool patchFor(const QString &id, int64_t,
+                  LiveRepairPatch *patch) const override
+    {
+        ++queries;
+        if (!hit || id != layerId || !patch)
+            return false;
+        QImage image(crop.size(), QImage::Format_ARGB32);
+        image.fill(color);
+        patch->image = image;
+        patch->crop = crop;
+        return true;
+    }
+};
+
 } // namespace
 
 class RemovalRenderTest : public ::testing::Test {
@@ -240,6 +269,99 @@ TEST_F(RemovalRenderTest, DrawsRepairOverOriginalAndCompareModesDiffer)
         << "left half must show the repair patch";
     EXPECT_TRUE(isRed(pixel(split, 48, 32)))
         << "right half must show the original";
+}
+
+TEST_F(RemovalRenderTest, LiveProviderDrawsOverCacheAndMissFallsBack)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
+    // Cache a green patch so a live blue hit and a cache fallback are both
+    // distinguishable from the red source.
+    addRepairLayer(&project, dir.path(), 0, 1'000'000, 0, 30, QColor(0, 255, 0));
+
+    auto provider = std::make_shared<FakeLiveProvider>();
+    provider->color = QColor(255, 0, 0);
+
+    TimelineCompositor compositor;
+    compositor.setRemovalCacheRoot(dir.path());
+    compositor.setLiveRepairProvider(provider);
+    QString error;
+    ASSERT_TRUE(compositor.open(project, kWidth, kHeight, false, &error))
+        << error.toStdString();
+    compositor.setRemovalCompareMode(RemovalCompareMode::Repair);
+
+    int drawn = 0;
+    const auto live = compose(compositor, 0, &error, &drawn);
+    ASSERT_FALSE(live.empty()) << error.toStdString();
+    EXPECT_TRUE(isRed(pixel(live, 32, 32)))
+        << "a live red hit must be drawn over the cached green patch";
+    EXPECT_EQ(drawn, 2);
+    EXPECT_GT(provider->queries, 0);
+
+    // Original comparison never queries the live provider.
+    const int queriesBefore = provider->queries;
+    compositor.setRemovalCompareMode(RemovalCompareMode::Original);
+    const auto original = compose(compositor, 0, &error, &drawn);
+    ASSERT_FALSE(original.empty()) << error.toStdString();
+    EXPECT_TRUE(isRed(pixel(original, 32, 32)));
+    EXPECT_EQ(provider->queries, queriesBefore);
+
+    // A miss falls through to the cached repair patch ...
+    compositor.setRemovalCompareMode(RemovalCompareMode::Repair);
+    provider->hit = false;
+    const auto cached = compose(compositor, 0, &error, &drawn);
+    ASSERT_FALSE(cached.empty()) << error.toStdString();
+    EXPECT_TRUE(isGreen(pixel(cached, 32, 32)))
+        << "a live miss must fall through to RepairFrameSource";
+    EXPECT_EQ(drawn, 2);
+
+    // ... and finally to the original frame when the cache is unavailable.
+    provider->hit = true;
+    compositor.setLiveRepairProvider(nullptr);
+    provider.reset();
+    compositor.setRemovalCacheRoot(QString());
+    const auto noProvider = compose(compositor, 0, &error, &drawn);
+    ASSERT_FALSE(noProvider.empty()) << error.toStdString();
+    EXPECT_TRUE(isRed(pixel(noProvider, 32, 32)))
+        << "without a provider or cache the original must be drawn";
+}
+
+TEST_F(RemovalRenderTest, ExportIgnoresLiveProviderWhenCacheIsMissing)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    Project project = redProject(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR));
+    ASSERT_EQ(project.assets.size(), 1) << "red.mp4 probe failed";
+    RemovalLayer layer;
+    layer.id = QStringLiteral("rl-export");
+    layer.clipId = QStringLiteral("c1");
+    layer.sourceInUs = 0;
+    layer.sourceOutUs = 1'000'000;
+    layer.cacheKey = QString(64, QLatin1Char('f'));
+    layer.trackingState = RemovalTrackingState::Complete;
+    project.removalLayers.append(layer);
+    project.tracks[0].clips[0].removalLayerId = layer.id;
+
+    auto provider = std::make_shared<FakeLiveProvider>();
+    provider->layerId = layer.id;
+
+    TimelineCompositor compositor;
+    compositor.setRemovalCacheRoot(dir.path());
+    // Export semantics: a missing cache must abort even if a provider leaked.
+    compositor.setFailOnMissingRemoval(true);
+    compositor.setLiveRepairProvider(provider);
+    QString error;
+    ASSERT_TRUE(compositor.open(project, kWidth, kHeight, false, &error))
+        << error.toStdString();
+
+    const auto frame = compose(compositor, 0, &error);
+    EXPECT_TRUE(frame.empty())
+        << "export must not encode a live patch in place of a missing cache";
+    EXPECT_FALSE(error.isEmpty());
+    EXPECT_EQ(provider->queries, 0)
+        << "failOnMissingRemoval must ignore the live provider entirely";
 }
 
 TEST_F(RemovalRenderTest, SplitWipeHonoursThePermilleFraction)

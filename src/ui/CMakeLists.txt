@@ -21,6 +21,8 @@ add_library(videoeditor_ui STATIC
   MaskImageProvider.cpp
   RemovalController.h
   RemovalController.cpp
+  LiveRepairService.h
+  LiveRepairService.cpp
   ExportController.h
   ExportController.cpp
 )

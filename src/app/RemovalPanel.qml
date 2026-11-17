@@ -86,6 +86,42 @@ ColumnLayout {
         Layout.fillWidth: true
     }
 
+    // ------------------------------------------------------------------
+    // GPU live preview. It repairs the current frame/window in memory and is
+    // not a replacement for "生成修复", which writes the on-disk cache.
+    // ------------------------------------------------------------------
+    CheckBox {
+        id: livePreviewToggle
+        objectName: "removal-live-preview-toggle"
+        visible: root.removal !== null
+        text: "实时预览（GPU）"
+        enabled: root.removal !== null
+                 && (root.removal.livePreview
+                     || (root.removal.featureEnabled && root.removal.hasLayer
+                         && root.removal.livePreviewAvailable))
+        onToggled: if (root.removal !== null)
+                       root.removal.setLivePreview(checked)
+        Binding {
+            target: livePreviewToggle
+            property: "checked"
+            value: root.removal !== null && root.removal.livePreview
+            when: !livePreviewToggle.pressed
+        }
+        ToolTip.visible: hovered
+        ToolTip.text: "需要先运行 AI 跟踪以生成逐帧遮罩。仅实时预览当前帧及附近窗口，"
+                    + "不会写入磁盘缓存，不能替代“生成修复”。"
+    }
+
+    Label {
+        objectName: "removal-live-preview-status"
+        visible: root.removal !== null
+        text: root.removal !== null ? root.removal.livePreviewStatus : ""
+        color: "#9e9e9e"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
     Label {
         objectName: "removal-error"
         visible: root.removal !== null && root.removal.error.length > 0

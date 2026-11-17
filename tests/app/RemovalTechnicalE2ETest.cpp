@@ -1,14 +1,18 @@
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <memory>
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QPointF>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThread>
 #include <QUrl>
 
 #include "AiJobManager.h"
@@ -17,6 +21,7 @@
 #include "AudioSink.h"
 #include "ExportController.h"
 #include "ExportEncoderCatalog.h"
+#include "LiveRepairService.h"
 #include "ProjectDocument.h"
 #include "RemovalController.h"
 #include "TimelineController.h"
@@ -24,6 +29,22 @@
 using namespace VideoEditor;
 
 namespace {
+
+// Qt Test's QTRY macros return from the test on timeout without reporting a
+// gtest failure, so the technical E2E uses an explicit predicate wait.
+template <typename Predicate>
+bool waitUntil(Predicate predicate, int timeoutMs)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < timeoutMs) {
+        if (predicate())
+            return true;
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(5);
+    }
+    return predicate();
+}
 
 AudioEngine::SinkFactory nullSinkFactory()
 {
@@ -116,6 +137,49 @@ TEST(RemovalTechnicalE2E, TracksAndGeneratesWithInstalledModels)
     EXPECT_FALSE(tracked.trackingConfidenceHash.isEmpty());
     EXPECT_NE(tracked.trackingState, RemovalTrackingState::Failed);
     EXPECT_EQ(tracked.cacheKey.size(), 64);
+
+    // GPU live preview: the tracking masks now exist, so the playhead frame
+    // must be repaired in memory without a complete on-disk cache. Record the
+    // paused-frame latency and the prefetch throughput for the report.
+    QElapsedTimer liveClock;
+    liveClock.start();
+    removal->setLivePreview(true);
+    ASSERT_TRUE(removal->livePreview()) << removal->error().toStdString();
+    LiveRepairService *live = controller.liveRepairService();
+    ASSERT_NE(live, nullptr);
+    const QString liveLayerId = tracked.id;
+    const int64_t liveTargetUs = 0;
+    LiveRepairPatch livePatch;
+    const bool targetReady = waitUntil(
+        [&] { return live->patchFor(liveLayerId, liveTargetUs, &livePatch); },
+        180000);
+    const qint64 liveLatencyMs = liveClock.elapsed();
+    ASSERT_TRUE(targetReady)
+        << "live preview never produced the playhead patch: "
+        << removal->error().toStdString();
+    EXPECT_FALSE(livePatch.image.isNull());
+    EXPECT_TRUE(livePatch.crop.isValid());
+    const int liveFrames = live->frameCountForTest();
+    const bool prefetched = waitUntil(
+        [&] {
+            return live->cachedPatchCountForTest() >= qMin(3, liveFrames);
+        },
+        180000);
+    const qint64 liveElapsedMs = liveClock.elapsed();
+    const int livePatches = live->cachedPatchCountForTest();
+    const double liveFps = liveElapsedMs > 0
+                               ? 1000.0 * double(livePatches)
+                                     / double(liveElapsedMs)
+                               : 0.0;
+    std::fprintf(stderr,
+                 "LIVE_PREVIEW_METRICS latencyMs=%lld patches=%d frames=%d "
+                 "elapsedMs=%lld fps=%.1f prefetched=%d\n",
+                 static_cast<long long>(liveLatencyMs), livePatches, liveFrames,
+                 static_cast<long long>(liveElapsedMs), liveFps,
+                 prefetched ? 1 : 0);
+    EXPECT_TRUE(prefetched) << "the +-2 s window did not prefetch";
+    removal->setLivePreview(false);
+    EXPECT_FALSE(removal->livePreview());
 
     finished.clear();
     ASSERT_TRUE(removal->generate()) << removal->error().toStdString();

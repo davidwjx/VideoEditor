@@ -11,6 +11,7 @@
 #include <QString>
 #include <QVariantList>
 
+#include "LiveRepairService.h"
 #include "MaskCodec.h"
 #include "MaskSidecarStore.h"
 #include "Project.h"
@@ -83,6 +84,13 @@ class RemovalController : public QObject {
     // cancels the export-driven generation.
     Q_PROPERTY(bool exportGenerationPending READ exportGenerationPending
                    NOTIFY exportGenerationPendingChanged)
+    // GPU live preview of the playhead frame without a complete cache.
+    Q_PROPERTY(bool livePreview READ livePreview NOTIFY livePreviewChanged)
+    Q_PROPERTY(QString livePreviewStatus READ livePreviewStatus
+                   NOTIFY livePreviewStatusChanged)
+    // A layer, an enabled gate and a completed tracking run are all present.
+    Q_PROPERTY(bool livePreviewAvailable READ livePreviewAvailable
+                   NOTIFY livePreviewChanged)
 
 public:
     explicit RemovalController(ProjectDocument &document,
@@ -125,6 +133,12 @@ public:
     QString compareMode() const { return m_compareMode; }
     int splitPermille() const { return m_splitPermille; }
     bool exportGenerationPending() const { return m_exportGenerationPending; }
+    bool livePreview() const { return m_livePreview; }
+    QString livePreviewStatus() const { return m_livePreviewStatus; }
+    bool livePreviewAvailable() const;
+    // Timeline playhead -> the selected layer's source instant, clamped to the
+    // layer range. AppController forwards this to LiveRepairService::setTarget.
+    qint64 liveSourceTimeUs(qint64 timelineUs) const;
 
     // Injected by AppController: Preview.positionMs * 1000 in timeline mode,
     // with the timeline playhead as the authoritative fallback. Tests inject a
@@ -142,6 +156,14 @@ public:
     // Not owned: QQmlEngine::addImageProvider takes ownership.
     void setMaskImageProvider(MaskImageProvider *provider);
     MaskImageProvider *maskImageProvider() const { return m_provider; }
+    // Injected by AppController. The starter configures and starts the live
+    // repair service from a fully resolved spec; the stopper joins it.
+    void setLivePreviewStarter(
+        std::function<bool(const LiveRepairSpec &, QString *)> starter);
+    void setLivePreviewStopper(std::function<void()> stopper);
+    // Service callbacks forwarded by AppController.
+    void handleLiveRepairError(const QString &message);
+    void notifyLivePreviewReady();
 
     // Injected by AppController; not owned. Until the job manager is wired the
     // generate/track entry points report a Chinese error but mask editing keeps
@@ -175,6 +197,7 @@ public:
     Q_INVOKABLE void redoRange(qint64 sourceStartUs, qint64 sourceEndUs);
     Q_INVOKABLE void setCompareMode(const QString &mode);
     Q_INVOKABLE void setSplitPermille(int permille);
+    Q_INVOKABLE void setLivePreview(bool enabled);
     Q_INVOKABLE void setAdvancedMode(const QString &mode);
     Q_INVOKABLE void setStabilizationStrength(int strength);
     Q_INVOKABLE void setProcessingHeight(int height);
@@ -219,6 +242,8 @@ signals:
     void compareModeChanged();
     void splitPermilleChanged();
     void exportGenerationPendingChanged();
+    void livePreviewChanged();
+    void livePreviewStatusChanged();
     // Emitted after a generation started via generateForExport() succeeds.
     void generationFinishedForExport();
 
@@ -266,6 +291,9 @@ private:
     // Task 8 helpers.
     bool prepareForJob(QString *error) const;
     bool buildJobSpec(PendingJobKind kind, AiJobSpec *spec, QString *error);
+    bool buildLiveRepairSpec(LiveRepairSpec *spec, QString *error) const;
+    bool trackingMasksPresent(const RemovalLayer &layer) const;
+    void setLivePreviewStatus(const QString &text);
     QString cacheKeyFor(const Clip &clip, const RemovalLayer &layer,
                         const ModelRegistry &models) const;
     QString manifestPath() const;
@@ -295,6 +323,8 @@ private:
     std::function<void(qint64)> m_seekCallback;
     std::function<QString()> m_selectedClipProvider;
     std::function<void(const QString &, int)> m_compareSink;
+    std::function<bool(const LiveRepairSpec &, QString *)> m_livePreviewStarter;
+    std::function<void()> m_livePreviewStopper;
     WorkingState m_working;
     bool m_maskMode = false;
     QString m_activeClipId;
@@ -319,6 +349,8 @@ private:
     bool m_advancedOpen = false;
     QString m_compareMode = QStringLiteral("repair");
     int m_splitPermille = 500;
+    bool m_livePreview = false;
+    QString m_livePreviewStatus = QStringLiteral("实时预览未开启");
 };
 
 } // namespace VideoEditor

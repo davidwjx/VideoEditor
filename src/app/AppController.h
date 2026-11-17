@@ -20,6 +20,7 @@ namespace VideoEditor {
 class AiFeatureGate;
 class AiJobManager;
 class ExportController;
+class LiveRepairService;
 class MaskSidecarStore;
 class PreviewController;
 class ProxyService;
@@ -124,6 +125,8 @@ public:
     ProjectStore *store() const { return m_store.get(); }
     PreviewController *preview() const { return m_preview; }
     ProxyService *proxyService() const { return m_proxyService; }
+    // Owned live preview worker; exposed for the technical end-to-end test.
+    LiveRepairService *liveRepairService() const { return m_liveRepair.get(); }
 
 signals:
     void lastErrorChanged();
@@ -164,6 +167,11 @@ private:
     std::unique_ptr<MaskSidecarStore> m_maskSidecars;
     // Declared after the store it references so it is destroyed first.
     std::unique_ptr<RemovalController> m_removal;
+    // Preview-only GPU repair worker. Shared with the timeline render worker
+    // through PreviewController; never reaches export.
+    std::shared_ptr<LiveRepairService> m_liveRepair;
+    // Coalesces a burst of live frameReady signals into one paused recompose.
+    QTimer m_liveRefreshTimer;
     QString m_sidecarFallback;
     QTimer m_autosaveTimer;
     // Coalesces rapid edits into one preview/audio snapshot update so a drag

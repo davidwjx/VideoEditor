@@ -227,7 +227,9 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
              QStringLiteral("removal-advanced-toggle"),
              QStringLiteral("removal-advanced-panel"),
              QStringLiteral("removal-low-confidence-count"),
-             QStringLiteral("removal-redo-button")}) {
+             QStringLiteral("removal-redo-button"),
+             QStringLiteral("removal-live-preview-toggle"),
+             QStringLiteral("removal-live-preview-status")}) {
         EXPECT_NE(findItem(window, name), nullptr) << name.toStdString();
     }
 
@@ -246,6 +248,33 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
         EXPECT_TRUE(gateReason->isVisible());
         EXPECT_FALSE(gateReason->property("text").toString().isEmpty());
     }
+
+    // The live preview toggle is present but gated (no tracked layer here).
+    QQuickItem *liveToggle =
+        findItem(window, QStringLiteral("removal-live-preview-toggle"));
+    QQuickItem *liveStatus =
+        findItem(window, QStringLiteral("removal-live-preview-status"));
+    ASSERT_NE(liveToggle, nullptr);
+    ASSERT_NE(liveStatus, nullptr);
+    EXPECT_FALSE(liveToggle->isEnabled())
+        << "live preview needs a gate and a tracked layer";
+    EXPECT_EQ(liveStatus->property("text").toString(),
+              QStringLiteral("实时预览未开启"));
+    // Force the control enabled so the programmatic toggle exercises the
+    // QML -> controller path; the controller still rejects the start (no
+    // tracking cache) with a Chinese explanation and updates the status.
+    const QString statusBefore = liveStatus->property("text").toString();
+    liveToggle->setProperty("enabled", true);
+    liveToggle->setProperty("checked", true);
+    // Emit the control's own toggled() signal, exactly what a user click
+    // produces, so the QML onToggled -> controller path is exercised.
+    ASSERT_TRUE(QMetaObject::invokeMethod(liveToggle, "toggled"));
+    QTest::qWait(120);
+    EXPECT_FALSE(controller.removal()->livePreview());
+    EXPECT_FALSE(controller.removal()->livePreviewStatus().isEmpty());
+    EXPECT_NE(controller.removal()->livePreviewStatus(),
+              QStringLiteral("实时预览未开启"));
+    EXPECT_NE(liveStatus->property("text").toString(), statusBefore);
 
     // Mask-mode-only controls disappear after leaving mask mode.
     QQuickItem *trackButton =

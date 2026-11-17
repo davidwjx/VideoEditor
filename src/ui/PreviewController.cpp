@@ -28,6 +28,8 @@ PreviewController::PreviewController(QObject *parent)
     , m_worker(new DecoderWorker)
 {
     qRegisterMetaType<VideoEditor::Project>("VideoEditor::Project");
+    qRegisterMetaType<VideoEditor::LiveRepairProviderPtr>(
+        "VideoEditor::LiveRepairProviderPtr");
 
     m_worker->moveToThread(&m_thread);
     connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
@@ -71,12 +73,22 @@ PreviewController::~PreviewController()
     m_presentationTimer.stop();
 
     if (m_timelineThread.isRunning()) {
-        // Stop the worker before its D3D11 resources outlive the thread.
+        // Release the preview-only provider before the compositor is torn
+        // down, then stop the worker before its D3D11 resources outlive the
+        // thread. The controller's own reference is dropped only after the
+        // worker proved it no longer holds one, so the provider (and the
+        // service behind it) is destroyed on the GUI thread.
+        VideoEditor::LiveRepairProviderPtr none;
+        QMetaObject::invokeMethod(m_timelineWorker, "setLiveRepairProvider",
+                                  Qt::BlockingQueuedConnection,
+                                  Q_ARG(VideoEditor::LiveRepairProviderPtr,
+                                        none));
         QMetaObject::invokeMethod(m_timelineWorker, "close",
                                   Qt::BlockingQueuedConnection);
         m_timelineThread.quit();
         m_timelineThread.wait();
     }
+    m_liveRepairProvider.reset();
 
     m_thread.quit();
     m_thread.wait();
@@ -375,6 +387,26 @@ void PreviewController::setRemovalCacheRoot(const QString &root)
     }
 }
 
+void PreviewController::setLiveRepairProvider(LiveRepairProviderPtr provider)
+{
+    m_liveRepairProvider = std::move(provider);
+    if (!m_timelineWorker)
+        return;
+    QMetaObject::invokeMethod(m_timelineWorker, "setLiveRepairProvider",
+                              Qt::QueuedConnection,
+                              Q_ARG(VideoEditor::LiveRepairProviderPtr,
+                                    m_liveRepairProvider));
+}
+
+void PreviewController::refreshTimelineFrame()
+{
+    if (m_mode != Mode::Timeline)
+        return;
+    m_lastTimelineFrame = -1;
+    m_lastTimelineSubmittedUs = -1;
+    requestTimelineFrame(m_positionUs);
+}
+
 void PreviewController::openTimeline(const Project &project, qint64 durationUs,
                                      bool useProxy)
 {
@@ -420,6 +452,12 @@ void PreviewController::openTimeline(const Project &project, qint64 durationUs,
                                   Q_ARG(QString, QString()),
                                   Q_ARG(quint64, generation),
                                   Q_ARG(bool, m_useProxy));
+        // setProject() rebuilds the compositor and clears its provider; a
+        // queued set from the same sender is delivered after it.
+        QMetaObject::invokeMethod(m_timelineWorker, "setLiveRepairProvider",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(VideoEditor::LiveRepairProviderPtr,
+                                        m_liveRepairProvider));
     }
     requestTimelineFrame(0);
 }
