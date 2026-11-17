@@ -383,7 +383,7 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
     if (!redo) {
         TrackingConfig config;
         config.io = record->io;
-        config.allowDml = false;
+        config.allowDml = true;
         config.allowCpu = true;
         for (auto it = record->files.constBegin();
              it != record->files.constEnd(); ++it) {
@@ -502,7 +502,10 @@ int runRealEngine(const AiJobSpec &spec, QLocalSocket &socket,
     if (inpaintPath.isEmpty())
         return modelUnavailable(QStringLiteral("修复模型缺少 ONNX 文件。"));
     if (*inpaintAdapter == InpaintAdapter::Lama) {
-        inpainter = std::make_unique<LamaInpainter>(inpaintPath, 0);
+        // A dGPU finishes LaMa in ~50 ms on DirectML; the adapter falls back
+        // to CPU when DML cannot create the session (old iGPU / CPU-only).
+        inpainter = std::make_unique<LamaInpainter>(
+            inpaintPath, 0, /*allowDml=*/true);
     } else {
         inpainter = std::make_unique<MiGanInpainter>(
             inpaintPath, 0, /*allowDml=*/true, /*allowCpu=*/true);

@@ -26,12 +26,12 @@ int maskArea(const BinaryMask &mask)
                              [](uint8_t value) { return value != 0; }));
 }
 
-constexpr int kRefineInterval = 5;
 
 } // namespace
 
 struct TrackingPipeline::Impl {
     Sam2Tracker *tracker = nullptr;
+    int refineInterval = 5;
 
     struct Anchor {
         int index = 0;
@@ -210,7 +210,8 @@ struct TrackingPipeline::Impl {
     {
         if (forcedFair)
             *forcedFair = false;
-        if (!tracker || (frameIndex % kRefineInterval) != 0)
+        if (!tracker || refineInterval <= 0
+            || (frameIndex % refineInterval) != 0)
             return;
         const TrackingPrompt prompt = Sam2Tracker::promptFromMask(mask);
         if (prompt.points.isEmpty())
@@ -513,6 +514,11 @@ TrackingPipeline::~TrackingPipeline() = default;
 void TrackingPipeline::setTracker(Sam2Tracker *tracker)
 {
     m_impl->tracker = tracker;
+}
+
+void TrackingPipeline::setRefineInterval(int interval)
+{
+    m_impl->refineInterval = std::clamp(interval, 1, 60);
 }
 
 TrackingRunResult TrackingPipeline::run(const AiJobSpec &spec,

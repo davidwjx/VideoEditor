@@ -14,7 +14,8 @@ namespace VideoEditor {
 // repaired as 512 tiles with a 64 px overlap and feather blending.
 class LamaInpainter : public Inpainter {
 public:
-    explicit LamaInpainter(const QString &modelPath, int deviceIndex = 0);
+    explicit LamaInpainter(const QString &modelPath, int deviceIndex = 0,
+                           bool allowDml = false);
     ~LamaInpainter() override;
     LamaInpainter(const LamaInpainter &) = delete;
     LamaInpainter &operator=(const LamaInpainter &) = delete;

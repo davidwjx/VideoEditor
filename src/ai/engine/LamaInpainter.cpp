@@ -305,7 +305,8 @@ struct LamaInpainter::Impl {
     }
 };
 
-LamaInpainter::LamaInpainter(const QString &modelPath, int deviceIndex)
+LamaInpainter::LamaInpainter(const QString &modelPath, int deviceIndex,
+                             bool allowDml)
     : m_impl(std::make_unique<Impl>())
 {
     if (modelPath.isEmpty()) {
@@ -315,8 +316,8 @@ LamaInpainter::LamaInpainter(const QString &modelPath, int deviceIndex)
 
     EpConfig config;
     config.deviceIndex = deviceIndex;
-    // Measured: DirectML initialises but runs slower than CPU for this graph.
-    config.allowDml = false;
+    // DirectML is faster on a dGPU; the iGPU/CPU fallback keeps the old path.
+    config.allowDml = allowDml;
     config.allowCpu = true;
     QString error;
     if (!m_impl->executor.createSession(QStringLiteral("lama"), modelPath,

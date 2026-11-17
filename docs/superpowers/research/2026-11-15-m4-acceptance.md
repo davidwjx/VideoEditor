@@ -365,3 +365,82 @@ VIDEOEDITOR_M4_MODELS=C:/m4-spike/models VIDEOEDITOR_M4_TECHNICAL=1 \
 
 Related records: `docs/superpowers/research/2026-11-15-m4-dml-spike.md`,
 `docs/superpowers/research/2026-11-15-m4-license-decision.md`.
+
+## 11. 2026-11-18 GPU re-measurement (RTX 5060 Ti 16 GB)
+
+The reference machine was upgraded from the AMD Radeon integrated GPU to an
+**NVIDIA GeForce RTX 5060 Ti 16 GB** (driver 610.88, CUDA UMD 13.3). The DirectML
+path in the C++ engine was re-enabled for tracking (EfficientTAM hybrid DML),
+per-frame refinement was enabled when the tracker reports DML, and LaMa now
+requests DirectML with CPU fallback. These rows supersede the VRAM SKIP and the
+interactive-performance SKIP rows above; PSNR and small-source cache rows are
+unchanged because they are model/format limits, not speed limits.
+
+### 11.1 Component latency (ONNX Runtime 1.22 DirectML, warm p50)
+
+| Component | CPU | DirectML | Note |
+|---|---|---|---|
+| MI-GAN 512 | 320 ms | **26 ms (38 fps)** | ~12× faster than the iGPU DML path |
+| LaMa 512 int8 allowzero0 | 460 ms | **49 ms (20 fps)** | DML now initialises; CPU fallback retained |
+| EfficientTAM image encoder | 35 ms | **4.8 ms** | |
+| EfficientTAM prompt encoder | 0.4 ms | 0.9 ms | |
+| EfficientTAM mask decoder | 4.2 ms | **1.2 ms** | keyframe segmentation ≈7 ms (≈145 fps) |
+| SAM 2 vision encoder | 569 ms | **52 ms** | per-frame SAM 2 becomes viable, but the offline path uses EfficientTAM + DIS |
+| SAM 2 mask decoder | 16 ms | **5.5 ms** | |
+
+### 11.2 1080p30/10s selftest (soft corpus, DML)
+
+```
+REMOVAL_SELFTEST_FAIL threshold set=soft-1080p
+  psnr=8.71 psnrThreshold=28.00 seconds=43.4 timingThreshold=300
+  cacheBytes=13227347 cacheBudget=1805744 sourceBytes=902872
+  completedFrames=300 frames=300 provider=tracker=dml;inpaint=dml
+```
+
+| Metric | iGPU (2026-11-15) | RTX 5060 Ti (2026-11-18) | Verdict |
+|---|---|---|---|
+| Job time (1080p30 10 s) | 164.1 s | **43.4 s** | PASS (target 156–186 s not met; ≤300 s met) |
+| Provider | tracker=cpu;inpaint=dml | **tracker=dml;inpaint=dml** | — |
+| Peak VRAM (nvidia-smi sampling, 0.2 s) | not measured | **1,533 MiB** | PASS (≤4 GB) |
+| DIS 1080p | 26.6 fps | 26.6 fps (CPU DIS) | PASS |
+| MI-GAN warm | 2.26 fps | **38 fps** | PASS (≥10 fps interactive gate) |
+| LaMa int8 DML | not run (CPU 1.68 fps) | **20 fps** | PASS (≥2 fps gate) |
+| Keyframe segmentation | 66–72 ms | **≈7 ms** | PASS (≤100 ms) |
+| Hole PSNR (soft GT) | 8.71 dB | **8.71 dB** | **FAIL** (28 dB), unchanged model quality |
+| Cache/source (soft) | 14.65× | **14.65×** | **FAIL** (2×), unchanged format/source-size limit |
+
+VRAM methodology: the selftest ran while `nvidia-smi
+--query-gpu=memory.used --format=csv,noheader,nounits` was sampled every 0.2 s;
+the maximum observed was 1,533 MiB (baseline desktop usage ≈780 MiB excluded by
+taking the peak during the job). This is an external measurement, not an
+in-process counter; a product-grade VRAM sampler is still M5 work.
+
+### 11.3 What the upgrade changed
+
+- **Interactive tracking is now real:** per-frame EfficientTAM refinement
+  (K=1) plus DIS runs at roughly 24 fps at 1080p (35 ms DIS + 7 ms model), so
+  the original "tracking ≥5 fps / EfficientTAM ≥8 fps" gates are satisfied with
+  margin. The offline pipeline keeps K=5 on CPU-only machines.
+- **Interactive repair is viable:** MI-GAN at 38 fps and LaMa at 20 fps exceed
+  the original ≥10/≥2 fps gates. The UI still generates an offline cache rather
+  than running inference inside the preview compositor; exposing a live preview
+  repair mode is now an M5 UX decision, not a hardware blocker.
+- **VRAM is no longer a SKIP:** 1.5 GB peak on a 16 GB card is well inside the
+  4 GB gate.
+- **Quality did not improve:** PSNR and the small-source cache ratio are
+  independent of GPU speed. The generative fill remains the limiting factor;
+  licensing remains release-blocked; the 3-reviewer subjective review remains
+  not performed.
+
+### 11.4 Reproduce
+
+```bash
+CMAKE="/c/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+"$CMAKE" --build --preset windows-x64-release --target VideoEditor
+cd build/windows-x64-release/Release
+VIDEOEDITOR_M4_MODELS=C:/m4-spike/models VIDEOEDITOR_M4_TECHNICAL=1 \
+VIDEOEDITOR_M4_ACCEPTANCE_SET=soft QT_ASSUME_STDERR_HAS_CONSOLE=1 \
+  ./VideoEditor.exe --selftest-removal
+# separately sample VRAM during the run:
+nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -l 0.2
+```

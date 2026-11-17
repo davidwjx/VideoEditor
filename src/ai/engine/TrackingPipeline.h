@@ -46,6 +46,10 @@ public:
     // Not owned. When null, the pipeline runs DIS-only (used by tests).
     void setTracker(Sam2Tracker *tracker);
 
+    // Model refinement cadence. 1 = refine every frame (interactive GPU),
+    // 5 = keyframe cadence used on CPU-only machines.
+    void setRefineInterval(int interval);
+
     // Decodes the asset range with FrameReader and loads authored masks from
     // <sidecarRoot>/masks/<hash>.rle.
     TrackingRunResult run(const AiJobSpec &spec,

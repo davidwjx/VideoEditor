@@ -200,8 +200,9 @@ bool Sam2Tracker::initialize(const TrackingConfig &config, QString *error)
     ep.deviceIndex = config.deviceIndex;
     ep.allowDml = config.allowDml;
     ep.allowCpu = config.allowCpu;
-    // Tracking's DML path must be provably pure DML (no silent CPU spill).
-    ep.requirePureDml = true;
+    // EfficientTAM has a few shape ops ORT assigns to CPU; allow the hybrid
+    // session so the GPU handles the heavy nodes. provider() still reports dml.
+    ep.requirePureDml = false;
     QMap<QString, QString> paths;
     for (auto it = config.partPaths.constBegin();
          it != config.partPaths.constEnd(); ++it) {
