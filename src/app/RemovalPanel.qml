@@ -119,9 +119,11 @@ ColumnLayout {
             when: !livePreviewToggle.pressed
         }
         ToolTip.visible: hovered
-        ToolTip.text: "需要先完成 AI 跟踪。仅实时预览当前帧及附近窗口，"
-                    + "不会写入磁盘缓存，不能替代“生成修复”。"
-                    + "模型可用时使用 DirectML，否则回退 CPU（较慢）。"
+        ToolTip.text: root.removal !== null && root.removal.livePreviewAvailable
+                    ? "实时预览当前帧及附近窗口；不写入磁盘缓存，也不能替代“生成修复”。"
+                    : "需要先完成 AI 跟踪。仅实时预览当前帧及附近窗口，"
+                      + "不会写入磁盘缓存，不能替代“生成修复”。"
+                      + "模型可用时使用 DirectML，否则回退 CPU（较慢）。"
     }
 
     Label {
@@ -575,7 +577,7 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: root.active
         text: root.removal !== null && root.removal.advancedOpen
-              ? "收起高级 ▴" : "高级 ▾"
+              ? "收起 AI 高级设置 ▴" : "AI 高级设置 ▾"
         onClicked: if (root.removal !== null)
                        root.removal.advancedOpen = !root.removal.advancedOpen
     }

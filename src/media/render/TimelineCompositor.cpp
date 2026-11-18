@@ -362,6 +362,12 @@ int TimelineCompositor::drawFrame(int64_t timelineUs,
             }
         }
 
+        // A freshly authored layer has no cache key yet: showing the
+        // "repair result missing" warning before the first tracking/generation
+        // looks like an error while the user is still painting the mask.
+        if (removal->cacheKey.isEmpty())
+            continue;
+
         QString removalError;
         RepairFrameSource *repair = repairSourceFor(*removal, &removalError);
         if (!repair) {

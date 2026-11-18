@@ -803,6 +803,8 @@ ApplicationWindow {
         visible: App.recoveryAvailable
         title: "发现未保存的工程"
         modal: true
+        anchors.centerIn: parent
+        width: 360
         standardButtons: Dialog.NoButton
 
         RowLayout {

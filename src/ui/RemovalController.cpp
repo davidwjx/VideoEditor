@@ -98,6 +98,11 @@ RemovalController::RemovalController(ProjectDocument &document,
             &RemovalController::livePreviewChanged);
     connect(this, &RemovalController::featureEnabledChanged, this,
             &RemovalController::livePreviewChanged);
+    // Tracking completion updates the layer and emits layerChanged; the live
+    // toggle's enabled binding must re-evaluate then, or it stays disabled
+    // until an unrelated livePreview signal arrives.
+    connect(this, &RemovalController::layerChanged, this,
+            &RemovalController::livePreviewChanged);
 }
 
 void RemovalController::setPlayheadProvider(std::function<qint64()> provider)
