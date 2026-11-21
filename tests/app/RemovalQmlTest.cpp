@@ -3,11 +3,14 @@
 #include <memory>
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -16,13 +19,17 @@
 #include <QScopedPointer>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QUrl>
 
+#include "AiJobManager.h"
+#include "AiTransport.h"
 #include "AppController.h"
 #include "AudioSink.h"
 #include "ExportController.h"
 #include "ExportEncoderCatalog.h"
 #include "MaskSidecarStore.h"
+#include "ModelRegistry.h"
 #include "PreviewController.h"
 #include "RemovalController.h"
 #include "TimelineController.h"
@@ -585,3 +592,268 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
               QStringLiteral("请先绘制消除遮罩。"));
 }
 
+namespace {
+
+// Regression harness for the field report "点击取消后任务一直跑到自然结束":
+// a tracking job must actually stop when the job panel's 取消 button is
+// clicked. The fake transport below never finishes on its own, so generating
+// can only flip back to false if the click really reached Removal.cancel().
+class HangingJobTransport : public AiTransport {
+public:
+    bool start(const AiJobSpec &spec, QString *) override
+    {
+        m_spec = spec;
+        QTimer::singleShot(0, this, [this] {
+            emit message(QJsonObject{
+                {QStringLiteral("event"), QStringLiteral("progress")},
+                {QStringLiteral("stage"), QStringLiteral("tracking")},
+                {QStringLiteral("frame"), 5},
+                {QStringLiteral("totalFrames"), 60},
+                {QStringLiteral("percent"), 8.0},
+                {QStringLiteral("etaMs"), 4000.0}});
+        });
+        return true;
+    }
+
+    void cancel() override
+    {
+        // A real engine still emits progress for a few frames while it winds
+        // down; the test drives that window explicitly so the "正在取消…"
+        // feedback can be observed before the job finishes.
+        m_cancelCalled = true;
+    }
+
+    void finishNow()
+    {
+        emit message(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("cancelled")},
+            {QStringLiteral("completedFrames"), 5},
+            {QStringLiteral("trackingState"), QStringLiteral("partial")}});
+        emit finished(0, QProcess::NormalExit);
+    }
+
+    void sendCommand(const QJsonObject &) override {}
+
+    bool cancelCalled() const { return m_cancelCalled; }
+
+private:
+    AiJobSpec m_spec;
+    bool m_cancelCalled = false;
+};
+
+// Writes a minimal but real model directory: dummy .onnx payloads plus a
+// manifest whose sha256 entries match, so AiFeatureGate::enableTechnicalPreview
+// (VIDEOEDITOR_M4_TECHNICAL=1) verifies and enables the feature exactly as the
+// app does for internal runs. This keeps the test on production code paths
+// instead of gate test hooks.
+bool writeFakeModelsDir(const QString &root, QString *error)
+{
+    const auto writeFile = [&root](const QString &name,
+                                   const QByteArray &bytes) {
+        QFile file(QDir(root).filePath(name));
+        return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+            && file.write(bytes) == bytes.size();
+    };
+    const QByteArray payload(2048, Qt::Uninitialized);
+    const QStringList names{
+        QStringLiteral("fake_encoder.onnx"),
+        QStringLiteral("fake_prompt.onnx"),
+        QStringLiteral("fake_decoder.onnx"),
+        QStringLiteral("fake_migan.onnx"),
+        QStringLiteral("fake_lama.onnx")};
+    for (const QString &name : names) {
+        if (!writeFile(name, payload)) {
+            if (error)
+                *error = QStringLiteral("无法写入测试模型文件：%1").arg(name);
+            return false;
+        }
+    }
+    const auto sha = [&root](const QString &name) {
+        QFile file(QDir(root).filePath(name));
+        file.open(QIODevice::ReadOnly);
+        return QString::fromLatin1(
+            QCryptographicHash::hash(file.readAll(),
+                                     QCryptographicHash::Sha256).toHex());
+    };
+
+    const auto fileEntry = [&sha](const QString &name) {
+        return QJsonObject{{QStringLiteral("path"), name},
+                           {QStringLiteral("sha256"), sha(name)}};
+    };
+    const QJsonArray models{
+        QJsonObject{
+            {QStringLiteral("id"),
+             QStringLiteral("efficienttam-ti-512-fp32")},
+            {QStringLiteral("family"), QStringLiteral("tracking")},
+            {QStringLiteral("version"), QStringLiteral("0.8.0-fp32")},
+            {QStringLiteral("files"),
+             QJsonObject{
+                 {QStringLiteral("image_encoder"),
+                  fileEntry(QStringLiteral("fake_encoder.onnx"))},
+                 {QStringLiteral("prompt_encoder"),
+                  fileEntry(QStringLiteral("fake_prompt.onnx"))},
+                 {QStringLiteral("mask_decoder"),
+                  fileEntry(QStringLiteral("fake_decoder.onnx"))}}}},
+        QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("migan-512")},
+            {QStringLiteral("family"), QStringLiteral("inpainting")},
+            {QStringLiteral("version"), QStringLiteral("2.0.0")},
+            {QStringLiteral("files"),
+             QJsonObject{{QStringLiteral("pipeline"),
+                          fileEntry(QStringLiteral("fake_migan.onnx"))}}}},
+        QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("lama-512-int8-allowzero0")},
+            {QStringLiteral("family"), QStringLiteral("inpainting")},
+            {QStringLiteral("version"), QStringLiteral("1.0.0-int8-allowzero0")},
+            {QStringLiteral("files"),
+             QJsonObject{{QStringLiteral("model"),
+                          fileEntry(QStringLiteral("fake_lama.onnx"))}}}}};
+    const QJsonObject manifest{
+        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("pipelineVersion"), QStringLiteral("m4.0")},
+        {QStringLiteral("models"), models}};
+    QFile manifestFile(QDir(root).filePath(QStringLiteral(
+        "models.manifest.json")));
+    if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        || manifestFile.write(QJsonDocument(manifest).toJson()) <= 0) {
+        if (error)
+            *error = QStringLiteral("无法写入测试模型清单。");
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+TEST(RemovalQml, CancelButtonDuringRunningJobActuallyCancels)
+{
+    const QString video = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(video))
+        GTEST_SKIP() << "missing h264.mp4";
+    if (QGuiApplication::platformName().contains(QStringLiteral("offscreen")))
+        GTEST_SKIP() << "needs a desktop window for click delivery";
+
+    registerPreviewType();
+
+    QTemporaryDir sidecarDir;
+    ASSERT_TRUE(sidecarDir.isValid());
+
+    // The AI gate is fail-closed, so the app (and its AiJobManager) must see a
+    // real technical-preview environment: a manifest whose files hash clean.
+    // The transport factory below keeps the actual inference out of the test.
+    QTemporaryDir modelsDir;
+    ASSERT_TRUE(modelsDir.isValid());
+    QString modelsError;
+    ASSERT_TRUE(writeFakeModelsDir(modelsDir.path(), &modelsError))
+        << modelsError.toStdString();
+    qputenv("VIDEOEDITOR_M4_MODELS_DIR", modelsDir.path().toUtf8());
+    qputenv("VIDEOEDITOR_M4_TECHNICAL", "1");
+
+    MaskSidecarStore store;
+    store.setProjectPath(QString(), sidecarDir.path());
+    BinaryMask mask;
+    mask.width = 640;
+    mask.height = 360;
+    mask.bits.assign(size_t(640) * size_t(360), 0);
+    mask.set(300, 160, true);
+    QString maskHash;
+    ASSERT_TRUE(store.writeMask(mask, &maskHash, nullptr));
+    QJsonArray frames{
+        QJsonObject{{QStringLiteral("timeUs"), 0},
+                    {QStringLiteral("state"), QStringLiteral("good")}},
+        QJsonObject{{QStringLiteral("timeUs"), 2'000'000},
+                    {QStringLiteral("state"), QStringLiteral("good")}}};
+    QString trackingHash;
+    ASSERT_TRUE(store.writeTracking(QJsonObject{{QStringLiteral("frames"),
+                                                 frames}},
+                                    &trackingHash, nullptr));
+
+    AppController controller(nullptr, sidecarDir.filePath(QStringLiteral(
+                                            "recovery.json")),
+                             nullSinkFactory(), sidecarDir.path());
+    controller.document()->setProject(
+        removalProject(video, maskHash, trackingHash));
+    controller.timeline()->selectClip(QStringLiteral("clip-1"));
+    controller.timeline()->seekUs(0);
+    controller.removal()->beginMask(QStringLiteral("clip-1"));
+    ASSERT_TRUE(controller.removal()->maskMode());
+
+    // The environment only mattered while AppController loaded its gate;
+    // clear it so sibling tests in this binary stay unaffected.
+    qunsetenv("VIDEOEDITOR_M4_TECHNICAL");
+    qunsetenv("VIDEOEDITOR_M4_MODELS_DIR");
+
+    HangingJobTransport *fake = nullptr;
+    controller.aiJobs()->setTransportFactoryForTest([&fake] {
+        auto transport = std::make_unique<HangingJobTransport>();
+        fake = transport.get();
+        return std::unique_ptr<AiTransport>(transport.release());
+    });
+
+    QQmlEngine engine;
+    engine.addImageProvider(
+        QStringLiteral("waveform"),
+        new WaveformImageProvider(controller.waveforms()));
+    engine.rootContext()->setContextProperty(QStringLiteral("App"), &controller);
+    engine.rootContext()->setContextProperty(QStringLiteral("Preview"),
+                                             controller.preview());
+    engine.rootContext()->setContextProperty(QStringLiteral("Timeline"),
+                                             controller.timeline());
+    engine.rootContext()->setContextProperty(QStringLiteral("Removal"),
+                                             controller.removal());
+    engine.rootContext()->setContextProperty(QStringLiteral("Audio"),
+                                             controller.audioEngine());
+    engine.rootContext()->setContextProperty(QStringLiteral("Export"),
+                                             controller.exportController());
+    engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
+                                             QStringLiteral("test"));
+
+    QQmlComponent component(
+        &engine,
+        QUrl::fromLocalFile(QStringLiteral(VIDEOEDITOR_SOURCE_DIR
+                                           "/src/app/Main.qml")));
+    QScopedPointer<QObject> root(component.create());
+    ASSERT_FALSE(component.isError()) << component.errorString().toStdString();
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    ASSERT_NE(window, nullptr);
+    window->show();
+    if (!QTest::qWaitForWindowExposed(window, 5000))
+        GTEST_SKIP() << "window was not exposed (no desktop/D3D session)";
+    QTest::qWait(300);
+
+    ASSERT_TRUE(controller.removal()->track())
+        << controller.removal()->property("error").toString().toStdString();
+    ASSERT_TRUE(controller.removal()->generating());
+    QTest::qWait(300);
+
+    QQuickItem *cancelButton = findItem(window, QStringLiteral("job-cancel-button"));
+    ASSERT_NE(cancelButton, nullptr);
+    EXPECT_TRUE(cancelButton->isVisible());
+    const QPointF buttonCenter =
+        cancelButton->mapToScene(QPointF(cancelButton->width() / 2.0,
+                                         cancelButton->height() / 2.0));
+    qWarning("cancel button scene pos=%.0f,%.0f visible=%d enabled=%d",
+             buttonCenter.x(), buttonCenter.y(), int(cancelButton->isVisible()),
+             int(cancelButton->isEnabled()));
+
+    clickItem(window, cancelButton);
+
+    // The click must reach the controller immediately, and the UI must say so
+    // while the engine winds down: a click that only changes after the engine
+    // exits reads as "ignored".
+    QTRY_VERIFY_WITH_TIMEOUT(fake->cancelCalled(), 2000);
+    EXPECT_TRUE(controller.removal()->property("cancelling").toBool());
+    QQuickItem *stage = findItem(window, QStringLiteral("job-progress-stage"));
+    ASSERT_NE(stage, nullptr);
+    EXPECT_EQ(stage->property("text").toString(), QStringLiteral("正在取消…"));
+    QQuickItem *inlineCancel =
+        findItem(window, QStringLiteral("removal-cancel-button"));
+    ASSERT_NE(inlineCancel, nullptr);
+    EXPECT_TRUE(inlineCancel->isVisible());
+    EXPECT_FALSE(inlineCancel->isEnabled());
+    EXPECT_FALSE(cancelButton->isEnabled());
+
+    fake->finishNow();
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.removal()->generating(), 3000);
+    EXPECT_FALSE(controller.removal()->property("cancelling").toBool());
+}

@@ -403,45 +403,55 @@ Dialog {
                 Item { Layout.fillWidth: true }
             }
 
-            // In-place generation progress: the dialog stays open, showing
-            // stage/ETA and a real cancel action instead of a dead prompt.
-            ColumnLayout {
-                objectName: "export-removal-progress"
+        }
+
+        // The running AI job owns this block whenever the dialog is open, not
+        // just while the "先生成再导出" prompt is visible. A dismissed prompt
+        // must never hide the only reachable cancel: the floating panel behind
+        // this modal dialog cannot receive clicks.
+        ColumnLayout {
+            objectName: "export-removal-progress"
+            Layout.fillWidth: true
+            spacing: 4
+            visible: root.removal !== null && root.removal.generating
+            RowLayout {
                 Layout.fillWidth: true
-                spacing: 4
-                visible: root.removal !== null && root.removal.generating
-                RowLayout {
+                Label {
+                    objectName: "export-removal-stage"
                     Layout.fillWidth: true
-                    Label {
-                        objectName: "export-removal-stage"
-                        Layout.fillWidth: true
-                        text: root.removal !== null ? root.removal.stageText : ""
-                        color: "#cfcfcf"
-                        font.pixelSize: 11
-                        elide: Text.ElideRight
-                    }
-                    Label {
-                        objectName: "export-removal-eta"
-                        text: root.removal !== null ? root.removal.etaText : ""
-                        color: "#9a9a9a"
-                        font.pixelSize: 10
-                    }
+                    text: root.removal !== null
+                          ? (root.removal.cancelling
+                             ? "正在取消…" : root.removal.stageText)
+                          : ""
+                    color: root.removal !== null && root.removal.cancelling
+                           ? "#e6c15a" : "#cfcfcf"
+                    font.pixelSize: 11
+                    elide: Text.ElideRight
                 }
-                ProgressBar {
-                    objectName: "export-removal-progress-bar"
-                    Layout.fillWidth: true
-                    from: 0
-                    to: 100
-                    value: root.removal !== null ? root.removal.progress : 0
-                }
-                Button {
-                    objectName: "export-removal-cancel-generation"
-                    text: "取消生成"
+                Label {
+                    objectName: "export-removal-eta"
+                    text: root.removal !== null ? root.removal.etaText : ""
+                    color: "#9a9a9a"
                     font.pixelSize: 10
-                    padding: 3
-                    onClicked: if (root.removal !== null)
-                                   root.removal.cancelExportGeneration()
                 }
+            }
+            ProgressBar {
+                objectName: "export-removal-progress-bar"
+                Layout.fillWidth: true
+                from: 0
+                to: 100
+                value: root.removal !== null ? root.removal.progress : 0
+            }
+            Button {
+                objectName: "export-removal-cancel-generation"
+                Layout.fillWidth: true
+                text: root.removal !== null && root.removal.cancelling
+                      ? "正在取消…" : "取消 AI 任务"
+                font.pixelSize: 11
+                implicitHeight: 30
+                enabled: root.removal !== null && !root.removal.cancelling
+                onClicked: if (root.removal !== null)
+                               root.removal.cancelExportGeneration()
             }
         }
 

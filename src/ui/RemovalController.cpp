@@ -258,6 +258,11 @@ void RemovalController::setLivePreviewStatus(const QString &text)
     emit livePreviewStatusChanged();
 }
 
+bool RemovalController::cancelling() const
+{
+    return m_jobManager && m_jobManager->cancelling();
+}
+
 void RemovalController::setStatusText(const QString &text)
 {
     if (text == m_statusText)
@@ -446,6 +451,8 @@ void RemovalController::setJobManager(AiJobManager *manager)
             &RemovalController::progressChanged);
     connect(m_jobManager, &AiJobManager::pausedChanged, this,
             &RemovalController::pausedChanged);
+    connect(m_jobManager, &AiJobManager::cancellingChanged, this,
+            &RemovalController::cancellingChanged);
     connect(m_jobManager, &AiJobManager::stageTextChanged, this,
             &RemovalController::stageTextChanged);
     connect(m_jobManager, &AiJobManager::etaTextChanged, this,

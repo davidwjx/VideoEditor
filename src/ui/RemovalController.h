@@ -62,6 +62,8 @@ class RemovalController : public QObject {
     Q_PROPERTY(bool generating READ generating NOTIFY generatingChanged)
     // One-button alias of generating(): the 开始消除 flow is running.
     Q_PROPERTY(bool erasing READ erasing NOTIFY generatingChanged)
+    // True between the cancel click and the engine's acknowledgement.
+    Q_PROPERTY(bool cancelling READ cancelling NOTIFY cancellingChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)
     // Idle-state one-liner ("修复已生成，预览/导出即可使用"); empty while a
     // job runs, whose stage/percent/ETA come from the job manager.
@@ -133,6 +135,7 @@ public:
     bool technicalPreview() const;
     bool generating() const { return m_generating; }
     bool erasing() const { return m_generating; }
+    bool cancelling() const;
     QString statusText() const { return m_statusText; }
     bool paused() const;
     double progress() const;
@@ -265,6 +268,7 @@ signals:
     void generatingChanged();
     void pausedChanged();
     void progressChanged();
+    void cancellingChanged();
     void stageTextChanged();
     void etaTextChanged();
     void statusTextChanged();

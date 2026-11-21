@@ -53,7 +53,10 @@ bool AiJobManager::start(const AiJobSpec &spec, QString *error)
 
     m_running = true;
     m_paused = false;
+    const bool wasCancelling = m_cancelRequested;
     m_cancelRequested = false;
+    if (wasCancelling)
+        emit cancellingChanged();
     m_progress = 0.0;
     m_stageText.clear();
     m_etaText.clear();
@@ -111,7 +114,10 @@ void AiJobManager::cancel()
 {
     if (!m_running || !m_transport)
         return;
-    m_cancelRequested = true;
+    if (!m_cancelRequested) {
+        m_cancelRequested = true;
+        emit cancellingChanged();
+    }
     m_stageText = QStringLiteral("正在取消 AI 任务…");
     emit stageTextChanged();
     // The transport owns the cancel command and the kill timeout.
@@ -318,7 +324,10 @@ void AiJobManager::finish(const AiJobResult &result)
         return;
     m_running = false;
     m_paused = false;
+    const bool wasCancelling = m_cancelRequested;
     m_cancelRequested = false;
+    if (wasCancelling)
+        emit cancellingChanged();
     if (result.ok)
         m_progress = 100.0;
 

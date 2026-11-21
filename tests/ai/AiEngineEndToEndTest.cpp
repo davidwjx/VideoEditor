@@ -717,4 +717,64 @@ TEST(AiEngineEndToEnd, RedoAfterPartialStaysPartialUntilAllChunksExist)
     EXPECT_TRUE(emptyChunk->frames.isEmpty());
 }
 
+// Field report: on a long portrait clip the 取消 button seemed to take a long
+// time. Measures the engine-side latency between the cancel command and the
+// cancelled event, so a cooperative-cancel regression (falling back to the
+// transport's 5 s kill) fails here instead of only in manual UAT.
+TEST(AiEngineEndToEnd, CancelLatencyOnLongTrackingJob)
+{
+    const QString modelsDir = qEnvironmentVariable("VIDEOEDITOR_M4_MODELS");
+    if (!skipUnlessEngineAvailable())
+        GTEST_SKIP() << "VisionAiEngine.exe, h264.mp4 or "
+                        "VIDEOEDITOR_M4_MODELS is unavailable";
+    const QString longAsset = QDir(QStringLiteral(VIDEOEDITOR_FIXTURE_DIR))
+                                  .absoluteFilePath(
+                                      QStringLiteral("../../badminton.mp4"));
+    if (!QFileInfo::exists(longAsset))
+        GTEST_SKIP() << "missing badminton.mp4 next to the repo";
+
+    QTemporaryDir temp;
+    ASSERT_TRUE(temp.isValid());
+    const QString sidecarRoot = temp.filePath(QStringLiteral("sidecar"));
+    const QString cacheDir = temp.filePath(QStringLiteral("cache"));
+    // The field job ran at 720x1280 (the source resolution), so reproduce that
+    // geometry rather than the tiny fixture.
+    const QString maskHash =
+        writeMaskSidecar(sidecarRoot, centeredMask(720, 1280));
+    ASSERT_EQ(maskHash.size(), 64);
+
+    AiJobSpec spec = makeEngineSpec(longAsset, modelsDir, sidecarRoot,
+                                    cacheDir, 2300, maskHash);
+    spec.width = 720;
+    spec.height = 1280;
+    spec.sourceOutUs = framesToMicros(2300, Rational{30, 1});
+    EngineEnvironmentGuard guard;
+
+    LocalAiTransport transport;
+    QSignalSpy messages(&transport, &AiTransport::message);
+    QSignalSpy finished(&transport, &AiTransport::finished);
+    QString error;
+    ASSERT_TRUE(transport.start(spec, &error)) << error.toStdString();
+
+    // Let tracking run for a few seconds so the cancel lands mid-stream, not
+    // during model initialization.
+    QTRY_VERIFY_WITH_TIMEOUT(progressCount(messages) >= 5, 60000);
+    QTest::qWait(3000);
+
+    QElapsedTimer cancelClock;
+    cancelClock.start();
+    transport.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(finished.count() >= 1, 15000);
+    const qint64 latencyMs = cancelClock.elapsed();
+
+    QJsonObject cancelled;
+    EXPECT_TRUE(sawEvent(messages, QStringLiteral("cancelled"), &cancelled))
+        << "engine never emitted cancelled (transport kill fallback?)";
+    std::cout << "CANCEL_LATENCY_MS=" << latencyMs << std::endl;
+    // Cooperative cancel is checked once per tracked frame; even at 10 fps
+    // that is well under two seconds. Anything near the 5 s kill timer means
+    // the command was not polled.
+    EXPECT_LT(latencyMs, 2000) << "cancel latency too high";
+}
+
 #endif // VIDEOEDITOR_HAVE_ORT

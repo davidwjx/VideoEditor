@@ -21,6 +21,11 @@ class AiJobManager : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)
+    // True from the cancel click until the engine acknowledges it. The UI uses
+    // this for immediate, persistent "正在取消…" feedback: progress messages
+    // keep arriving (and rewrite stageText) until the engine stops, so a stage
+    // label alone can flicker back to "tracking" and look unresponsive.
+    Q_PROPERTY(bool cancelling READ cancelling NOTIFY cancellingChanged)
     Q_PROPERTY(double progress READ progress NOTIFY progressChanged)
     Q_PROPERTY(QString stageText READ stageText NOTIFY stageTextChanged)
     Q_PROPERTY(QString etaText READ etaText NOTIFY etaTextChanged)
@@ -32,6 +37,7 @@ public:
 
     bool running() const { return m_running; }
     bool paused() const { return m_paused; }
+    bool cancelling() const { return m_cancelRequested; }
     double progress() const { return m_progress; }
     QString stageText() const { return m_stageText; }
     QString etaText() const { return m_etaText; }
@@ -47,6 +53,7 @@ public:
 signals:
     void runningChanged();
     void pausedChanged();
+    void cancellingChanged();
     void progressChanged();
     void stageTextChanged();
     void etaTextChanged();

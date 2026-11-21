@@ -336,6 +336,11 @@ ApplicationWindow {
                     anchors.margins: 12
                     width: Math.min(320, parent.width - 24)
                     z: 25
+                    // Modal dialogs swallow every click outside themselves, so
+                    // a visible floating cancel would be a dead control. The
+                    // export dialog shows the same job plus a working cancel
+                    // while it is open.
+                    suppressed: exportDialog.opened || recoveryDialog.opened
                 }
                 Label {
                     anchors.centerIn: parent

@@ -254,6 +254,8 @@ ColumnLayout {
         text: {
             if (root.removal === null)
                 return ""
+            if (root.removal.cancelling)
+                return "正在取消…"
             const percent = root.removal.progress > 0
                             ? " " + Math.round(root.removal.progress) + "%"
                             : ""
@@ -261,10 +263,25 @@ ColumnLayout {
                         ? " · " + root.removal.etaText : ""
             return root.removal.stageText + percent + eta
         }
-        color: "#9e9e9e"
+        color: root.removal !== null && root.removal.cancelling
+               ? "#e6c15a" : "#9e9e9e"
         elide: Text.ElideRight
         font.pixelSize: 11
         Layout.fillWidth: true
+    }
+    // A full-width cancel next to the running job's stage line. The floating
+    // panel's small button is easy to miss (and covered by modal dialogs), and
+    // a missed click is indistinguishable from an ignored one.
+    Button {
+        objectName: "removal-cancel-button"
+        Layout.fillWidth: true
+        visible: root.removal !== null && root.removal.generating
+        text: root.removal !== null && root.removal.cancelling
+              ? "正在取消…" : "取消 AI 任务"
+        font.pixelSize: 11
+        implicitHeight: 30
+        enabled: root.removal !== null && !root.removal.cancelling
+        onClicked: if (root.removal !== null) root.removal.cancel()
     }
 
     // ------------------------------------------------------------------
