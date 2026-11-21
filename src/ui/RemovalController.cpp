@@ -258,6 +258,14 @@ void RemovalController::setLivePreviewStatus(const QString &text)
     emit livePreviewStatusChanged();
 }
 
+void RemovalController::setStatusText(const QString &text)
+{
+    if (text == m_statusText)
+        return;
+    m_statusText = text;
+    emit statusTextChanged();
+}
+
 void RemovalController::handleLiveRepairError(const QString &message)
 {
     m_liveTargetReady = false;
@@ -572,6 +580,46 @@ bool RemovalController::generate()
     return generateForLayer(*layer, false);
 }
 
+bool RemovalController::erase()
+{
+    // One-button flow: paint a mask, click 开始消除, get a repaired clip. The
+    // live preview repairs the same frames in memory, so it must stop first.
+    if (m_livePreview)
+        setLivePreview(false);
+    if (m_jobManager && m_jobManager->running()) {
+        setError(QStringLiteral("已有 AI 任务在运行。"));
+        return false;
+    }
+    clearError();
+    const RemovalLayer *layer = activeRemovalLayer();
+    if (!layer) {
+        setError(QStringLiteral("请先绘制消除遮罩。"));
+        return false;
+    }
+
+    // A finished repair must not re-run; point the preview back at it.
+    if (m_cache && !layer->cacheKey.isEmpty()
+        && m_cache->state(layer->cacheKey) == RemovalCacheState::Complete) {
+        m_eraseChain = false;
+        if (m_compareMode != QStringLiteral("repair"))
+            setCompareMode(QStringLiteral("repair"));
+        setStatusText(QStringLiteral("修复已生成，预览/导出即可使用"));
+        return true;
+    }
+
+    const bool tracked =
+        layer->trackingState == RemovalTrackingState::Complete
+        || layer->trackingState == RemovalTrackingState::LowConfidence;
+    // Tracked layers resume the repair directly; anything else runs tracking
+    // first and chains the repair from handleJobFinished().
+    m_eraseChain = !tracked;
+    setStatusText(QString());
+    const bool started = tracked ? generateForLayer(*layer, false) : track();
+    if (!started)
+        m_eraseChain = false;
+    return started;
+}
+
 const RemovalLayer *RemovalController::layerForClip(const QString &clipId) const
 {
     const Clip *clip = findClip(clipId);
@@ -605,6 +653,10 @@ bool RemovalController::generateForLayer(const RemovalLayer &layer,
     AiJobSpec spec;
     if (!buildJobSpec(PendingJobKind::Generate, &spec, &error, &layer))
         return fail(error);
+    // A partial cache continues where it stopped; a fresh run keeps resume
+    // off so the engine rebuilds the manifest from scratch.
+    if (m_cache && m_cache->state(spec.cacheKey) == RemovalCacheState::Partial)
+        spec.resume = true;
 
     // Export preflight and generation use the same computed key. The layer is
     // updated exactly once when the job finishes (success, cancel or error),
@@ -673,6 +725,9 @@ void RemovalController::setExportRequiredMessage(const QString &message)
 
 void RemovalController::cancel()
 {
+    // A cancelled tracking run must never auto-start the repair; the manager
+    // also reports the cancel through jobFinished, which clears it again.
+    m_eraseChain = false;
     if (m_jobManager)
         m_jobManager->cancel();
 }
@@ -1756,6 +1811,7 @@ bool RemovalController::startPendingJob(PendingJobKind kind,
         return false;
     }
     m_generating = true;
+    setStatusText(QString());
     emit generatingChanged();
     emit pausedChanged();
     emit progressChanged();
@@ -1773,6 +1829,10 @@ void RemovalController::handleJobFinished(const AiJobResult &result)
     // close may have disarmed the export while the job was already finishing.
     const bool exportAfter = m_pendingExportAfter && m_exportAfterGeneration;
     const bool wasTracking = kind == PendingJobKind::Track;
+    // Only a successful tracking job may chain the repair; cancel, error and
+    // failure leave the one-button flow stopped.
+    const bool chainRepair = m_eraseChain && result.ok && wasTracking;
+    m_eraseChain = false;
     const QString abortError = m_abortError;
     m_abortError.clear();
     if (!abortError.isEmpty())
@@ -1835,8 +1895,15 @@ void RemovalController::handleJobFinished(const AiJobResult &result)
         applyLayerUpdate(after, wasTracking ? QStringLiteral("AI 跟踪完成")
                                             : QStringLiteral("AI 修复完成"));
         notifyAnalysisChanged();
-        if (exportAfter && !wasTracking)
-            emit generationFinishedForExport();
+        if (chainRepair) {
+            // The tracking command just recorded the cache key the repair
+            // shares, so the repair spec must be built from the updated layer.
+            generateForLayer(after, false);
+        } else if (!wasTracking) {
+            setStatusText(QStringLiteral("修复已生成，预览/导出即可使用"));
+            if (exportAfter)
+                emit generationFinishedForExport();
+        }
         return;
     }
 

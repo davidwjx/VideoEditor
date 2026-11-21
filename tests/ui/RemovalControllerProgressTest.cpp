@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <vector>
 
 #include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -181,6 +183,17 @@ void makeChunkDir(const RemovalCache &cache, const QString &key, int index)
 {
     QDir().mkpath(QDir(cache.cacheDir(key))
                       .filePath(QStringLiteral("chunks/%1").arg(index)));
+}
+
+void makeCompleteChunkDir(const RemovalCache &cache, const QString &key,
+                          int index)
+{
+    const QString dir = QDir(cache.cacheDir(key))
+                            .filePath(QStringLiteral("chunks/%1").arg(index));
+    QDir().mkpath(dir);
+    QFile marker(QDir(dir).filePath(QStringLiteral("index.json")));
+    ASSERT_TRUE(marker.open(QIODevice::WriteOnly));
+    marker.write("{}");
 }
 
 qint64 frameUs(int frame)
@@ -935,4 +948,263 @@ TEST(RemovalControllerProgress, ExportGenerationTargetsTheFailingClip)
 
     controller.cancelExportGeneration();
     EXPECT_FALSE(controller.exportGenerationPending());
+}
+
+// ---------------------------------------------------------------------------
+// One-button 开始消除 flow.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Records every spec the manager starts so a chained track->repair run can be
+// asserted stage by stage. Complete mode answers like the engine's tracking
+// and repair done events (identical shape for both stages).
+class RecordingTransport : public AiTransport {
+public:
+    RecordingTransport(FakeTransport::Mode mode,
+                       std::vector<AiJobSpec> *specs)
+        : m_mode(mode)
+        , m_specs(specs)
+    {
+    }
+
+    bool start(const AiJobSpec &spec, QString *error) override
+    {
+        Q_UNUSED(error)
+        m_specs->push_back(spec);
+        m_spec = spec;
+        if (m_mode == FakeTransport::Mode::Complete) {
+            QTimer::singleShot(0, this, [this] {
+                emit message(QJsonObject{
+                    {QStringLiteral("event"), QStringLiteral("done")},
+                    {QStringLiteral("cacheKey"), m_spec.cacheKey},
+                    {QStringLiteral("confidenceHash"),
+                     QString(64, QLatin1Char('a'))},
+                    {QStringLiteral("trackingState"),
+                     QStringLiteral("complete")}});
+                emit finished(0, QProcess::NormalExit);
+            });
+        }
+        return true;
+    }
+
+    void cancel() override
+    {
+        emit message(QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("cancelled")},
+            {QStringLiteral("completedFrames"), 30},
+            {QStringLiteral("trackingState"), QStringLiteral("partial")}});
+        emit finished(0, QProcess::NormalExit);
+    }
+
+private:
+    FakeTransport::Mode m_mode;
+    std::vector<AiJobSpec> *m_specs;
+    AiJobSpec m_spec;
+};
+
+void recordStartedJobs(Harness &harness, std::vector<AiJobSpec> *specs,
+                       FakeTransport::Mode mode)
+{
+    harness.manager.setTransportFactoryForTest([specs, mode] {
+        return std::unique_ptr<AiTransport>(
+            new RecordingTransport(mode, specs));
+    });
+}
+
+Project untrackedProject()
+{
+    Project project = projectWithRemovalLayer();
+    project.removalLayers[0].trackingState = RemovalTrackingState::NotTracked;
+    project.removalLayers[0].cacheKey.clear();
+    project.removalLayers[0].cachePath.clear();
+    return project;
+}
+
+} // namespace
+
+TEST(RemovalControllerProgress, EraseChainsTrackThenGenerateFromOneClick)
+{
+    Harness harness;
+    std::vector<AiJobSpec> specs;
+    recordStartedJobs(harness, &specs, FakeTransport::Mode::Complete);
+    harness.doc.setProject(untrackedProject());
+    harness.controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    const int undoBefore = harness.doc.undoStack()->index();
+    ASSERT_TRUE(harness.controller.erase())
+        << harness.controller.error().toStdString();
+    EXPECT_TRUE(harness.controller.erasing());
+    EXPECT_TRUE(harness.controller.generating());
+    ASSERT_EQ(specs.size(), 1u);
+    EXPECT_TRUE(specs[0].trackingOnly) << "untracked layers start with tracking";
+
+    // The successful tracking job must auto-chain the repair; the user only
+    // clicked once.
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 2, 2000);
+    ASSERT_EQ(specs.size(), 2u);
+    EXPECT_TRUE(specs[0].trackingOnly);
+    EXPECT_FALSE(specs[1].trackingOnly);
+    EXPECT_EQ(specs[0].cacheKey, specs[1].cacheKey);
+    EXPECT_FALSE(harness.controller.generating());
+
+    const RemovalLayer &layer = harness.doc.project().removalLayers.first();
+    EXPECT_EQ(layer.trackingState, RemovalTrackingState::Complete);
+    EXPECT_EQ(layer.cacheKey, specs[1].cacheKey);
+    // One undo command per finished job, exactly as the two manual commands.
+    EXPECT_EQ(harness.doc.undoStack()->index(), undoBefore + 2);
+    EXPECT_TRUE(harness.controller.statusText().contains(
+        QStringLiteral("修复已生成")));
+}
+
+TEST(RemovalControllerProgress, CancelDuringTrackingStopsTheEraseChain)
+{
+    Harness harness;
+    std::vector<AiJobSpec> specs;
+    recordStartedJobs(harness, &specs, FakeTransport::Mode::Silent);
+    harness.doc.setProject(untrackedProject());
+    harness.controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    ASSERT_TRUE(harness.controller.erase());
+    ASSERT_EQ(specs.size(), 1u);
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+    // Give a wrongly chained repair a chance to start before asserting.
+    QTest::qWait(100);
+    EXPECT_EQ(specs.size(), 1u);
+    EXPECT_FALSE(harness.manager.running());
+    EXPECT_FALSE(harness.controller.generating());
+}
+
+TEST(RemovalControllerProgress, TrackedPartialCacheEraseResumesGeneration)
+{
+    Harness harness;
+    std::vector<AiJobSpec> specs;
+    recordStartedJobs(harness, &specs, FakeTransport::Mode::Silent);
+    Project project = projectWithRemovalLayer(); // trackingState Complete
+    project.removalLayers[0].cacheKey.clear();
+    project.removalLayers[0].cachePath.clear();
+    harness.doc.setProject(project);
+    harness.controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    // Persist a partial cache under the key the repair will use.
+    const QString key = computeRemovalCacheKey(RemovalPreflight::keyInputFor(
+        harness.doc.project(), harness.doc.project().tracks[0].clips[0],
+        harness.doc.project().removalLayers[0], *harness.gate.registry()));
+    RemovalCacheManifest manifest =
+        makeManifest(key, QStringLiteral("partial"), {0}, 150);
+    QString error;
+    ASSERT_TRUE(harness.cache.writeManifest(manifest, &error))
+        << error.toStdString();
+    makeChunkDir(harness.cache, key, 0);
+    {
+        Project withKey = harness.doc.project();
+        withKey.removalLayers[0].cacheKey = key;
+        withKey.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+        harness.doc.setProject(withKey);
+    }
+
+    ASSERT_TRUE(harness.controller.erase());
+    ASSERT_EQ(specs.size(), 1u) << "a tracked layer must not re-run tracking";
+    EXPECT_FALSE(specs[0].trackingOnly);
+    EXPECT_TRUE(specs[0].resume) << "partial caches continue where they stopped";
+    EXPECT_EQ(specs[0].cacheKey, key);
+
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
+}
+
+TEST(RemovalControllerProgress, CompleteCacheEraseOnlyReportsReadyAndCompares)
+{
+    Harness harness;
+    std::vector<AiJobSpec> specs;
+    recordStartedJobs(harness, &specs, FakeTransport::Mode::Complete);
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    const QString key = harness.keyForProject();
+    RemovalCacheManifest manifest =
+        makeManifest(key, QStringLiteral("complete"), {0, 1, 2, 3, 4}, 150);
+    QString error;
+    ASSERT_TRUE(harness.cache.writeManifest(manifest, &error))
+        << error.toStdString();
+    for (int index = 0; index < 5; ++index)
+        makeCompleteChunkDir(harness.cache, key, index);
+    {
+        Project withKey = projectWithRemovalLayer();
+        withKey.removalLayers[0].cacheKey = key;
+        withKey.removalLayers[0].cachePath = QStringLiteral("removal/") + key;
+        harness.doc.setProject(withKey);
+    }
+    ASSERT_EQ(harness.controller.cacheStatusText(), QStringLiteral("已生成"));
+
+    harness.controller.setCompareMode(QStringLiteral("original"));
+    EXPECT_TRUE(harness.controller.erase());
+    QTest::qWait(50);
+    EXPECT_TRUE(specs.empty()) << "a complete cache must never regenerate";
+    EXPECT_FALSE(harness.manager.running());
+    EXPECT_EQ(harness.controller.statusText(),
+              QStringLiteral("修复已生成，预览/导出即可使用"));
+    EXPECT_EQ(harness.controller.compareMode(), QStringLiteral("repair"));
+}
+
+TEST(RemovalControllerProgress, EraseStopsTheLivePreviewBeforeStarting)
+{
+    Harness harness;
+    harness.mode = FakeTransport::Mode::Silent;
+    harness.doc.setProject(projectWithRemovalLayer());
+    harness.controller.setSelectedClipProvider(
+        [] { return QStringLiteral("clip-1"); });
+
+    const RemovalLayer &layer = harness.doc.project().removalLayers.first();
+    // Live preview needs a completed tracking run with mask files on disk.
+    ASSERT_FALSE(layer.cacheKey.isEmpty());
+    const QString masksDir = QDir(harness.cache.cacheDir(layer.cacheKey))
+                                 .filePath(QStringLiteral("tracking/masks"));
+    ASSERT_TRUE(QDir().mkpath(masksDir));
+    QFile frame(QDir(masksDir).filePath(QStringLiteral("frame_000000.rle")));
+    ASSERT_TRUE(frame.open(QIODevice::WriteOnly));
+    frame.write("x");
+    frame.close();
+
+    // buildLiveRepairSpec needs a real inpaint ONNX path; the shared harness
+    // registry only carries model ids.
+    ModelManifest manifest;
+    manifest.schemaVersion = 1;
+    manifest.pipelineVersion = QStringLiteral("m4.0");
+    AiModelRecord tracking;
+    tracking.id = QStringLiteral("efficienttam-ti-512-fp32");
+    tracking.family = QStringLiteral("tracking");
+    tracking.files.insert(
+        QStringLiteral("image_encoder"),
+        AiModelFile{QStringLiteral("t.onnx"), QString(64, QLatin1Char('a'))});
+    AiModelRecord inpaint;
+    inpaint.id = QStringLiteral("migan-512");
+    inpaint.family = QStringLiteral("inpainting");
+    inpaint.files.insert(
+        QStringLiteral("model"),
+        AiModelFile{QStringLiteral("migan.onnx"), QString(64, QLatin1Char('b'))});
+    manifest.models = {tracking, inpaint};
+    harness.gate.setRegistryForTest(
+        ModelRegistry::forTest(manifest, harness.dir.path()));
+
+    int stopped = 0;
+    harness.controller.setLivePreviewStarter(
+        [](const LiveRepairSpec &, QString *) { return true; });
+    harness.controller.setLivePreviewStopper([&stopped] { ++stopped; });
+    ASSERT_TRUE(harness.controller.livePreviewAvailable());
+    harness.controller.setLivePreview(true);
+    ASSERT_TRUE(harness.controller.livePreview());
+
+    ASSERT_TRUE(harness.controller.erase())
+        << harness.controller.error().toStdString();
+    EXPECT_FALSE(harness.controller.livePreview());
+    EXPECT_EQ(stopped, 1) << "the live worker contends with the job for the GPU";
+
+    harness.controller.cancel();
+    QTRY_VERIFY_WITH_TIMEOUT(harness.finished.count() == 1, 2000);
 }

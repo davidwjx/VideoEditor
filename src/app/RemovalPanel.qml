@@ -65,6 +65,18 @@ ColumnLayout {
         Layout.topMargin: 2
     }
 
+    // One-line replacement for the old 跟踪/生成/实时预览三概念说明: the user
+    // paints and clicks one button; everything else is automatic or advanced.
+    Label {
+        objectName: "removal-explainer"
+        visible: root.removal !== null
+        text: "涂抹要消除的物体，点“开始消除”，AI 自动完成跟踪与修复。"
+        color: "#9e9e9e"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
     Button {
         objectName: "removal-enter-button"
         Layout.fillWidth: true
@@ -178,6 +190,81 @@ ColumnLayout {
             anchors.fill: parent
             onClicked: if (root.removal !== null) root.removal.clearError()
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The one-button erase flow. This is the only action a first-run user
+    // needs: 跟踪遮罩/生成修复 stay available under AI 高级设置 below.
+    // ------------------------------------------------------------------
+    RowLayout {
+        objectName: "removal-action-row"
+        Layout.fillWidth: true
+        spacing: 4
+        visible: root.active
+
+        Button {
+            objectName: "removal-erase-button"
+            Layout.fillWidth: true
+            highlighted: true
+            text: {
+                if (root.removal === null)
+                    return "开始消除"
+                if (root.removal.generating)
+                    return "正在消除…"
+                if (root.removal.cacheStatusText === "已生成")
+                    return "重新消除"
+                if (root.removal.canContinueGeneration)
+                    return "继续消除"
+                return "开始消除"
+            }
+            enabled: root.ready && root.removal !== null
+                     && root.removal.hasLayer && root.removal.maskHasPixels
+                     && !root.removal.generating
+            onClicked: if (root.removal !== null) root.removal.erase()
+            ToolTip.visible: hovered
+            ToolTip.text: root.removal !== null && root.removal.generating
+                          ? "AI 正在跟踪遮罩并修复画面"
+                          : "AI 自动完成遮罩跟踪与画面修复"
+        }
+    }
+    Label {
+        objectName: "removal-action-disabled-reason"
+        visible: root.actionDisabledReason.length > 0
+        text: root.actionDisabledReason
+        color: "#e67e22"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+
+    // Idle status ("修复已生成…") and, while a job runs, the same
+    // stage/percent/ETA the floating progress panel shows.
+    Label {
+        objectName: "removal-status-text"
+        visible: root.removal !== null && root.removal.statusText.length > 0
+        text: root.removal !== null ? root.removal.statusText : ""
+        color: "#8bd17c"
+        wrapMode: Text.WordWrap
+        font.pixelSize: 11
+        Layout.fillWidth: true
+    }
+    Label {
+        objectName: "removal-progress-line"
+        visible: root.removal !== null && root.removal.generating
+        text: {
+            if (root.removal === null)
+                return ""
+            const percent = root.removal.progress > 0
+                            ? " " + Math.round(root.removal.progress) + "%"
+                            : ""
+            const eta = root.removal.etaText.length > 0
+                        ? " · " + root.removal.etaText : ""
+            return root.removal.stageText + percent + eta
+        }
+        color: "#9e9e9e"
+        elide: Text.ElideRight
+        font.pixelSize: 11
+        Layout.fillWidth: true
     }
 
     // ------------------------------------------------------------------
@@ -323,43 +410,6 @@ ColumnLayout {
             Layout.fillWidth: true
         }
 
-        // Compact action row stays at the top of the mask section above the
-        // brush/keyframe controls so track/generate are never below the fold.
-        RowLayout {
-            objectName: "removal-action-row"
-            Layout.fillWidth: true
-            spacing: 4
-
-            Button {
-                objectName: "removal-track-button"
-                text: "跟踪遮罩"
-                Layout.fillWidth: true
-                enabled: root.ready && root.hasKeyframes
-                         && !root.removal.generating
-                onClicked: root.removal.track()
-            }
-            Button {
-                objectName: "removal-generate-button"
-                text: root.removal !== null
-                      && root.removal.canContinueGeneration
-                      ? "继续生成修复" : "生成修复"
-                Layout.fillWidth: true
-                highlighted: true
-                enabled: root.ready && root.hasKeyframes
-                         && !root.removal.generating
-                onClicked: root.removal.generate()
-            }
-        }
-        Label {
-            objectName: "removal-action-disabled-reason"
-            visible: root.actionDisabledReason.length > 0
-            text: root.actionDisabledReason
-            color: "#e67e22"
-            wrapMode: Text.WordWrap
-            font.pixelSize: 11
-            Layout.fillWidth: true
-        }
-
         RowLayout {
             Layout.fillWidth: true
             spacing: 4
@@ -385,7 +435,9 @@ ColumnLayout {
                 }
             }
             Button {
-                objectName: "removal-erase-button"
+                // The mask-tool eraser; "removal-erase-button" now belongs to
+                // the one-button erase action at the top of the section.
+                objectName: "removal-erase-tool-button"
                 text: "擦除"
                 highlighted: root.removal !== null && root.removal.eraseMode
                 onClicked: {
@@ -691,6 +743,32 @@ ColumnLayout {
             color: "#8a8a8a"
             font.pixelSize: 11
             Layout.fillWidth: true
+        }
+
+        // Power-user entry points. The one-button 开始消除 above covers the
+        // normal flow; these run a single stage by hand.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Button {
+                objectName: "removal-track-button"
+                text: "跟踪遮罩"
+                Layout.fillWidth: true
+                enabled: root.ready && root.hasKeyframes
+                         && !root.removal.generating
+                onClicked: root.removal.track()
+            }
+            Button {
+                objectName: "removal-generate-button"
+                text: root.removal !== null
+                      && root.removal.canContinueGeneration
+                      ? "继续生成修复" : "生成修复"
+                Layout.fillWidth: true
+                enabled: root.ready && root.hasKeyframes
+                         && !root.removal.generating
+                onClicked: root.removal.generate()
+            }
         }
     }
 }

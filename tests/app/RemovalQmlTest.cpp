@@ -232,6 +232,11 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
              QStringLiteral("job-pause-button"),
              QStringLiteral("removal-track-button"),
              QStringLiteral("removal-generate-button"),
+             QStringLiteral("removal-erase-button"),
+             QStringLiteral("removal-erase-tool-button"),
+             QStringLiteral("removal-status-text"),
+             QStringLiteral("removal-progress-line"),
+             QStringLiteral("removal-explainer"),
              QStringLiteral("removal-compare-toggle"),
              QStringLiteral("removal-advanced-toggle"),
              QStringLiteral("removal-advanced-panel"),
@@ -318,6 +323,11 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     EXPECT_TRUE(controller.removal()->currentMaskEmpty());
     EXPECT_FALSE(addKeyframe->isEnabled());
     EXPECT_TRUE(firstRunHint->isVisible());
+    // 开始消除 stays disabled until the user paints something.
+    QQuickItem *eraseBeforePaint =
+        findItem(window, QStringLiteral("removal-erase-button"));
+    ASSERT_NE(eraseBeforePaint, nullptr);
+    EXPECT_FALSE(eraseBeforePaint->isEnabled());
     // The disabled-reason label is only needed when an action is blocked (gate
     // closed); in the technical-preview run there are keyframes and no reason.
     EXPECT_EQ(actionReason->isVisible(), !controller.aiFeatureEnabled());
@@ -375,15 +385,34 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     ASSERT_NE(toastTimer, nullptr);
     EXPECT_EQ(toastTimer->property("interval").toInt(), 8000);
 
-    // Mask-mode-only controls disappear after leaving mask mode.
+    // The power-user track/generate buttons now live inside AI 高级设置 and
+    // stay hidden while the advanced panel is collapsed.
     QQuickItem *trackButton =
         findItem(window, QStringLiteral("removal-track-button"));
     QQuickItem *generateButton =
         findItem(window, QStringLiteral("removal-generate-button"));
     ASSERT_NE(trackButton, nullptr);
     ASSERT_NE(generateButton, nullptr);
-    EXPECT_TRUE(trackButton->isVisible());
-    EXPECT_TRUE(generateButton->isVisible());
+    EXPECT_FALSE(trackButton->isVisible());
+    EXPECT_FALSE(generateButton->isVisible());
+
+    // The one-button action row is the only visible erase entry point. Its
+    // enabled state follows the gate + painted mask, and its label reflects
+    // the cache state.
+    QQuickItem *eraseButton =
+        findItem(window, QStringLiteral("removal-erase-button"));
+    ASSERT_NE(eraseButton, nullptr);
+    EXPECT_TRUE(eraseButton->isVisible());
+    EXPECT_EQ(eraseButton->property("text").toString(),
+              QStringLiteral("开始消除"));
+    EXPECT_EQ(eraseButton->isEnabled(),
+              controller.aiFeatureEnabled()
+                  && controller.removal()->maskHasPixels());
+    QQuickItem *explainer =
+        findItem(window, QStringLiteral("removal-explainer"));
+    ASSERT_NE(explainer, nullptr);
+    EXPECT_TRUE(explainer->property("text").toString()
+                    .contains(QStringLiteral("开始消除")));
 
     // Confidence band reads the sidecar: 2 low/missing frames out of 4.
     QQuickItem *lowCount =
@@ -445,6 +474,9 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     ASSERT_TRUE(QMetaObject::invokeMethod(advancedToggle, "clicked"));
     QTest::qWait(80);
     EXPECT_TRUE(advancedPanel->isVisible());
+    // The demoted single-stage commands are reachable here for power users.
+    EXPECT_TRUE(trackButton->isVisible());
+    EXPECT_TRUE(generateButton->isVisible());
     QQuickItem *advancedMode =
         findItem(window, QStringLiteral("removal-advanced-mode"));
     ASSERT_NE(advancedMode, nullptr);
@@ -533,4 +565,23 @@ TEST(RemovalQml, PanelProgressConfidenceAdvancedAndExportPrompt)
     QTest::qWait(300);
     ASSERT_TRUE(dialog->property("opened").toBool());
     EXPECT_TRUE(promptMessage->isVisible());
+    ASSERT_TRUE(QMetaObject::invokeMethod(dialog, "close"));
+    QTest::qWait(150);
+
+    // Clicking 开始消除 must call Removal.erase(): deleting the layer makes the
+    // controller reject the click immediately with its Chinese explanation,
+    // so the wiring is proven without starting a real inference job.
+    // deleteLayer() acts on the mask-editor working layer, so re-enter mask
+    // mode before removing it.
+    controller.removal()->beginMask(QStringLiteral("clip-1"));
+    QTest::qWait(80);
+    controller.removal()->deleteLayer();
+    QTest::qWait(80);
+    ASSERT_NE(findItem(window, QStringLiteral("removal-erase-button")),
+              nullptr);
+    ASSERT_TRUE(QMetaObject::invokeMethod(eraseButton, "clicked"));
+    QTest::qWait(80);
+    EXPECT_EQ(controller.removal()->error(),
+              QStringLiteral("请先绘制消除遮罩。"));
 }
+

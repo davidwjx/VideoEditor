@@ -60,7 +60,12 @@ class RemovalController : public QObject {
     Q_PROPERTY(bool technicalPreview READ technicalPreview
                    NOTIFY featureEnabledChanged)
     Q_PROPERTY(bool generating READ generating NOTIFY generatingChanged)
+    // One-button alias of generating(): the 开始消除 flow is running.
+    Q_PROPERTY(bool erasing READ erasing NOTIFY generatingChanged)
     Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)
+    // Idle-state one-liner ("修复已生成，预览/导出即可使用"); empty while a
+    // job runs, whose stage/percent/ETA come from the job manager.
+    Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
     Q_PROPERTY(double progress READ progress NOTIFY progressChanged)
     Q_PROPERTY(QString stageText READ stageText NOTIFY stageTextChanged)
     Q_PROPERTY(QString etaText READ etaText NOTIFY etaTextChanged)
@@ -127,6 +132,8 @@ public:
     QString featureDisabledReason() const;
     bool technicalPreview() const;
     bool generating() const { return m_generating; }
+    bool erasing() const { return m_generating; }
+    QString statusText() const { return m_statusText; }
     bool paused() const;
     double progress() const;
     QString stageText() const;
@@ -204,6 +211,9 @@ public:
     Q_INVOKABLE void clearError();
     Q_INVOKABLE bool track();
     Q_INVOKABLE bool generate();
+    // One-button entry: routes to track-then-repair, resume-repair or a
+    // no-op "already generated" status depending on the layer/cache state.
+    Q_INVOKABLE bool erase();
     // Re-runs tracking from the keyframe at/just before the playhead to the end
     // of the layer, chunk-padded like redoRange().
     Q_INVOKABLE void repropagateFromCurrentKeyframe();
@@ -257,6 +267,7 @@ signals:
     void progressChanged();
     void stageTextChanged();
     void etaTextChanged();
+    void statusTextChanged();
     void confidenceChanged();
     void cacheStatusChanged();
     void advancedOpenChanged();
@@ -321,6 +332,7 @@ private:
     bool buildLiveRepairSpec(LiveRepairSpec *spec, QString *error) const;
     bool trackingMasksPresent(const RemovalLayer &layer) const;
     void setLivePreviewStatus(const QString &text);
+    void setStatusText(const QString &text);
     void refreshLivePreviewStatus();
     QString livePreviewBackendSuffix() const;
     QString cacheKeyFor(const Clip &clip, const RemovalLayer &layer,
@@ -370,6 +382,9 @@ private:
     QString m_pendingLayerId;
     QString m_pendingCacheKey;
     bool m_pendingExportAfter = false;
+    // Set by erase() when the repair must follow a successful tracking job;
+    // consumed in handleJobFinished, cleared by cancel/error/failure.
+    bool m_eraseChain = false;
     bool m_generating = false;
     bool m_exportAfterGeneration = false;
     bool m_exportGenerationPending = false;
@@ -377,6 +392,7 @@ private:
     // cancel completion must keep the layer untouched and show this error.
     QString m_abortError;
     bool m_advancedOpen = false;
+    QString m_statusText;
     QString m_compareMode = QStringLiteral("repair");
     int m_splitPermille = 500;
     bool m_livePreview = false;
