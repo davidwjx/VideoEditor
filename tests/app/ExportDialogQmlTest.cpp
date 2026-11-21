@@ -304,6 +304,8 @@ TEST(ExportQml, DialogLoadsAndShowsH265DisabledReason)
     QObject *combo = window->findChild<QObject *>(QStringLiteral("codecCombo"));
     ASSERT_NE(combo, nullptr);
     EXPECT_EQ(combo->property("currentIndex").toInt(), 1); // H.265 row
+    // Encoding details live in 高级 now; the first screen explains the
+    // missing H.265 hardware next to the preset instead.
     QObject *reason = window->findChild<QObject *>(QStringLiteral("h265Reason"));
     ASSERT_NE(reason, nullptr);
     EXPECT_TRUE(reason->property("visible").toBool());
@@ -322,7 +324,7 @@ TEST(ExportQml, DialogLoadsAndShowsH265DisabledReason)
         QStringLiteral("advancedPanel"));
     ASSERT_NE(advanced, nullptr);
     EXPECT_FALSE(advanced->property("visible").toBool());
-    EXPECT_GT(dialog->property("height").toDouble(), 200.0);
+    EXPECT_GT(dialog->property("height").toDouble(), 100.0);
     dialog->setProperty("advancedOpen", true);
     QCoreApplication::processEvents();
     EXPECT_TRUE(advanced->property("visible").toBool());

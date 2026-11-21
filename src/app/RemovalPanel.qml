@@ -116,7 +116,7 @@ ColumnLayout {
     CheckBox {
         id: livePreviewToggle
         objectName: "removal-live-preview-toggle"
-        visible: root.removal !== null
+        visible: root.removal !== null && root.removal.advancedOpen
         text: "实时预览"
         enabled: root.removal !== null
                  && (root.removal.livePreview
@@ -140,7 +140,7 @@ ColumnLayout {
 
     Label {
         objectName: "removal-live-preview-status"
-        visible: root.removal !== null
+        visible: root.removal !== null && root.removal.advancedOpen
         text: root.removal !== null ? root.removal.livePreviewStatus : ""
         color: "#9e9e9e"
         wrapMode: Text.WordWrap
@@ -299,7 +299,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         spacing: 4
-        visible: root.removal !== null
+        visible: root.removal !== null && root.removal.advancedOpen
         Label {
             objectName: "removal-tracking-state"
             visible: root.removal !== null && root.removal.hasLayer
@@ -319,7 +319,7 @@ ColumnLayout {
         }
         Button {
             objectName: "removal-continue-button"
-            visible: root.removal !== null
+            visible: root.removal !== null && root.removal.advancedOpen
                      && root.removal.canContinueGeneration
             text: "继续生成"
             font.pixelSize: 10
@@ -331,7 +331,8 @@ ColumnLayout {
 
     Label {
         objectName: "removal-low-confidence-count"
-        visible: root.removal !== null && root.removal.lowConfidenceCount > 0
+        visible: root.removal !== null && root.removal.advancedOpen
+                 && root.removal.lowConfidenceCount > 0
         text: "有 " + (root.removal !== null
                        ? root.removal.lowConfidenceCount : 0) + " 帧低置信"
         color: "#F44336"
@@ -419,8 +420,8 @@ ColumnLayout {
             objectName: "removal-first-run-hint"
             visible: root.removal !== null
                      && (!root.hasKeyframes || root.removal.currentMaskEmpty)
-            text: "在预览画面上涂抹要消除的物体；第一笔会自动创建关键帧；"
-                + "移动播放头可再画一个"
+            text: "在画面上涂抹要消除的物体；第一笔会自动创建关键帧，"
+                + "移动播放头可再画一个。"
             color: "#e6c15a"
             wrapMode: Text.WordWrap
             font.pixelSize: 11
@@ -550,6 +551,7 @@ ColumnLayout {
         RowLayout {
             Layout.fillWidth: true
             spacing: 4
+            visible: root.removal !== null && root.removal.advancedOpen
 
             Button {
                 objectName: "removal-add-keyframe"
@@ -567,16 +569,19 @@ ColumnLayout {
                 onClicked: root.removal.removeMaskKeyframe(
                                root.removal.maskKeyframes.length - 1)
             }
-            Button {
-                objectName: "removal-exit-button"
-                text: "退出遮罩"
-                onClicked: root.removal.endMask()
-            }
+        }
+
+        Button {
+            objectName: "removal-exit-button"
+            Layout.fillWidth: true
+            text: "退出遮罩"
+            onClicked: root.removal.endMask()
         }
 
         ListView {
             id: keyframeList
             objectName: "removal-keyframe-list"
+            visible: root.removal !== null && root.removal.advancedOpen
             Layout.fillWidth: true
             Layout.preferredHeight: Math.max(24, Math.min(96, contentHeight))
             clip: true
@@ -624,6 +629,7 @@ ColumnLayout {
         Button {
             objectName: "removal-redo-button"
             Layout.fillWidth: true
+            visible: root.removal !== null && root.removal.advancedOpen
             text: "从此关键帧重做"
             enabled: root.ready && root.removal.hasLayer
                      && root.hasKeyframes && !root.removal.generating
@@ -635,6 +641,7 @@ ColumnLayout {
         Button {
             objectName: "removal-delete-layer"
             Layout.fillWidth: true
+            visible: root.removal !== null && root.removal.advancedOpen
             text: "删除消除层"
             enabled: root.removal !== null && root.removal.hasLayer
             onClicked: root.removal.deleteLayer()

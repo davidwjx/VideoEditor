@@ -101,8 +101,18 @@ Dialog {
             wrapMode: Text.WordWrap
         }
 
+        Label {
+            objectName: "h265Reason"
+            visible: Export.codec === "h265" && !Export.h265Available
+            Layout.fillWidth: true
+            text: Export.h265UnavailableReason
+            color: "#e67e22"
+            wrapMode: Text.WordWrap
+        }
+
         RowLayout {
             Layout.fillWidth: true
+            visible: root.advancedOpen
             Label { text: "视频编码" }
             ComboBox {
                 id: codecCombo
@@ -130,18 +140,11 @@ Dialog {
                     function onCodecChanged() { codecCombo.syncFromController() }
                 }
             }
-            Label {
-                objectName: "h265Reason"
-                visible: Export.codec === "h265" && !Export.h265Available
-                text: Export.h265UnavailableReason
-                color: "#e67e22"
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-            }
         }
 
         GridLayout {
             Layout.fillWidth: true
+            visible: root.advancedOpen
             columns: 4
             columnSpacing: 12
             rowSpacing: 6
