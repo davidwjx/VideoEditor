@@ -6,10 +6,10 @@ import VideoEditor 1.0
 
 ApplicationWindow {
     id: root
-    width: 1440
+    width: 1600
     height: 900
-    minimumWidth: 1024
-    minimumHeight: 700
+    minimumWidth: 1280
+    minimumHeight: 720
     visible: true
     title: "VideoEditor " + appVersion
     color: "#111111"
@@ -148,7 +148,9 @@ ApplicationWindow {
 
         ToolButton {
             objectName: "play-button"
-            text: Preview.playing ? "⏸" : "▶"
+            text: Preview.playing ? "⏸ 暂停" : "▶ 播放"
+            highlighted: true
+            Layout.preferredWidth: 92
             onClicked: Preview.togglePlay()
             ToolTip.visible: hovered
             ToolTip.text: Preview.playing ? "暂停 (空格)" : "播放 (空格)"
