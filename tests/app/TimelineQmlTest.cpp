@@ -1308,3 +1308,83 @@ TEST(TimelineQml, InspectorMuteBindingSurvivesSelectionChanges)
               800)
         << "unmute must restore this clip's volume, not the previous clip's";
 }
+
+TEST(TimelineQml, SpeedEntryAcceptsCustomMultiplier)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+    const Track *track = controller.document()->trackById(
+        QStringLiteral("track-v1"));
+    ASSERT_NE(track, nullptr);
+    ASSERT_EQ(track->clips.size(), 1);
+    const QString clipId = track->clips.first().id;
+    controller.timeline()->selectClip(clipId);
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+
+    QQuickItem *speedBox =
+        findItem(window, QStringLiteral("inspector-speed"));
+    ASSERT_NE(speedBox, nullptr);
+    ASSERT_TRUE(speedBox->isEnabled());
+    QQuickItem *speedEditor = qobject_cast<QQuickItem *>(
+        speedBox->property("contentItem").value<QObject *>());
+    ASSERT_NE(speedEditor, nullptr);
+    speedEditor->forceActiveFocus();
+    QTest::qWait(50);
+    QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(window, Qt::Key_2);
+    QTest::keyClick(window, Qt::Key_X);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTest::qWait(120);
+
+    EXPECT_EQ(findClip(controller.document()->project(), clipId)->speedMilli,
+              2000)
+        << "typing 2x and pressing Enter must set the selected clip to 2x";
+}
+
+TEST(TimelineQml, QuestionMarkOpensShortcutHelp)
+{
+    const QString path = fixture(QStringLiteral("h264.mp4"));
+    if (!QFileInfo::exists(path))
+        GTEST_SKIP() << "missing h264.mp4";
+
+    registerPreviewType();
+
+    AppController controller(nullptr, QString(), nullSinkFactory());
+    controller.importUrls({QUrl::fromLocalFile(path)});
+    const QString assetId = controller.document()->project().assets.first().id;
+    ASSERT_FALSE(controller.timeline()
+                     ->addAssetToTimeline(assetId, QStringLiteral("track-v1"), 0)
+                     .isEmpty());
+
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window = showMainWindow(engine, controller, root);
+    ASSERT_NE(window, nullptr);
+
+    if (QQuickItem *focusSink =
+            findItem(window, QStringLiteral("import-button")))
+        focusSink->forceActiveFocus();
+    QTest::qWait(50);
+    QObject *help = window->findChild<QObject *>(
+        QStringLiteral("shortcut-help-dialog"));
+    ASSERT_NE(help, nullptr);
+    EXPECT_FALSE(help->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Question);
+    QTest::qWait(100);
+    EXPECT_TRUE(help->property("opened").toBool())
+        << "the ? key must open the shortcut-help dialog";
+}

@@ -141,7 +141,7 @@ ColumnLayout {
             // Free-form entry keeps non-preset speeds editable instead of
             // displaying 1x for them.
             onAccepted: {
-                const parsed = parseFloat(text)
+                const parsed = parseFloat(editText)
                 if (inspector.hasClip() && isFinite(parsed)
                     && parsed >= 0.25 && parsed <= 4) {
                     Timeline.setClipSpeed(Timeline.selectedClipId,

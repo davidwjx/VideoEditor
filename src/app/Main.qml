@@ -650,6 +650,11 @@ ApplicationWindow {
     // timeline behind the modal never receives Delete/Ctrl+B/arrows.
     // ---------------------------------------------------------------------
     Shortcut {
+        sequence: "?"
+        enabled: root.shortcutsEnabled
+        onActivated: shortcutHelp.open()
+    }
+    Shortcut {
         sequence: "Ctrl+I"
         enabled: root.shortcutsEnabled
         onActivated: fileDialog.open()
@@ -757,6 +762,7 @@ ApplicationWindow {
 
     Dialog {
         id: shortcutHelp
+        objectName: "shortcut-help-dialog"
         title: "快捷键"
         modal: true
         anchors.centerIn: parent
